@@ -5,8 +5,19 @@ import (
 	"kiro2api/config"
 	"kiro2api/logger"
 	"kiro2api/types"
+	"math/rand"
+	"os"
 	"sync"
 	"time"
+)
+
+// SelectionStrategy token选择策略类型
+type SelectionStrategy string
+
+const (
+	StrategySequential SelectionStrategy = "sequential"   // 顺序选择
+	StrategyRandom     SelectionStrategy = "random"       // 随机选择
+	StrategyRoundRobin SelectionStrategy = "round_robin" // 轮询选择
 )
 
 // TokenManager 简化的token管理器
@@ -18,6 +29,7 @@ type TokenManager struct {
 	configOrder  []string        // 配置顺序
 	currentIndex int             // 当前使用的token索引
 	exhausted    map[string]bool // 已耗尽的token记录
+	strategy     SelectionStrategy // token选择策略
 }
 
 // SimpleTokenCache 简化的token缓存（纯数据结构，无锁）
@@ -49,9 +61,13 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 	// 生成配置顺序
 	configOrder := generateConfigOrder(configs)
 
-	logger.Info("TokenManager初始化（顺序选择策略）",
+	// 从环境变量读取策略配置
+	strategy := getSelectionStrategy()
+
+	logger.Info("TokenManager初始化",
 		logger.Int("config_count", len(configs)),
-		logger.Int("config_order_count", len(configOrder)))
+		logger.Int("config_order_count", len(configOrder)),
+		logger.String("selection_strategy", string(strategy)))
 
 	return &TokenManager{
 		cache:        NewSimpleTokenCache(config.TokenCacheTTL),
@@ -59,6 +75,26 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		configOrder:  configOrder,
 		currentIndex: 0,
 		exhausted:    make(map[string]bool),
+		strategy:     strategy,
+	}
+}
+
+// getSelectionStrategy 从环境变量获取选择策略
+func getSelectionStrategy() SelectionStrategy {
+	strategyEnv := os.Getenv("TOKEN_SELECTION_STRATEGY")
+	if strategyEnv == "" {
+		return StrategyRoundRobin // 默认使用轮询策略
+	}
+
+	strategy := SelectionStrategy(strategyEnv)
+	switch strategy {
+	case StrategySequential, StrategyRandom, StrategyRoundRobin:
+		return strategy
+	default:
+		logger.Warn("未知的token选择策略，使用默认策略",
+			logger.String("invalid_strategy", strategyEnv),
+			logger.String("default_strategy", string(StrategyRoundRobin)))
+		return StrategyRoundRobin
 	}
 }
 
@@ -90,12 +126,29 @@ func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 	return bestToken.Token, nil
 }
 
-// selectBestTokenUnlocked 按配置顺序选择下一个可用token
+// selectBestTokenUnlocked 根据策略选择下一个可用token
 // 内部方法：调用者必须持有 tm.mutex
 // 重构说明：从selectBestToken改为Unlocked后缀，明确锁约定
 func (tm *TokenManager) selectBestTokenUnlocked() *CachedToken {
 	// 调用者已持有 tm.mutex，无需额外加锁
 
+	// 根据策略选择token
+	switch tm.strategy {
+	case StrategyRandom:
+		return tm.selectRandomToken()
+	case StrategyRoundRobin:
+		return tm.selectRoundRobinToken()
+	case StrategySequential:
+		return tm.selectSequentialToken()
+	default:
+		logger.Warn("未知策略，回退到轮询",
+			logger.String("strategy", string(tm.strategy)))
+		return tm.selectRoundRobinToken()
+	}
+}
+
+// selectSequentialToken 顺序选择策略（粘性策略）
+func (tm *TokenManager) selectSequentialToken() *CachedToken {
 	// 如果没有配置顺序，降级到按map遍历顺序
 	if len(tm.configOrder) == 0 {
 		for key, cached := range tm.cache.tokens {
@@ -147,6 +200,79 @@ func (tm *TokenManager) selectBestTokenUnlocked() *CachedToken {
 		logger.Int("exhausted_count", len(tm.exhausted)))
 
 	return nil
+}
+
+// selectRoundRobinToken 轮询选择策略
+func (tm *TokenManager) selectRoundRobinToken() *CachedToken {
+	if len(tm.configOrder) == 0 {
+		return nil
+	}
+
+	startIndex := tm.currentIndex
+	for attempts := 0; attempts < len(tm.configOrder); attempts++ {
+		currentKey := tm.configOrder[tm.currentIndex]
+
+		if cached, exists := tm.cache.tokens[currentKey]; exists {
+			if time.Since(cached.CachedAt) <= tm.cache.ttl && cached.IsUsable() {
+				logger.Debug("轮询策略选择token",
+					logger.String("selected_key", currentKey),
+					logger.Int("index", tm.currentIndex),
+					logger.Float64("available_count", cached.Available))
+
+				// 轮询策略：每次使用后移动到下一个
+				tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
+				return cached
+			}
+		}
+
+		// 移动到下一个token
+		tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
+	}
+
+	// 恢复到起始索引
+	tm.currentIndex = startIndex
+
+	logger.Warn("所有token都不可用（轮询策略）",
+		logger.Int("total_count", len(tm.configOrder)))
+
+	return nil
+}
+
+// selectRandomToken 随机选择策略
+func (tm *TokenManager) selectRandomToken() *CachedToken {
+	if len(tm.configOrder) == 0 {
+		return nil
+	}
+
+	// 收集所有可用的token
+	var availableTokens []*CachedToken
+	var availableKeys []string
+
+	for _, key := range tm.configOrder {
+		if cached, exists := tm.cache.tokens[key]; exists {
+			if time.Since(cached.CachedAt) <= tm.cache.ttl && cached.IsUsable() {
+				availableTokens = append(availableTokens, cached)
+				availableKeys = append(availableKeys, key)
+			}
+		}
+	}
+
+	if len(availableTokens) == 0 {
+		logger.Warn("所有token都不可用（随机策略）",
+			logger.Int("total_count", len(tm.configOrder)))
+		return nil
+	}
+
+	// 随机选择一个
+	randomIndex := rand.Intn(len(availableTokens))
+	selected := availableTokens[randomIndex]
+
+	logger.Debug("随机策略选择token",
+		logger.String("selected_key", availableKeys[randomIndex]),
+		logger.Int("available_count_in_pool", len(availableTokens)),
+		logger.Float64("available_count", selected.Available))
+
+	return selected
 }
 
 // refreshCacheUnlocked 刷新token缓存
