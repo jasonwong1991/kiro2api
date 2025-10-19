@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
-	"time"
 
 	"kiro2api/auth"
 	"kiro2api/config"
@@ -82,9 +80,9 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 			RequestType: "Anthropic",
 		}
 
-		tokenInfo, body, err := reqCtx.GetTokenAndBody()
+		tokenWithUsage, body, err := reqCtx.GetTokenWithUsageAndBody()
 		if err != nil {
-			return // 错误已在GetTokenAndBody中处理
+			return // 错误已在GetTokenWithUsageAndBody中处理
 		}
 
 		// 先解析为通用map以便处理工具格式
@@ -139,25 +137,6 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 			return
 		}
 
-		// logger.Debug("请求解析成功",
-		// 	logger.String("model", anthropicReq.Model),
-		// 	logger.Bool("stream", anthropicReq.Stream),
-		// 	logger.Int("max_tokens", anthropicReq.MaxTokens),
-		// 	logger.Int("messages_count", len(anthropicReq.Messages)),
-		// 	logger.Int("tools_count", len(anthropicReq.Tools)))
-
-		// 详细记录工具信息以调试
-		// for i, tool := range anthropicReq.Tools {
-		// 	descPreview := tool.Description
-		// 	if len(descPreview) > 100 {
-		// 		descPreview = descPreview[:100] + "..."
-		// 	}
-		// 	logger.Debug("工具详情",
-		// 		logger.Int("index", i),
-		// 		logger.String("name", tool.Name),
-		// 		logger.String("description", descPreview))
-		// }
-
 		// 验证请求的有效性
 		if len(anthropicReq.Messages) == 0 {
 			logger.Error("请求中没有消息")
@@ -186,11 +165,11 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 		}
 
 		if anthropicReq.Stream {
-			handleStreamRequest(c, anthropicReq, tokenInfo)
+			handleStreamRequest(c, anthropicReq, tokenWithUsage)
 			return
 		}
 
-		handleNonStreamRequest(c, anthropicReq, tokenInfo)
+		handleNonStreamRequest(c, anthropicReq, tokenWithUsage.TokenInfo)
 	})
 
 	// Token计数端点
@@ -258,39 +237,18 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 	logger.Info("  POST /v1/chat/completions       - OpenAI API代理")
 	logger.Info("按Ctrl+C停止服务器")
 
-	// 获取服务器超时配置
-	readTimeout := getServerTimeoutFromEnv("SERVER_READ_TIMEOUT_MINUTES", 16) * time.Minute
-	writeTimeout := getServerTimeoutFromEnv("SERVER_WRITE_TIMEOUT_MINUTES", 16) * time.Minute
-
 	// 创建自定义HTTP服务器以支持长时间请求
 	server := &http.Server{
-		Addr:           ":" + port,
-		Handler:        r,
-		ReadTimeout:    readTimeout,              // 读取超时
-		WriteTimeout:   writeTimeout,             // 写入超时
-		IdleTimeout:    config.ServerIdleTimeout, // 空闲连接超时
-		MaxHeaderBytes: config.MaxHeaderBytes,    // 最大请求头字节数
+		Addr:    ":" + port,
+		Handler: r,
 	}
 
-	logger.Info("启动HTTP服务器",
-		logger.String("port", port),
-		logger.Duration("read_timeout", readTimeout),
-		logger.Duration("write_timeout", writeTimeout))
+	logger.Info("启动HTTP服务器", logger.String("port", port))
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("启动服务器失败", logger.Err(err), logger.String("port", port))
 		os.Exit(1)
 	}
-}
-
-// getServerTimeoutFromEnv 从环境变量获取服务器超时配置（分钟）
-func getServerTimeoutFromEnv(envVar string, defaultMinutes int) time.Duration {
-	if env := os.Getenv(envVar); env != "" {
-		if minutes, err := strconv.Atoi(env); err == nil && minutes > 0 {
-			return time.Duration(minutes)
-		}
-	}
-	return time.Duration(defaultMinutes)
 }
 
 // corsMiddleware CORS中间件

@@ -329,3 +329,106 @@ func BenchmarkTokenEstimator(b *testing.B) {
 func stringPtr(s string) *string {
 	return &s
 }
+
+// TestEstimateToolUseTokens 测试工具调用token精确计算
+func TestEstimateToolUseTokens(t *testing.T) {
+	estimator := NewTokenEstimator()
+
+	tests := []struct {
+		name      string
+		toolName  string
+		toolInput map[string]any
+		expected  int
+		tolerance float64
+	}{
+		{
+			name:     "简单工具调用",
+			toolName: "get_weather",
+			toolInput: map[string]any{
+				"location": "San Francisco",
+			},
+			expected:  28, // 结构(13) + 名称(3) + 参数(12)
+			tolerance: 0.3,
+		},
+		{
+			name:     "复杂工具调用",
+			toolName: "search_database",
+			toolInput: map[string]any{
+				"query":  "SELECT * FROM users WHERE age > 18",
+				"limit":  100,
+				"offset": 0,
+				"filters": map[string]any{
+					"status":     "active",
+					"created_at": "2024-01-01",
+				},
+			},
+			expected:  60, // 结构(13) + 名称(4) + 参数(43)
+			tolerance: 0.3,
+		},
+		{
+			name:      "空参数工具",
+			toolName:  "get_time",
+			toolInput: map[string]any{},
+			expected:  17, // 结构(13) + 名称(3) + 空参数(1)
+			tolerance: 0.3,
+		},
+		{
+			name:      "nil参数工具",
+			toolName:  "ping",
+			toolInput: nil,
+			expected:  17, // 结构(13) + 名称(2) + 空参数(1)
+			tolerance: 0.3,
+		},
+		{
+			name:     "MCP风格工具名",
+			toolName: "mcp__Playwright__browser_navigate",
+			toolInput: map[string]any{
+				"url": "https://example.com",
+			},
+			expected:  40, // 结构(13) + 长名称(15) + 参数(12)
+			tolerance: 0.3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := estimator.EstimateToolUseTokens(tt.toolName, tt.toolInput)
+
+			// 允许指定的误差范围
+			tolerance := float64(tt.expected) * tt.tolerance
+			diff := math.Abs(float64(result - tt.expected))
+
+			if diff > tolerance {
+				t.Errorf("%s: 估算值=%d, 预期值=%d, 误差=%.1f%%",
+					tt.name, result, tt.expected, diff/float64(tt.expected)*100)
+			} else {
+				t.Logf("✅ %s: 估算值=%d, 预期值=%d, 误差=%.1f%%",
+					tt.name, result, tt.expected, diff/float64(tt.expected)*100)
+			}
+		})
+	}
+}
+
+// TestEstimateToolUseTokens_Components 测试工具调用token的组成部分
+func TestEstimateToolUseTokens_Components(t *testing.T) {
+	estimator := NewTokenEstimator()
+
+	// 测试简单工具调用的token组成
+	toolName := "get_weather"
+	toolInput := map[string]any{
+		"location": "San Francisco",
+	}
+
+	totalTokens := estimator.EstimateToolUseTokens(toolName, toolInput)
+
+	// 验证总token数在合理范围内
+	// 结构字段(13) + 工具名称(3) + 参数内容(~12) ≈ 28 tokens
+	if totalTokens < 20 || totalTokens > 40 {
+		t.Errorf("工具调用token数不在合理范围: %d (期望 20-40)", totalTokens)
+	}
+
+	t.Logf("✅ 工具调用总tokens: %d", totalTokens)
+	t.Logf("   - 结构字段开销: ~13 tokens (type, id, name, input关键字)")
+	t.Logf("   - 工具名称: ~%d tokens", estimator.estimateToolName(toolName))
+	t.Logf("   - 参数内容: ~%d tokens", totalTokens-13-estimator.estimateToolName(toolName))
+}

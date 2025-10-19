@@ -27,11 +27,6 @@ func (sm *SessionManager) SetSessionID(sessionID string) {
 	sm.sessionID = sessionID
 }
 
-// GetSessionID 获取会话ID
-func (sm *SessionManager) GetSessionID() string {
-	return sm.sessionID
-}
-
 // StartSession 开始会话
 func (sm *SessionManager) StartSession() []SSEEvent {
 	sm.isActive = true
@@ -88,12 +83,4 @@ func (sm *SessionManager) Reset() {
 	sm.startTime = time.Now()
 	sm.endTime = nil
 	sm.isActive = false
-}
-
-// GetDuration 获取会话持续时间
-func (sm *SessionManager) GetDuration() time.Duration {
-	if sm.endTime != nil {
-		return sm.endTime.Sub(sm.startTime)
-	}
-	return time.Since(sm.startTime)
 }

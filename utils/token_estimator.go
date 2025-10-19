@@ -287,6 +287,61 @@ func (e *TokenEstimator) EstimateTextTokens(text string) int {
 	return tokens
 }
 
+// EstimateToolUseTokens 精确估算工具调用的token数量
+// 用于非流式响应，基于实际的工具调用信息进行精确计算
+//
+// 参数:
+//   - toolName: 工具名称
+//   - toolInput: 工具参数（map[string]any）
+//
+// 返回:
+//   - 估算的token数量
+//
+// Token组成:
+//   - 结构字段: "type", "id", "name", "input" 关键字
+//   - 工具名称: 使用estimateToolName精确计算
+//   - 参数内容: JSON序列化后的token数
+//
+// 设计原则:
+//   - 精确计算: 基于实际工具调用信息，而非简单系数
+//   - 一致性: 与EstimateTokens中的工具定义计算保持一致的方法
+//   - 适用场景: 非流式响应（handlers.go），有完整工具信息
+func (e *TokenEstimator) EstimateToolUseTokens(toolName string, toolInput map[string]any) int {
+	totalTokens := 0
+
+	// 1. JSON结构字段开销
+	// "type": "tool_use" ≈ 3 tokens
+	totalTokens += 3
+
+	// "id": "toolu_01A09q90qw90lq917835lq9" ≈ 8 tokens
+	// (固定格式的UUID，约8个token)
+	totalTokens += 8
+
+	// "name" 关键字 ≈ 1 token
+	totalTokens += 1
+
+	// 2. 工具名称（使用与输入侧相同的精确方法）
+	nameTokens := e.estimateToolName(toolName)
+	totalTokens += nameTokens
+
+	// 3. "input" 关键字 ≈ 1 token
+	totalTokens += 1
+
+	// 4. 参数内容（JSON序列化）
+	if len(toolInput) > 0 {
+		if jsonBytes, err := SafeMarshal(toolInput); err == nil {
+			// 使用标准的4字符/token比率
+			inputTokens := len(jsonBytes) / config.TokenEstimationRatio
+			totalTokens += inputTokens
+		}
+	} else {
+		// 空参数对象 {} ≈ 1 token
+		totalTokens += 1
+	}
+
+	return totalTokens
+}
+
 // estimateContentBlock 估算单个内容块的token数量（通用map格式）
 // 支持的内容类型：
 // - text: 文本块
@@ -318,20 +373,26 @@ func (e *TokenEstimator) estimateContentBlock(block any) int {
 		return 500
 
 	case "tool_use":
-		// 工具调用结果
-		if input, ok := blockMap["input"]; ok {
-			if jsonBytes, err := SafeMarshal(input); err == nil {
-				return len(jsonBytes) / 4
-			}
-		}
-		return 50
+		// 工具调用（在历史消息中的 assistant 消息可能包含）
+		toolName, _ := blockMap["name"].(string)
+		toolInput, _ := blockMap["input"].(map[string]any)
+		return e.EstimateToolUseTokens(toolName, toolInput)
 
 	case "tool_result":
 		// 工具执行结果
-		if content, ok := blockMap["content"].(string); ok {
-			return e.EstimateTextTokens(content)
+		content := blockMap["content"]
+		switch c := content.(type) {
+		case string:
+			return e.EstimateTextTokens(c)
+		case []any:
+			total := 0
+			for _, item := range c {
+				total += e.estimateContentBlock(item)
+			}
+			return total
+		default:
+			return 50
 		}
-		return 50
 
 	default:
 		// 未知类型：JSON长度估算
@@ -356,13 +417,18 @@ func (e *TokenEstimator) estimateTypedContentBlock(block types.ContentBlock) int
 		return 1500
 
 	case "tool_use":
-		// 工具调用
+		// 工具调用（在历史消息中的 assistant 消息可能包含）
+		toolName := ""
+		if block.Name != nil {
+			toolName = *block.Name
+		}
+		toolInput := make(map[string]any)
 		if block.Input != nil {
-			if jsonBytes, err := SafeMarshal(*block.Input); err == nil {
-				return len(jsonBytes) / 4
+			if input, ok := (*block.Input).(map[string]any); ok {
+				toolInput = input
 			}
 		}
-		return 50
+		return e.EstimateToolUseTokens(toolName, toolInput)
 
 	case "tool_result":
 		// 工具执行结果

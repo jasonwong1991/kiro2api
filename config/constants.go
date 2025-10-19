@@ -21,9 +21,6 @@ const (
 
 	// RetryDelay 重试延迟
 	RetryDelay = 100 * time.Millisecond
-
-	// LogPreviewMaxLength 日志预览最大长度
-	LogPreviewMaxLength = 100
 )
 
 // Token估算常量
@@ -38,12 +35,6 @@ const (
 	LongTextThreshold = 1000
 )
 
-// HTTP客户端常量
-const (
-	// ResponseHeaderTimeout 响应头超时时间
-	ResponseHeaderTimeout = 5 * time.Minute
-)
-
 // EventStream解析器常量
 const (
 	// EventStreamMinMessageSize AWS EventStream最小消息长度（字节）
@@ -55,12 +46,7 @@ const (
 
 // Token计算常量
 const (
-	// ToolCallTokenOverhead 工具调用的token开销系数
-	ToolCallTokenOverhead = 1.2
-
 	// TokenEstimationRatio 字符到token的估算比例
+	// 用于工具调用参数的JSON内容token估算
 	TokenEstimationRatio = 4
-
-	// MinOutputTokens 最小输出token数
-	MinOutputTokens = 1
 )

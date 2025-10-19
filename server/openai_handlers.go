@@ -32,7 +32,7 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 	}
 
 	// 使用新的符合AWS规范的解析器
-	compliantParser := parser.NewCompliantEventStreamParser(false) // 宽松模式用于非流式处理
+	compliantParser := parser.NewCompliantEventStreamParser()
 	result, err := compliantParser.ParseResponse(body)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "响应解析失败"})
@@ -137,7 +137,7 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 	sender.SendEvent(c, initialEvent)
 
 	// 创建符合AWS规范的流式解析器
-	compliantParser := parser.NewCompliantEventStreamParser(false) // 默认非严格模式
+	compliantParser := parser.NewCompliantEventStreamParser()
 
 	// OpenAI 工具调用增量状态
 	toolIndexByToolUseId := make(map[string]int)  // tool_use_id -> tool_calls 数组索引

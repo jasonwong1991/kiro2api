@@ -22,7 +22,6 @@ func PathBasedAuthMiddleware(authToken string, protectedPrefixes []string) gin.H
 			return
 		}
 
-		// logger.Debug("需要认证", logger.String("path", path))
 		if !validateAPIKey(c, authToken) {
 			c.Abort()
 			return

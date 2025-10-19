@@ -2,7 +2,6 @@ package types
 
 import (
 	"fmt"
-	"io"
 )
 
 // Usage 表示API使用统计的通用结构
@@ -13,21 +12,6 @@ type Usage struct {
 	// Anthropic格式的兼容字段
 	InputTokens  int `json:"input_tokens,omitempty"`
 	OutputTokens int `json:"output_tokens,omitempty"`
-}
-
-// HTTPRequest HTTP请求封装
-type HTTPRequest struct {
-	Method  string
-	URL     string
-	Headers map[string]string
-	Body    io.Reader
-}
-
-// HTTPResponse HTTP响应封装
-type HTTPResponse struct {
-	StatusCode int
-	Headers    map[string][]string
-	Body       io.ReadCloser
 }
 
 // ToAnthropicFormat 转换为Anthropic格式

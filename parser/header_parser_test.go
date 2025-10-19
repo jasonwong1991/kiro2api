@@ -227,41 +227,6 @@ func TestGetContentTypeFromHeaders(t *testing.T) {
 	}
 }
 
-func TestHeaderParser_ValidateHeaders(t *testing.T) {
-	parser := NewHeaderParser()
-
-	tests := []struct {
-		name        string
-		headers     map[string]HeaderValue
-		expectError bool
-	}{
-		{
-			name: "有效的头部",
-			headers: map[string]HeaderValue{
-				":message-type": {Type: ValueType_STRING, Value: "event"},
-				":event-type":   {Type: ValueType_STRING, Value: "messageStart"},
-			},
-			expectError: false,
-		},
-		{
-			name:        "空头部",
-			headers:     map[string]HeaderValue{},
-			expectError: true, // 空头部可能返回错误
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := parser.ValidateHeaders(tt.headers)
-			if tt.expectError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
 // 辅助函数：构造简单的字符串头部
 func buildSimpleStringHeader(name, value string) []byte {
 	data := []byte{}

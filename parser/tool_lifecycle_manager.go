@@ -113,7 +113,7 @@ func (tlm *ToolLifecycleManager) HandleToolCallRequest(request ToolCallRequest) 
 					"type":  "tool_use",
 					"id":    toolCall.ID,
 					"name":  toolCall.Function.Name,
-					"input": arguments, // 使用解析后的参数而不是空对象
+					"input": map[string]any{}, // 符合Anthropic流式规范：content_block_start必须使用空对象
 				},
 			},
 		})
@@ -390,87 +390,6 @@ func (tlm *ToolLifecycleManager) GenerateToolSummary() map[string]any {
 		"total_execution_time": totalExecutionTime,
 		"success_rate":         float64(completedCount-errorCount) / float64(completedCount+activeCount),
 	}
-}
-
-// ParseToolCallFromLegacyEvent 从旧格式事件中解析工具调用
-func (tlm *ToolLifecycleManager) ParseToolCallFromLegacyEvent(evt assistantResponseEvent) []SSEEvent {
-	// 对于工具调用聚合完成的情况，需要先注册工具调用，再处理结果
-	if evt.ToolUseId != "" && evt.Name != "" && evt.Stop {
-		// 检查工具调用是否已注册
-		if _, exists := tlm.activeTools[evt.ToolUseId]; !exists {
-			logger.Debug("工具调用聚合完成，先注册工具调用",
-				logger.String("toolUseId", evt.ToolUseId),
-				logger.String("name", evt.Name))
-
-			// 先注册工具调用
-			toolCall := ToolCall{
-				ID:   evt.ToolUseId,
-				Type: "function",
-				Function: ToolCallFunction{
-					Name:      evt.Name,
-					Arguments: "{}",
-				},
-			}
-
-			if evt.Input != nil && *evt.Input != "" {
-				toolCall.Function.Arguments = *evt.Input
-			}
-
-			request := ToolCallRequest{
-				ToolCalls: []ToolCall{toolCall},
-			}
-
-			// 注册工具调用请求
-			requestEvents := tlm.HandleToolCallRequest(request)
-
-			// 然后处理工具调用结果
-			result := ToolCallResult{
-				ToolCallID: evt.ToolUseId,
-				Result:     evt.Content,
-			}
-
-			resultEvents := tlm.HandleToolCallResult(result)
-
-			// 合并事件
-			allEvents := make([]SSEEvent, 0, len(requestEvents)+len(resultEvents))
-			allEvents = append(allEvents, requestEvents...)
-			allEvents = append(allEvents, resultEvents...)
-
-			return allEvents
-		} else {
-			// 工具调用已注册，直接处理结果
-			result := ToolCallResult{
-				ToolCallID: evt.ToolUseId,
-				Result:     evt.Content,
-			}
-
-			return tlm.HandleToolCallResult(result)
-		}
-	}
-
-	// 处理工具使用：开始与输入增量（原有逻辑保持不变）
-	if evt.ToolUseId != "" && evt.Name != "" && !evt.Stop {
-		toolCall := ToolCall{
-			ID:   evt.ToolUseId,
-			Type: "function",
-			Function: ToolCallFunction{
-				Name:      evt.Name,
-				Arguments: "{}",
-			},
-		}
-
-		if evt.Input != nil && *evt.Input != "" {
-			toolCall.Function.Arguments = *evt.Input
-		}
-
-		request := ToolCallRequest{
-			ToolCalls: []ToolCall{toolCall},
-		}
-
-		return tlm.HandleToolCallRequest(request)
-	}
-
-	return nil
 }
 
 // UpdateToolArguments 更新工具调用的参数

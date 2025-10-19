@@ -7,21 +7,15 @@ import (
 
 // StopReasonManager 管理符合Claude规范的stop_reason决策
 type StopReasonManager struct {
-	maxTokens          int
-	requestedMaxTokens int
 	hasActiveToolCalls bool
 	hasCompletedTools  bool
-	actualTokensUsed   int
 }
 
 // NewStopReasonManager 创建stop_reason管理器
 func NewStopReasonManager(anthropicReq types.AnthropicRequest) *StopReasonManager {
 	return &StopReasonManager{
-		maxTokens:          anthropicReq.MaxTokens,
-		requestedMaxTokens: anthropicReq.MaxTokens,
 		hasActiveToolCalls: false,
 		hasCompletedTools:  false,
-		actualTokensUsed:   0,
 	}
 }
 
@@ -35,26 +29,10 @@ func (srm *StopReasonManager) UpdateToolCallStatus(hasActiveCalls, hasCompleted 
 		logger.Bool("has_completed_tools", hasCompleted))
 }
 
-// SetActualTokensUsed 设置实际使用的token数量
-func (srm *StopReasonManager) SetActualTokensUsed(tokens int) {
-	srm.actualTokensUsed = tokens
-}
-
 // DetermineStopReason 根据Claude官方规范确定stop_reason
 func (srm *StopReasonManager) DetermineStopReason() string {
-	// logger.Debug("开始确定stop_reason",
-	// 	logger.Int("max_tokens", srm.maxTokens),
-	// 	logger.Int("actual_tokens", srm.actualTokensUsed),
-	// 	logger.Bool("has_active_tools", srm.hasActiveToolCalls),
-	// 	logger.Bool("has_completed_tools", srm.hasCompletedTools))
 
-	// 规则1: 检查是否达到token限制 - 根据Claude规范优先级最高
-	if srm.maxTokens > 1 && srm.actualTokensUsed >= srm.maxTokens {
-		logger.Debug("确定stop_reason: max_tokens - 达到token限制")
-		return "max_tokens"
-	}
-
-	// 规则2: 检查是否有工具调用（活跃或已完成）
+	// 检查是否有工具调用（活跃或已完成）
 	// *** 关键修复：根据Claude规范，只要消息包含tool_use块，stop_reason就应该是tool_use ***
 	// 根据 Anthropic API 文档 (https://docs.anthropic.com/en/api/messages-streaming):
 	//   stop_reason: "tool_use" - The model wants to use a tool
@@ -68,14 +46,10 @@ func (srm *StopReasonManager) DetermineStopReason() string {
 	//
 	// 修复: 检查 hasActiveToolCalls OR hasCompletedTools
 	if srm.hasActiveToolCalls || srm.hasCompletedTools {
-		logger.Debug("确定stop_reason: tool_use - 消息包含工具调用",
-			logger.Bool("has_active", srm.hasActiveToolCalls),
-			logger.Bool("has_completed", srm.hasCompletedTools))
 		return "tool_use"
 	}
 
 	// 规则3: 默认情况 - 自然完成响应
-	logger.Debug("确定stop_reason: end_turn - 自然完成响应")
 	return "end_turn"
 }
 

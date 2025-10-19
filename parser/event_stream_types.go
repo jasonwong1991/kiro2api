@@ -281,24 +281,6 @@ func NewFullAssistantResponseEventFromDict(data map[string]any) (*FullAssistantR
 	return full, nil
 }
 
-// ToLegacyEvent 转换为legacy格式（用于向后兼容）
-func (f *FullAssistantResponseEvent) ToLegacyEvent() assistantResponseEvent {
-	legacy := assistantResponseEvent{
-		Content: f.Content,
-		Stop:    f.MessageStatus == types.MessageStatusCompleted,
-	}
-
-	// 如果有工具相关信息，可以在这里映射
-	// 但legacy格式字段有限，所以只能映射基本信息
-
-	return legacy
-}
-
-// Validate 验证完整事件结构
-func (f *FullAssistantResponseEvent) Validate() error {
-	return f.AssistantResponseEvent.Validate()
-}
-
 // toolUseEvent 工具使用事件（legacy格式）
 type toolUseEvent struct {
 	Name      string `json:"name"`

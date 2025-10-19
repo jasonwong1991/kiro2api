@@ -50,13 +50,8 @@ func extractRelevantHeaders(c *gin.Context) map[string]string {
 }
 
 // handleStreamRequest 处理流式请求
-func handleStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, token types.TokenInfo) {
-	// 转换为TokenWithUsage（简化版本）
-	tokenWithUsage := &types.TokenWithUsage{
-		TokenInfo:      token,
-		AvailableCount: 100, // 默认可用次数
-		LastUsageCheck: time.Now(),
-	}
+// handleStreamRequest 处理流式请求
+func handleStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, tokenWithUsage *types.TokenWithUsage) {
 	sender := &AnthropicStreamSender{}
 	handleGenericStreamRequest(c, anthropicReq, tokenWithUsage, sender, createAnthropicStreamEvents)
 }
@@ -214,8 +209,8 @@ func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest,
 	}
 
 	// 使用新的符合AWS规范的解析器，但在非流式模式下增加超时保护
-	compliantParser := parser.NewCompliantEventStreamParser(false) // 宽松模式
-	compliantParser.SetMaxErrors(5)                                // 限制最大错误次数以防死循环
+	compliantParser := parser.NewCompliantEventStreamParser()
+	compliantParser.SetMaxErrors(config.ParserMaxErrors) // 限制最大错误次数以防死循环
 
 	// 为非流式解析添加超时保护
 	result, err := func() (*parser.ParseResult, error) {
@@ -290,12 +285,12 @@ func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest,
 	// 基于实际工具数量判断是否包含工具调用
 	sawToolUse := len(allTools) > 0
 
-	logger.Debug("非流式响应处理完成",
-		addReqFields(c,
-			logger.String("text_content", textAgg[:utils.IntMin(config.LogPreviewMaxLength, len(textAgg))]),
-			logger.Int("tool_calls_count", len(allTools)),
-			logger.Bool("saw_tool_use", sawToolUse),
-		)...)
+	// logger.Debug("非流式响应处理完成",
+	// 	addReqFields(c,
+	// 		logger.String("text_content", textAgg[:utils.IntMin(config.LogPreviewMaxLength, len(textAgg))]),
+	// 		logger.Int("tool_calls_count", len(allTools)),
+	// 		logger.Bool("saw_tool_use", sawToolUse),
+	// 	)...)
 
 	// 添加文本内容
 	if textAgg != "" {
@@ -307,16 +302,16 @@ func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest,
 
 	// 添加工具调用
 	// 工具已经在前面从toolManager获取到allTools中
-	logger.Debug("从工具生命周期管理器获取工具调用",
-		logger.Int("total_tools", len(allTools)),
-		logger.Int("parse_result_tools", len(result.GetToolCalls())))
+	// logger.Debug("从工具生命周期管理器获取工具调用",
+	// 	logger.Int("total_tools", len(allTools)),
+	// 	logger.Int("parse_result_tools", len(result.GetToolCalls())))
 
 	for _, tool := range allTools {
-		logger.Debug("添加工具调用到响应",
-			logger.String("tool_id", tool.ID),
-			logger.String("tool_name", tool.Name),
-			logger.String("tool_status", tool.Status.String()),
-			logger.Any("tool_arguments", tool.Arguments))
+		// logger.Debug("添加工具调用到响应",
+		// 	logger.String("tool_id", tool.ID),
+		// 	logger.String("tool_name", tool.Name),
+		// 	logger.String("tool_status", tool.Status.String()),
+		// 	logger.Any("tool_arguments", tool.Arguments))
 
 		// 创建标准的tool_use块，确保包含完整的状态信息
 		toolUseBlock := map[string]any{
@@ -332,45 +327,65 @@ func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest,
 		}
 
 		// 添加详细的调试日志，验证tool_use块格式
-		if toolUseBlockJSON, err := utils.SafeMarshal(toolUseBlock); err == nil {
-			logger.Debug("发送给Claude CLI的tool_use块详细结构",
-				logger.String("tool_id", tool.ID),
-				logger.String("tool_name", tool.Name),
-				logger.String("tool_use_json", string(toolUseBlockJSON)),
-				logger.String("input_type", fmt.Sprintf("%T", tool.Arguments)),
-				logger.Any("arguments_value", tool.Arguments))
-		}
+		// if toolUseBlockJSON, err := utils.SafeMarshal(toolUseBlock); err == nil {
+		// 	logger.Debug("发送给Claude CLI的tool_use块详细结构",
+		// 		logger.String("tool_id", tool.ID),
+		// 		logger.String("tool_name", tool.Name),
+		// 		logger.String("tool_use_json", string(toolUseBlockJSON)),
+		// 		logger.String("input_type", fmt.Sprintf("%T", tool.Arguments)),
+		// 		logger.Any("arguments_value", tool.Arguments))
+		// }
 
 		contexts = append(contexts, toolUseBlock)
 
 		// 记录工具调用完成状态，帮助客户端识别工具调用已完成
-		logger.Debug("工具调用已添加到响应",
-			logger.String("tool_id", tool.ID),
-			logger.String("tool_name", tool.Name))
+		// logger.Debug("工具调用已添加到响应",
+		// 	logger.String("tool_id", tool.ID),
+		// 	logger.String("tool_name", tool.Name))
 	}
 
 	// 使用新的stop_reason管理器，确保符合Claude官方规范
 	stopReasonManager := NewStopReasonManager(anthropicReq)
 
-	// 计算输出tokens（使用TokenEstimator统一算法）
-	baseTokens := estimator.EstimateTextTokens(textAgg)
-	outputTokens := baseTokens
-	if sawToolUse {
-		outputTokens = int(float64(baseTokens) * 1.2) // 增加20%结构化开销
+	// *** 关键修复：基于实际发送给客户端的内容计算 token ***
+	// 设计原则：token 计费应该基于实际下发的内容，而不是上游原始数据
+	// 原因：
+	// 1. 格式转换：CodeWhisperer → Claude 格式可能有差异
+	// 2. 计费准确性：客户端消费的是 contexts，而不是 textAgg/allTools
+	// 3. 一致性：确保 token 计算与实际响应内容完全一致
+	outputTokens := 0
+	for _, contentBlock := range contexts {
+		blockType, _ := contentBlock["type"].(string)
+		
+		switch blockType {
+		case "text":
+			// 文本块：基于实际发送的文本内容
+			if text, ok := contentBlock["text"].(string); ok {
+				outputTokens += estimator.EstimateTextTokens(text)
+			}
+		
+		case "tool_use":
+			// 工具调用块：基于实际发送的工具名称和参数
+			// 这里使用与 SSE 响应相同的 token 计算逻辑
+			toolName, _ := contentBlock["name"].(string)
+			toolInput, _ := contentBlock["input"].(map[string]any)
+			outputTokens += estimator.EstimateToolUseTokens(toolName, toolInput)
+		}
 	}
-	if outputTokens < 1 && len(textAgg) > 0 {
+
+	// 最小 token 保护：确保非空响应至少有 1 token
+	if outputTokens < 1 && len(contexts) > 0 {
 		outputTokens = 1
 	}
 
-	stopReasonManager.SetActualTokensUsed(outputTokens)
 	stopReasonManager.UpdateToolCallStatus(sawToolUse, sawToolUse)
 	stopReason := stopReasonManager.DetermineStopReason()
 
-	logger.Debug("非流式响应stop_reason决策",
-		logger.String("stop_reason", stopReason),
-		logger.String("description", GetStopReasonDescription(stopReason)),
-		logger.Bool("saw_tool_use", sawToolUse),
-		logger.Int("output_tokens", outputTokens))
+	// logger.Debug("非流式响应stop_reason决策",
+	// 	logger.String("stop_reason", stopReason),
+	// 	logger.String("description", GetStopReasonDescription(stopReason)),
+	// 	logger.Bool("saw_tool_use", sawToolUse),
+	// 	logger.Int("output_tokens", outputTokens))
 
 	anthropicResp := map[string]any{
 		"content":       contexts,
@@ -385,13 +400,14 @@ func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest,
 		},
 	}
 
-	logger.Debug("非流式响应最终数据",
-		logger.String("stop_reason", stopReason),
-		logger.Int("content_blocks", len(contexts)))
+	// logger.Debug("非流式响应最终数据",
+	// 	logger.String("stop_reason", stopReason),
+	// 	logger.Int("content_blocks", len(contexts)))
 
 	logger.Debug("下发非流式响应",
 		addReqFields(c,
 			logger.String("direction", "downstream_send"),
+			logger.Any("contexts", contexts),
 			logger.Bool("saw_tool_use", sawToolUse),
 			logger.Int("content_count", len(contexts)),
 		)...)
@@ -408,6 +424,67 @@ func createTokenPreview(token string) string {
 	// 3个*号 + 后10位
 	suffix := token[len(token)-10:]
 	return "***" + suffix
+}
+
+// maskEmail 对邮箱进行脱敏处理
+// 规则：
+// - 用户名部分：保留前2位和后2位，中间用星号替换
+// - 域名部分：保留顶级域名和二级域名后缀，其他用星号替换
+// 示例：
+//   - caidaoli@gmail.com -> ca****li@*****.com
+//   - caidaolihz888@sun.edu.pl -> ca*********88@***.**.pl
+func maskEmail(email string) string {
+	if email == "" {
+		return ""
+	}
+
+	// 分割邮箱为用户名和域名
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		// 不是有效的邮箱格式，返回原值
+		return email
+	}
+
+	username := parts[0]
+	domain := parts[1]
+
+	// 处理用户名部分：保留前2位和后2位
+	var maskedUsername string
+	if len(username) <= 4 {
+		// 用户名太短，全部用星号替换
+		maskedUsername = strings.Repeat("*", len(username))
+	} else {
+		prefix := username[:2]
+		suffix := username[len(username)-2:]
+		middleLen := len(username) - 4
+		maskedUsername = prefix + strings.Repeat("*", middleLen) + suffix
+	}
+
+	// 处理域名部分：保留顶级域名和二级域名后缀
+	domainParts := strings.Split(domain, ".")
+	var maskedDomain string
+
+	if len(domainParts) == 1 {
+		// 只有一级域名（不常见），全部用星号替换
+		maskedDomain = strings.Repeat("*", len(domain))
+	} else if len(domainParts) == 2 {
+		// 二级域名（如 gmail.com）
+		// 主域名用星号替换，保留顶级域名
+		maskedDomain = strings.Repeat("*", len(domainParts[0])) + "." + domainParts[1]
+	} else {
+		// 三级或更多级域名（如 sun.edu.pl）
+		// 保留后两级域名，其他用星号替换
+		maskedParts := make([]string, len(domainParts))
+		for i := 0; i < len(domainParts)-2; i++ {
+			maskedParts[i] = strings.Repeat("*", len(domainParts[i]))
+		}
+		// 保留最后两级
+		maskedParts[len(domainParts)-2] = domainParts[len(domainParts)-2]
+		maskedParts[len(domainParts)-1] = domainParts[len(domainParts)-1]
+		maskedDomain = strings.Join(maskedParts, ".")
+	}
+
+	return maskedUsername + "@" + maskedDomain
 }
 
 // handleTokenPoolAPI 处理Token池API请求 - 恢复多token显示
@@ -494,7 +571,7 @@ func handleTokenPoolAPI(c *gin.Context) {
 		// 构建token数据
 		tokenData := map[string]any{
 			"index":           i,
-			"user_email":      userEmail,
+			"user_email":      maskEmail(userEmail), // 对邮箱进行脱敏处理
 			"token_preview":   createTokenPreview(tokenInfo.AccessToken),
 			"auth_type":       strings.ToLower(authConfig.AuthType),
 			"remaining_usage": available,

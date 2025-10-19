@@ -51,13 +51,6 @@ func (ssm *SSEStateManager) SendEvent(c *gin.Context, sender StreamEventSender, 
 		return errors.New("无效的事件类型")
 	}
 
-	// 记录事件发送
-	// logger.Debug("发送SSE事件",
-	// 	logger.String("event", eventType),
-	// 	logger.Bool("message_started", ssm.messageStarted),
-	// 	logger.Bool("message_ended", ssm.messageEnded),
-	// 	logger.Int("active_blocks", len(ssm.activeBlocks)))
-
 	// 状态验证和处理
 	switch eventType {
 	case "message_start":
@@ -198,10 +191,10 @@ func (ssm *SSEStateManager) handleContentBlockStart(c *gin.Context, sender Strea
 		ssm.nextBlockIndex = index + 1
 	}
 
-	logger.Debug("内容块已启动",
-		logger.Int("index", index),
-		logger.String("type", blockType),
-		logger.String("tool_use_id", toolUseID))
+	// logger.Debug("内容块已启动",
+	// 	logger.Int("index", index),
+	// 	logger.String("type", blockType),
+	// 	logger.String("tool_use_id", toolUseID))
 
 	return sender.SendEvent(c, eventData)
 }
@@ -317,10 +310,6 @@ func (ssm *SSEStateManager) handleContentBlockStop(c *gin.Context, sender Stream
 	// 标记为已停止
 	block.Stopped = true
 
-	// logger.Debug("内容块已停止",
-	// 	logger.Int("index", index),
-	// 	logger.String("type", block.Type))
-
 	return sender.SendEvent(c, eventData)
 }
 
@@ -377,7 +366,6 @@ func (ssm *SSEStateManager) handleMessageDelta(c *gin.Context, sender StreamEven
 
 	// 标记message_delta已发送，防止后续重复发送
 	ssm.messageDeltaSent = true
-	// logger.Debug("message_delta事件已发送", logger.Bool("message_delta_sent", ssm.messageDeltaSent))
 
 	return sender.SendEvent(c, eventData)
 }

@@ -307,6 +307,11 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 				continue
 			}
 
+			// 过滤不支持的工具：web_search (静默过滤，不发送到上游)
+			if tool.Name == "web_search" || tool.Name == "websearch" {
+				continue
+			}
+
 			// logger.Debug("转换工具定义",
 			// 	logger.Int("tool_index", i),
 			// 	logger.String("tool_name", tool.Name),
@@ -327,21 +332,6 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 
 		// 工具配置放在 UserInputMessageContext.Tools 中 (符合req.json结构)
 		cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools = tools
-
-		// logger.Debug("工具配置已添加到UserInputMessageContext",
-		// 	logger.Int("converted_tools_count", len(tools)),
-		// 	logger.String("conversation_id", cwReq.ConversationState.ConversationId))
-
-		// 记录工具名称预览
-		// var toolNames []string
-		// for _, t := range tools {
-		// 	if t.ToolSpecification.Name != "" {
-		// 		toolNames = append(toolNames, t.ToolSpecification.Name)
-		// 	}
-		// }
-		// logger.Debug("CW工具配置",
-		// 	logger.Int("tools_count", len(tools)),
-		// 	logger.String("tool_names", strings.Join(toolNames, ",")))
 	}
 
 	// 构建历史消息
@@ -380,7 +370,15 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 		// 关键修复：收集连续的user消息并合并，遇到assistant时配对添加
 		var userMessagesBuffer []types.AnthropicRequestMessage // 累积连续的user消息
 
-		for i := 0; i < len(anthropicReq.Messages)-1; i++ {
+		// 决定历史消息的循环边界
+		// 关键修复：如果最后一条消息是assistant，应该将它加入历史（与前面的user配对）
+		// 如果最后一条是user，它作为currentMessage，不加入历史
+		historyEndIndex := len(anthropicReq.Messages) - 1
+		if lastMessage.Role == "assistant" {
+			historyEndIndex = len(anthropicReq.Messages) // 包含最后一条assistant
+		}
+
+		for i := 0; i < historyEndIndex; i++ {
 			msg := anthropicReq.Messages[i]
 
 			if msg.Role == "user" {
@@ -389,7 +387,7 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 				continue
 			}
 			if msg.Role == "assistant" {
-				// 遇到assistant，处理之前累积的user消息
+				// 遇到assistant，只有当有对应的user消息时才处理（忽略孤立assistant）
 				if len(userMessagesBuffer) > 0 {
 					// 合并所有累积的user消息
 					mergedUserMsg := types.HistoryUserMessage{}
@@ -434,33 +432,75 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 
 					// 清空缓冲区
 					userMessagesBuffer = nil
-				}
 
-				// 添加assistant消息
-				assistantMsg := types.HistoryAssistantMessage{}
-				assistantContent, err := utils.GetMessageContent(msg.Content)
-				if err == nil {
-					assistantMsg.AssistantResponseMessage.Content = assistantContent
-				} else {
-					assistantMsg.AssistantResponseMessage.Content = ""
-				}
+					// 添加assistant消息（只在有配对的user时添加）
+					assistantMsg := types.HistoryAssistantMessage{}
+					assistantContent, err := utils.GetMessageContent(msg.Content)
+					if err == nil {
+						assistantMsg.AssistantResponseMessage.Content = assistantContent
+					} else {
+						assistantMsg.AssistantResponseMessage.Content = ""
+					}
 
-				// 提取助手消息中的工具调用
-				toolUses := extractToolUsesFromMessage(msg.Content)
-				if len(toolUses) > 0 {
-					assistantMsg.AssistantResponseMessage.ToolUses = toolUses
-				} else {
-					assistantMsg.AssistantResponseMessage.ToolUses = nil
-				}
+					// 提取助手消息中的工具调用
+					toolUses := extractToolUsesFromMessage(msg.Content)
+					if len(toolUses) > 0 {
+						assistantMsg.AssistantResponseMessage.ToolUses = toolUses
+					} else {
+						assistantMsg.AssistantResponseMessage.ToolUses = nil
+					}
 
-				history = append(history, assistantMsg)
+					history = append(history, assistantMsg)
+				}
+				// 如果buffer为空，孤立的assistant消息被忽略（不添加到history）
 			}
 		}
 
-		// 处理结尾的孤立user消息（理论上不应该存在，因为最后一条已经是current message）
-		// 但为了安全起见，如果有剩余的user消息缓冲区，记录警告
+		// 处理结尾的孤立user消息
+		// 如果最后一条是user（作为currentMessage），buffer中可能还有倒数第二条及之前的孤立user消息
+		// 这些孤立的user消息应该配对一个"OK"的assistant
 		if len(userMessagesBuffer) > 0 {
-			logger.Warn("历史消息末尾存在孤立的user消息（未配对assistant）",
+			// 合并所有孤立的user消息
+			mergedOrphanUserMsg := types.HistoryUserMessage{}
+			var contentParts []string
+			var allImages []types.CodeWhispererImage
+			var allToolResults []types.ToolResult
+
+			for _, userMsg := range userMessagesBuffer {
+				messageContent, messageImages, err := processMessageContent(userMsg.Content)
+				if err == nil && messageContent != "" {
+					contentParts = append(contentParts, messageContent)
+					if len(messageImages) > 0 {
+						allImages = append(allImages, messageImages...)
+					}
+				}
+
+				toolResults := extractToolResultsFromMessage(userMsg.Content)
+				if len(toolResults) > 0 {
+					allToolResults = append(allToolResults, toolResults...)
+				}
+			}
+
+			mergedOrphanUserMsg.UserInputMessage.Content = strings.Join(contentParts, "\n")
+			if len(allImages) > 0 {
+				mergedOrphanUserMsg.UserInputMessage.Images = allImages
+			}
+			if len(allToolResults) > 0 {
+				mergedOrphanUserMsg.UserInputMessage.UserInputMessageContext.ToolResults = allToolResults
+				mergedOrphanUserMsg.UserInputMessage.Content = ""
+			}
+
+			mergedOrphanUserMsg.UserInputMessage.ModelId = modelId
+			mergedOrphanUserMsg.UserInputMessage.Origin = "AI_EDITOR"
+			history = append(history, mergedOrphanUserMsg)
+
+			// 自动配对一个"OK"的assistant响应
+			autoAssistantMsg := types.HistoryAssistantMessage{}
+			autoAssistantMsg.AssistantResponseMessage.Content = "OK"
+			autoAssistantMsg.AssistantResponseMessage.ToolUses = nil
+			history = append(history, autoAssistantMsg)
+
+			logger.Debug("历史消息末尾存在孤立的user消息，已自动配对assistant",
 				logger.Int("orphan_messages", len(userMessagesBuffer)))
 		}
 
@@ -471,21 +511,6 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 	if err := validateCodeWhispererRequest(&cwReq); err != nil {
 		return cwReq, fmt.Errorf("请求验证失败: %v", err)
 	}
-
-	// logger.Debug("构建CodeWhisperer请求完成",
-	// 	logger.String("conversation_id", cwReq.ConversationState.ConversationId),
-	// 	logger.String("model_id", cwReq.ConversationState.CurrentMessage.UserInputMessage.ModelId),
-	// 	logger.String("content_preview", func() string {
-	// 		content := cwReq.ConversationState.CurrentMessage.UserInputMessage.Content
-	// 		if len(content) > 100 {
-	// 			return content[:100] + "..."
-	// 		}
-	// 		return content
-	// 	}()),
-	// 	logger.Int("images_count", len(cwReq.ConversationState.CurrentMessage.UserInputMessage.Images)),
-	// 	logger.Int("tools_count", len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools)),
-	// 	logger.Int("history_count", len(cwReq.ConversationState.History)),
-	// 	logger.Bool("has_tools", len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools) > 0))
 
 	return cwReq, nil
 }
@@ -510,6 +535,11 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 						// 提取 name
 						if name, ok := block["name"].(string); ok {
 							toolUse.Name = name
+						}
+
+						// 过滤不支持的工具：web_search (静默过滤)
+						if toolUse.Name == "web_search" || toolUse.Name == "websearch" {
+							continue
 						}
 
 						// 提取 input
@@ -538,6 +568,11 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 
 				if block.Name != nil {
 					toolUse.Name = *block.Name
+				}
+
+				// 过滤不支持的工具：web_search (静默过滤)
+				if toolUse.Name == "web_search" || toolUse.Name == "websearch" {
+					continue
 				}
 
 				if block.Input != nil {

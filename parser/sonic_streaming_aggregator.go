@@ -39,10 +39,7 @@ type SonicJSONStreamer struct {
 
 // SonicParseState Sonic JSON解析状态
 type SonicParseState struct {
-	hasValidJSON    bool
-	isPartialJSON   bool
-	expectingValue  bool
-	isValueFragment bool
+	hasValidJSON bool
 }
 
 // NewSonicStreamingJSONAggregatorWithCallback 创建带回调的Sonic流式JSON聚合器
@@ -163,10 +160,7 @@ func (ssja *SonicStreamingJSONAggregator) createSonicJSONStreamer(toolUseId, too
 		toolName:   toolName,
 		buffer:     buffer,
 		lastUpdate: time.Now(),
-		state: SonicParseState{
-			expectingValue: true,
-		},
-		result: make(map[string]any),
+		result:     make(map[string]any),
 	}
 }
 
@@ -274,9 +268,6 @@ func (sjs *SonicJSONStreamer) tryParseWithSonic() string {
 		}
 		sjs.result = emptyResult
 		sjs.state.hasValidJSON = true
-		// logger.Debug("检测到空参数工具",
-		// 	logger.String("toolUseId", sjs.toolUseId),
-		// 	logger.String("content", contentStr))
 		return "complete"
 	}
 
@@ -291,85 +282,12 @@ func (sjs *SonicJSONStreamer) tryParseWithSonic() string {
 		return "complete"
 	}
 
-	// 检查是否为部分有效的JSON开始
-	if sjs.isSonicValidJSONStart(content) {
-		sjs.state.isPartialJSON = true
-		return "partial"
-	}
-
-	// 检查是否只是值片段（无键）
-	if sjs.looksLikeValueFragment(string(content)) {
-		sjs.state.isValueFragment = true
-		return "value_fragment"
-	}
-
 	return "invalid"
-}
-
-// isSonicValidJSONStart 使用Sonic检查是否为有效的JSON开始
-func (sjs *SonicJSONStreamer) isSonicValidJSONStart(content []byte) bool {
-	contentStr := strings.TrimSpace(string(content))
-	if !strings.HasPrefix(contentStr, "{") {
-		return false
-	}
-
-	// 使用Sonic尝试解析
-	var testValue any
-	err := utils.FastUnmarshal(content, &testValue)
-
-	// 如果错误是由于不完整的JSON，那么说明开始是有效的
-	if err != nil {
-		// Sonic在遇到不完整JSON时会返回特定错误
-		errStr := err.Error()
-		if strings.Contains(errStr, "unexpected end") ||
-			strings.Contains(errStr, "incomplete") ||
-			strings.Contains(errStr, "EOF") ||
-			strings.Contains(errStr, "reached end") {
-			logger.Debug("Sonic检测到不完整但有效的JSON开始",
-				logger.String("toolUseId", sjs.toolUseId),
-				logger.String("error", errStr))
-			return true
-		}
-		return false
-	}
-
-	// 如果成功解析，说明是有效的JSON片段
-	return true
-}
-
-// looksLikeValueFragment 检查是否看起来像值片段
-func (sjs *SonicJSONStreamer) looksLikeValueFragment(content string) bool {
-	content = strings.TrimSpace(content)
-
-	// 检查是否看起来像路径
-	if strings.Contains(content, "/") && !strings.Contains(content, " ") {
-		return true
-	}
-
-	// 检查是否看起来像命令
-	if strings.Contains(content, " ") && len(content) > 3 {
-		return true
-	}
-
-	// 检查是否为简单字符串值
-	if len(content) > 0 && !strings.HasPrefix(content, "{") && !strings.HasPrefix(content, "[") {
-		return true
-	}
-
-	return false
 }
 
 // onAggregationComplete 聚合完成回调
 func (ssja *SonicStreamingJSONAggregator) onAggregationComplete(toolUseId string, fullInput string) {
 	if ssja.updateCallback != nil {
-		// logger.Debug("触发Sonic流式JSON聚合回调",
-		// 	logger.String("toolUseId", toolUseId),
-		// 	logger.String("inputPreview", func() string {
-		// 		if len(fullInput) > 50 {
-		// 			return fullInput[:50] + "..."
-		// 		}
-		// 		return fullInput
-		// 	}()))
 		ssja.updateCallback(toolUseId, fullInput)
 	} else {
 		logger.Debug("Sonic聚合回调函数为空",

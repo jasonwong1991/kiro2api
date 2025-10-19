@@ -9,22 +9,14 @@ import (
 type CompliantEventStreamParser struct {
 	robustParser     *RobustEventStreamParser
 	messageProcessor *CompliantMessageProcessor
-	strictMode       bool
 }
 
 // NewCompliantEventStreamParser 创建符合规范的事件流解析器
-func NewCompliantEventStreamParser(strictMode bool) *CompliantEventStreamParser {
+func NewCompliantEventStreamParser() *CompliantEventStreamParser {
 	return &CompliantEventStreamParser{
-		robustParser:     NewRobustEventStreamParser(strictMode),
+		robustParser:     NewRobustEventStreamParser(),
 		messageProcessor: NewCompliantMessageProcessor(),
-		strictMode:       strictMode,
 	}
-}
-
-// SetStrictMode 设置严格模式
-func (cesp *CompliantEventStreamParser) SetStrictMode(strict bool) {
-	cesp.strictMode = strict
-	cesp.robustParser = NewRobustEventStreamParser(strict)
 }
 
 // SetMaxErrors 设置最大错误次数
@@ -40,23 +32,11 @@ func (cesp *CompliantEventStreamParser) Reset() {
 
 // ParseResponse 解析完整的 CodeWhisperer 响应
 func (cesp *CompliantEventStreamParser) ParseResponse(streamData []byte) (*ParseResult, error) {
-	// logger.Debug("开始解析事件流",
-	// 	logger.Int("data_len", len(streamData)),
-	// 	logger.Bool("strict_mode", cesp.strictMode))
-
 	// 1. 解析二进制事件流
 	messages, err := cesp.robustParser.ParseStream(streamData)
-	if err != nil && cesp.strictMode {
-		return nil, fmt.Errorf("事件流解析失败: %w", err)
-	}
-
 	if err != nil {
 		logger.Warn("事件流解析部分失败", logger.Err(err))
 	}
-
-	// logger.Debug("解析到消息",
-	// 	logger.Int("message_count", len(messages)),
-	// 	logger.Bool("has_errors", err != nil))
 
 	// 2. 处理消息
 	var allEvents []SSEEvent
@@ -72,19 +52,11 @@ func (cesp *CompliantEventStreamParser) ParseResponse(streamData []byte) (*Parse
 				logger.String("message_type", message.GetMessageType()),
 				logger.String("event_type", message.GetEventType()),
 				logger.Err(processErr))
-
-			if cesp.strictMode {
-				return nil, errMsg
-			}
 			continue
 		}
 
 		allEvents = append(allEvents, events...)
 	}
-
-	// logger.Debug("消息处理完成",
-	// 	logger.Int("total_events", len(allEvents)),
-	// 	logger.Int("error_count", len(errors)))
 
 	// 3. 构建结果
 	result := &ParseResult{
@@ -97,7 +69,7 @@ func (cesp *CompliantEventStreamParser) ParseResponse(streamData []byte) (*Parse
 		Errors:         errors,
 	}
 
-	if len(errors) > 0 && !cesp.strictMode {
+	if len(errors) > 0 {
 		logger.Debug("解析完成，但有部分错误",
 			logger.Int("success_messages", len(messages)),
 			logger.Int("total_events", len(allEvents)),
@@ -111,8 +83,8 @@ func (cesp *CompliantEventStreamParser) ParseResponse(streamData []byte) (*Parse
 func (cesp *CompliantEventStreamParser) ParseStream(data []byte) ([]SSEEvent, error) {
 	// 解析新的消息
 	messages, err := cesp.robustParser.ParseStream(data)
-	if err != nil && cesp.strictMode {
-		return nil, err
+	if err != nil {
+		logger.Warn("流式解析部分失败", logger.Err(err))
 	}
 
 	var allEvents []SSEEvent
@@ -121,9 +93,6 @@ func (cesp *CompliantEventStreamParser) ParseStream(data []byte) ([]SSEEvent, er
 	for _, message := range messages {
 		events, processErr := cesp.messageProcessor.ProcessMessage(message)
 		if processErr != nil {
-			if cesp.strictMode {
-				return allEvents, processErr
-			}
 			logger.Warn("流式处理消息失败", logger.Err(processErr))
 			continue
 		}
@@ -201,19 +170,9 @@ func (cesp *CompliantEventStreamParser) generateSummary(messages []*EventStreamM
 	return summary
 }
 
-// GetSessionManager 获取会话管理器
-func (cesp *CompliantEventStreamParser) GetSessionManager() *SessionManager {
-	return cesp.messageProcessor.GetSessionManager()
-}
-
 // GetToolManager 获取工具管理器
 func (cesp *CompliantEventStreamParser) GetToolManager() *ToolLifecycleManager {
 	return cesp.messageProcessor.GetToolManager()
-}
-
-// GetCompletionBuffer 获取聚合的完整内容
-func (cesp *CompliantEventStreamParser) GetCompletionBuffer() string {
-	return cesp.messageProcessor.GetCompletionBuffer()
 }
 
 // ParseResult 解析结果
@@ -238,11 +197,6 @@ type ParseSummary struct {
 	HasErrors        bool           `json:"has_errors"`
 	HasSessionEvents bool           `json:"has_session_events"`
 	ToolSummary      map[string]any `json:"tool_summary"`
-}
-
-// IsComplete 检查解析是否完整
-func (pr *ParseResult) IsComplete() bool {
-	return len(pr.Errors) == 0
 }
 
 // GetCompletionText 获取完整的补全文本
@@ -276,14 +230,4 @@ func (pr *ParseResult) GetToolCalls() []*ToolExecution {
 	}
 
 	return tools
-}
-
-// HasSuccessfulToolCalls 检查是否有成功的工具调用
-func (pr *ParseResult) HasSuccessfulToolCalls() bool {
-	for _, tool := range pr.ToolExecutions {
-		if tool.Status == ToolStatusCompleted {
-			return true
-		}
-	}
-	return false
 }

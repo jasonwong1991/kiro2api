@@ -253,11 +253,6 @@ LOG_LEVEL=info
 LOG_FORMAT=json
 LOG_CONSOLE=true
 
-# 性能调优
-REQUEST_TIMEOUT_MINUTES=15
-SIMPLE_REQUEST_TIMEOUT_MINUTES=2
-SERVER_READ_TIMEOUT_MINUTES=16
-SERVER_WRITE_TIMEOUT_MINUTES=16
 ```
 
 ##### Docker Secrets（注意事项）
@@ -404,14 +399,6 @@ KIRO_CLIENT_TOKEN=your-secure-api-key    # API 认证密钥（建议使用强密
 PORT=8080                                # 服务端口
 GIN_MODE=release                         # 运行模式：debug/release/test
 
-# === 性能调优 ===
-# 请求超时配置（分钟）
-REQUEST_TIMEOUT_MINUTES=15               # 复杂请求超时
-SIMPLE_REQUEST_TIMEOUT_MINUTES=2         # 简单请求超时
-
-# 服务器超时配置（分钟）
-SERVER_READ_TIMEOUT_MINUTES=16           # 服务器读取超时
-SERVER_WRITE_TIMEOUT_MINUTES=16          # 服务器写入超时
 ```
 
 #### 生产级日志配置

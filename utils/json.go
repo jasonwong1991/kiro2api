@@ -33,11 +33,6 @@ func SafeUnmarshal(data []byte, v any) error {
 	return SafeConfig.Unmarshal(data, v)
 }
 
-// Valid 验证JSON数据是否有效
-func Valid(data []byte) bool {
-	return FastestConfig.Valid(data)
-}
-
 // MarshalIndent 带缩进的JSON序列化
 func MarshalIndent(v any, prefix, indent string) ([]byte, error) {
 	// sonic的MarshalIndent

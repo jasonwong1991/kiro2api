@@ -75,16 +75,7 @@ func executeCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReq
 		return nil, err
 	}
 
-	// 上游请求即将发送（带方向和会话标识）
-	// logger.Debug("发送上游请求",
-	// 	addReqFields(c,
-	// 		logger.String("direction", "upstream_request"),
-	// 		logger.String("url", req.URL.String()),
-	// 		logger.Bool("stream", isStream),
-	// 		logger.String("model", anthropicReq.Model),
-	// 	)...)
-
-	resp, err := utils.DoSmartRequest(req, &anthropicReq)
+	resp, err := utils.DoRequest(req)
 	if err != nil {
 		handleRequestSendError(c, err)
 		return nil, err
@@ -245,9 +236,9 @@ func (s *AnthropicStreamSender) SendEvent(c *gin.Context, data any) error {
 	// 压缩日志：仅记录事件类型与负载长度
 	logger.Debug("发送SSE事件",
 		addReqFields(c,
-			logger.String("direction", "downstream_send"),
+			// logger.String("direction", "downstream_send"),
 			logger.String("event", eventType),
-			logger.Int("payload_len", len(json)),
+			// logger.Int("payload_len", len(json)),
 			logger.String("payload_preview", string(json)),
 		)...)
 
@@ -314,6 +305,7 @@ type RequestContext struct {
 	GinContext  *gin.Context
 	AuthService interface {
 		GetToken() (types.TokenInfo, error)
+		GetTokenWithUsage() (*types.TokenWithUsage, error)
 	}
 	RequestType string // "anthropic" 或 "openai"
 }
@@ -348,4 +340,37 @@ func (rc *RequestContext) GetTokenAndBody() (types.TokenInfo, []byte, error) {
 		)...)
 
 	return tokenInfo, body, nil
+}
+
+// GetTokenWithUsageAndBody 获取token（包含使用信息）和请求体
+// 返回: tokenWithUsage, requestBody, error
+func (rc *RequestContext) GetTokenWithUsageAndBody() (*types.TokenWithUsage, []byte, error) {
+	// 获取token（包含使用信息）
+	tokenWithUsage, err := rc.AuthService.GetTokenWithUsage()
+	if err != nil {
+		logger.Error("获取token失败", logger.Err(err))
+		respondError(rc.GinContext, http.StatusInternalServerError, "获取token失败: %v", err)
+		return nil, nil, err
+	}
+
+	// 读取请求体
+	body, err := rc.GinContext.GetRawData()
+	if err != nil {
+		logger.Error("读取请求体失败", logger.Err(err))
+		respondError(rc.GinContext, http.StatusBadRequest, "读取请求体失败: %v", err)
+		return nil, nil, err
+	}
+
+	// 记录请求日志
+	logger.Debug(fmt.Sprintf("收到%s请求", rc.RequestType),
+		addReqFields(rc.GinContext,
+			logger.String("direction", "client_request"),
+			logger.String("body", string(body)),
+			logger.Int("body_size", len(body)),
+			logger.String("remote_addr", rc.GinContext.ClientIP()),
+			logger.String("user_agent", rc.GinContext.GetHeader("User-Agent")),
+			logger.Float64("available_count", tokenWithUsage.AvailableCount),
+		)...)
+
+	return tokenWithUsage, body, nil
 }

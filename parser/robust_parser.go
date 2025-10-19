@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"kiro2api/config"
 	"kiro2api/logger"
 	"strings"
@@ -15,7 +14,6 @@ import (
 // RobustEventStreamParser 带CRC校验和错误恢复的解析器
 type RobustEventStreamParser struct {
 	headerParser *HeaderParser
-	strictMode   bool
 	errorCount   int
 	maxErrors    int
 	crcTable     *crc32.Table
@@ -25,10 +23,9 @@ type RobustEventStreamParser struct {
 }
 
 // NewRobustEventStreamParser 创建健壮的事件流解析器
-func NewRobustEventStreamParser(strictMode bool) *RobustEventStreamParser {
+func NewRobustEventStreamParser() *RobustEventStreamParser {
 	return &RobustEventStreamParser{
 		headerParser: NewHeaderParser(),
-		strictMode:   strictMode,
 		maxErrors:    config.ParserMaxErrors,
 		crcTable:     crc32.MakeTable(crc32.IEEE),
 		buffer:       &bytes.Buffer{},
@@ -83,7 +80,7 @@ func (rp *RobustEventStreamParser) parseSingleMessageWithValidation(data []byte)
 	if len(data) < 12 {
 		return nil, 0, NewParseError("数据长度不足以包含 Prelude CRC", nil)
 	}
-	preludeCRC := binary.BigEndian.Uint32(data[8:12])
+	// preludeCRC := binary.BigEndian.Uint32(data[8:12])
 
 	// 验证 Prelude CRC（前8字节：totalLength + headerLength）
 	// calculatedPreludeCRC := crc32.Checksum(data[:8], rp.crcTable)
@@ -124,22 +121,19 @@ func (rp *RobustEventStreamParser) parseSingleMessageWithValidation(data []byte)
 
 	// 添加详细的payload调试信息
 	logger.Debug("Payload调试信息",
-		logger.Int("total_length", int(totalLength)),
-		logger.Int("header_length", int(headerLength)),
-		logger.String("prelude_crc", fmt.Sprintf("%08x", preludeCRC)),
-		logger.Int("payload_start", int(payloadStart)),
-		logger.Int("payload_end", payloadEnd),
-		logger.Int("payload_len", len(payloadData)),
-		logger.String("payload_hex", func() string {
-			if len(payloadData) > 20 {
-				return fmt.Sprintf("%x", payloadData[:20]) + "..."
-			}
-			return fmt.Sprintf("%x", payloadData)
-		}()),
+		// logger.Int("total_length", int(totalLength)),
+		// logger.Int("header_length", int(headerLength)),
+		// logger.String("prelude_crc", fmt.Sprintf("%08x", preludeCRC)),
+		// logger.Int("payload_start", int(payloadStart)),
+		// logger.Int("payload_end", payloadEnd),
+		// logger.Int("payload_len", len(payloadData)),
+		// logger.String("payload_hex", func() string {
+		// 	if len(payloadData) > 20 {
+		// 		return fmt.Sprintf("%x", payloadData[:20]) + "..."
+		// 	}
+		// 	return fmt.Sprintf("%x", payloadData)
+		// }()),
 		logger.String("payload_raw", func() string {
-			if len(payloadData) > 100 {
-				return string(payloadData[:100]) + "..."
-			}
 			return string(payloadData)
 		}()))
 
@@ -190,11 +184,6 @@ func (rp *RobustEventStreamParser) parseSingleMessageWithValidation(data []byte)
 		}
 	}
 
-	// 验证头部 - 宽松验证
-	if err := rp.headerParser.ValidateHeaders(headers); err != nil {
-		logger.Warn("头部验证失败，但继续处理", logger.Err(err))
-	}
-
 	message := &EventStreamMessage{
 		Headers:     headers,
 		Payload:     payloadData,
@@ -213,32 +202,6 @@ func (rp *RobustEventStreamParser) parseSingleMessageWithValidation(data []byte)
 	// 	logger.Int("payload_len", len(payloadData)))
 
 	return message, int(totalLength), nil
-}
-
-// ParseEventsFromReader 从Reader读取并解析事件流
-func (rp *RobustEventStreamParser) ParseEventsFromReader(reader io.Reader) ([]*EventStreamMessage, error) {
-	var allMessages []*EventStreamMessage
-	buf := make([]byte, 4096)
-
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			messages, parseErr := rp.ParseStream(buf[:n])
-			if parseErr != nil && rp.strictMode {
-				return allMessages, parseErr
-			}
-			allMessages = append(allMessages, messages...)
-		}
-
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return allMessages, fmt.Errorf("读取数据失败: %w", err)
-		}
-	}
-
-	return allMessages, nil
 }
 
 // validateToolUseIdIntegrity 验证工具调用中的tool_use_id完整性
@@ -436,9 +399,6 @@ func (rp *RobustEventStreamParser) parseStreamWithBuffer(data []byte) ([]*EventS
 		// 解析消息
 		message, _, err := rp.parseSingleMessageWithValidation(messageData)
 		if err != nil {
-			if rp.strictMode {
-				return messages, err
-			}
 			logger.Warn("消息解析失败", logger.Err(err))
 			rp.errorCount++
 			continue

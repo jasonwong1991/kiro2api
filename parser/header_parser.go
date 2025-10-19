@@ -194,10 +194,6 @@ func (hp *HeaderParser) processNameLengthPhase(data []byte, offset *int, state *
 	state.PartialName = make([]byte, 0, nameLength)
 	state.Phase = PhaseReadName
 
-	// logger.Debug("读取名称长度",
-	// 	logger.Int("name_length", nameLength),
-	// 	logger.Int("header_index", state.CurrentHeader))
-
 	return false, nil
 }
 
@@ -221,10 +217,6 @@ func (hp *HeaderParser) processNamePhase(data []byte, offset *int, state *Header
 	*offset += remainingNameBytes
 	state.Phase = PhaseReadValueType
 
-	// logger.Debug("名称读取完成",
-	// 	logger.String("name", string(state.PartialName)),
-	// 	logger.Int("header_index", state.CurrentHeader))
-
 	return false, nil
 }
 
@@ -237,10 +229,6 @@ func (hp *HeaderParser) processValueTypePhase(data []byte, offset *int, state *H
 	state.ValueType = ValueType(data[*offset])
 	*offset++
 	state.Phase = PhaseReadValueLength
-
-	// logger.Debug("读取值类型",
-	// 	logger.Int("value_type", int(state.ValueType)),
-	// 	logger.String("name", string(state.PartialName)))
 
 	return false, nil
 }
@@ -284,10 +272,6 @@ func (hp *HeaderParser) processValueLengthPhase(data []byte, offset *int, state 
 	state.PartialLength = nil // 清除长度缓冲区
 	state.Phase = PhaseReadValue
 
-	// logger.Debug("读取值长度",
-	// 	logger.Int("value_length", valueLength),
-	// 	logger.String("name", string(state.PartialName)))
-
 	return false, nil
 }
 
@@ -326,11 +310,6 @@ func (hp *HeaderParser) processValuePhase(data []byte, offset *int, state *Heade
 			Type:  state.ValueType,
 			Value: value,
 		}
-
-		// logger.Debug("头部解析完成",
-		// 	logger.String("name", headerName),
-		// 	logger.Int("type", int(state.ValueType)),
-		// 	logger.Int("length", state.ValueLength))
 	}
 
 	// 重置状态，准备解析下一个头部
@@ -428,32 +407,6 @@ func (hp *HeaderParser) parseHeaderValue(valueType ValueType, data []byte) (any,
 		copy(result, data)
 		return result, nil
 	}
-}
-
-// ValidateHeaders 验证必要的头部是否存在
-func (hp *HeaderParser) ValidateHeaders(headers map[string]HeaderValue) error {
-	// 验证必需的头部字段
-	requiredHeaders := []string{":message-type"}
-
-	for _, headerName := range requiredHeaders {
-		if _, exists := headers[headerName]; !exists {
-			return NewParseError(fmt.Sprintf("缺少必需的头部: %s", headerName), nil)
-		}
-	}
-
-	// 验证消息类型的有效性
-	if msgTypeHeader, exists := headers[":message-type"]; exists {
-		if msgType, ok := msgTypeHeader.Value.(string); ok {
-			switch msgType {
-			case MessageTypes.EVENT, MessageTypes.ERROR, MessageTypes.EXCEPTION:
-				// 有效的消息类型
-			default:
-				logger.Warn("未知的消息类型", logger.String("message_type", msgType))
-			}
-		}
-	}
-
-	return nil
 }
 
 // GetMessageTypeFromHeaders 从头部提取消息类型
