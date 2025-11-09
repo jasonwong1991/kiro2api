@@ -8,7 +8,10 @@ class TokenDashboard {
         this.autoRefreshInterval = null;
         this.isAutoRefreshEnabled = false;
         this.apiBaseUrl = '/api';
-        
+        this.adminApiBaseUrl = '/v1/admin';
+        this.adminToken = null;
+        this.isAdminMode = false;
+
         this.init();
     }
 
@@ -16,6 +19,7 @@ class TokenDashboard {
      * 初始化Dashboard
      */
     init() {
+        this.loadAdminToken();
         this.bindEvents();
         this.refreshTokens();
     }
@@ -34,6 +38,30 @@ class TokenDashboard {
         const switchEl = document.querySelector('.switch');
         if (switchEl) {
             switchEl.addEventListener('click', () => this.toggleAutoRefresh());
+        }
+
+        // 管理员认证按钮
+        const authBtn = document.getElementById('authBtn');
+        if (authBtn) {
+            authBtn.addEventListener('click', () => this.enableAdminMode());
+        }
+
+        // 退出管理按钮
+        const logoutBtn = document.getElementById('logoutBtn');
+        if (logoutBtn) {
+            logoutBtn.addEventListener('click', () => this.disableAdminMode());
+        }
+
+        // 导出全部配置按钮
+        const exportAllBtn = document.getElementById('exportAllBtn');
+        if (exportAllBtn) {
+            exportAllBtn.addEventListener('click', () => this.exportAllTokens());
+        }
+
+        // 批量删除失效Token按钮
+        const deleteInvalidBtn = document.getElementById('deleteInvalidBtn');
+        if (deleteInvalidBtn) {
+            deleteInvalidBtn.addEventListener('click', () => this.deleteInvalidTokens());
         }
     }
 
@@ -82,9 +110,27 @@ class TokenDashboard {
     createTokenRow(token) {
         const statusClass = this.getStatusClass(token);
         const statusText = this.getStatusText(token);
-        
+        const isInvalid = token.status === 'error' || token.is_invalid;
+
+        // 管理操作按钮
+        let actionButtons = '';
+        if (this.isAdminMode) {
+            actionButtons = `
+                <td class="admin-only action-cell">
+                    <button class="action-btn-small export-btn-small" onclick="dashboard.exportSingleToken(${token.index})" title="导出配置">
+                        📥
+                    </button>
+                    ${isInvalid ? `
+                        <button class="action-btn-small delete-btn-small" onclick="dashboard.deleteSingleToken(${token.index})" title="删除失效Token">
+                            🗑️
+                        </button>
+                    ` : ''}
+                </td>
+            `;
+        }
+
         return `
-            <tr>
+            <tr class="${isInvalid ? 'invalid-row' : ''}">
                 <td>${token.user_email || 'unknown'}</td>
                 <td><span class="token-preview">${token.token_preview || 'N/A'}</span></td>
                 <td>${token.auth_type || 'social'}</td>
@@ -92,6 +138,7 @@ class TokenDashboard {
                 <td>${this.formatDateTime(token.expires_at)}</td>
                 <td>${this.formatDateTime(token.last_used)}</td>
                 <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                ${actionButtons}
             </tr>
         `;
     }
@@ -215,15 +262,250 @@ class TokenDashboard {
     showError(container, message) {
         container.innerHTML = `
             <tr>
-                <td colspan="7" class="error">
+                <td colspan="${this.isAdminMode ? '8' : '7'}" class="error">
                     ${message}
                 </td>
             </tr>
         `;
     }
+
+    /**
+     * 管理员功能 - 加载保存的Token
+     */
+    loadAdminToken() {
+        const savedToken = localStorage.getItem('kiro_admin_token');
+        if (savedToken) {
+            this.adminToken = savedToken;
+            this.isAdminMode = true;
+            this.updateAdminUI();
+        }
+    }
+
+    /**
+     * 启用管理模式
+     */
+    async enableAdminMode() {
+        const tokenInput = document.getElementById('adminToken');
+        const token = tokenInput.value.trim();
+
+        if (!token) {
+            this.showAuthStatus('请输入管理员 Token', 'error');
+            return;
+        }
+
+        // 验证Token
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/tokens`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (response.ok) {
+                this.adminToken = token;
+                this.isAdminMode = true;
+                localStorage.setItem('kiro_admin_token', token);
+                this.updateAdminUI();
+                this.showAuthStatus('管理模式已启用', 'success');
+                this.refreshTokens();
+            } else {
+                this.showAuthStatus('Token 验证失败，请检查是否正确', 'error');
+            }
+        } catch (error) {
+            this.showAuthStatus('验证失败: ' + error.message, 'error');
+        }
+    }
+
+    /**
+     * 退出管理模式
+     */
+    disableAdminMode() {
+        this.adminToken = null;
+        this.isAdminMode = false;
+        localStorage.removeItem('kiro_admin_token');
+        document.getElementById('adminToken').value = '';
+        this.updateAdminUI();
+        this.showAuthStatus('已退出管理模式', 'info');
+        this.refreshTokens();
+    }
+
+    /**
+     * 更新管理UI显示
+     */
+    updateAdminUI() {
+        const authBtn = document.getElementById('authBtn');
+        const logoutBtn = document.getElementById('logoutBtn');
+        const adminActions = document.getElementById('adminActions');
+        const adminOnlyElements = document.querySelectorAll('.admin-only');
+
+        if (this.isAdminMode) {
+            authBtn.style.display = 'none';
+            logoutBtn.style.display = 'inline-block';
+            adminActions.style.display = 'flex';
+            adminOnlyElements.forEach(el => el.style.display = '');
+        } else {
+            authBtn.style.display = 'inline-block';
+            logoutBtn.style.display = 'none';
+            adminActions.style.display = 'none';
+            adminOnlyElements.forEach(el => el.style.display = 'none');
+        }
+    }
+
+    /**
+     * 显示认证状态消息
+     */
+    showAuthStatus(message, type) {
+        const statusEl = document.getElementById('authStatus');
+        statusEl.textContent = message;
+        statusEl.className = `auth-status ${type}`;
+
+        setTimeout(() => {
+            statusEl.textContent = '';
+            statusEl.className = 'auth-status';
+        }, 3000);
+    }
+
+    /**
+     * 导出全部Token配置
+     */
+    async exportAllTokens() {
+        if (!this.adminToken) return;
+
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/tokens/export`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.adminToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({})
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            // 下载为JSON文件
+            const blob = new Blob([JSON.stringify(data.data.configs, null, 2)], {
+                type: 'application/json'
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `kiro_tokens_${new Date().toISOString().split('T')[0]}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            this.showAuthStatus(`已导出 ${data.data.count} 个配置`, 'success');
+        } catch (error) {
+            this.showAuthStatus('导出失败: ' + error.message, 'error');
+        }
+    }
+
+    /**
+     * 批量删除失效Token
+     */
+    async deleteInvalidTokens() {
+        if (!this.adminToken) return;
+
+        if (!confirm('确定要删除所有失效的 Token 吗？此操作不可撤销！')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/tokens/invalid`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${this.adminToken}`
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            this.showAuthStatus(`已删除 ${data.data.removed_count} 个失效 Token`, 'success');
+            this.refreshTokens();
+        } catch (error) {
+            this.showAuthStatus('删除失败: ' + error.message, 'error');
+        }
+    }
+
+    /**
+     * 删除单个Token
+     */
+    async deleteSingleToken(index) {
+        if (!this.adminToken) return;
+
+        if (!confirm(`确定要删除索引为 ${index} 的失效 Token 吗？`)) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/tokens/${index}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${this.adminToken}`
+                }
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error?.message || `HTTP ${response.status}`);
+            }
+
+            this.showAuthStatus('Token 已删除', 'success');
+            this.refreshTokens();
+        } catch (error) {
+            this.showAuthStatus('删除失败: ' + error.message, 'error');
+        }
+    }
+
+    /**
+     * 导出单个Token配置
+     */
+    async exportSingleToken(index) {
+        if (!this.adminToken) return;
+
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/tokens/export`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.adminToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ indices: [index] })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            // 下载为JSON文件
+            const blob = new Blob([JSON.stringify(data.data.configs, null, 2)], {
+                type: 'application/json'
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `kiro_token_${index}_${new Date().toISOString().split('T')[0]}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            this.showAuthStatus('配置已导出', 'success');
+        } catch (error) {
+            this.showAuthStatus('导出失败: ' + error.message, 'error');
+        }
+    }
 }
 
 // DOM加载完成后初始化 (依赖注入原则)
+let dashboard;
 document.addEventListener('DOMContentLoaded', () => {
-    new TokenDashboard();
+    dashboard = new TokenDashboard();
 });

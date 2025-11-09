@@ -12,7 +12,17 @@
             <h1>🔐 KIRO Token Dashboard</h1>
             <p>实时监控Token池状态和使用情况</p>
         </div>
-        
+
+        <!-- 管理员认证区域 -->
+        <div class="admin-auth-section">
+            <div class="auth-input-group">
+                <input type="password" id="adminToken" placeholder="输入管理员 Token 以启用管理功能" class="admin-token-input">
+                <button class="auth-btn" id="authBtn">🔓 启用管理</button>
+                <button class="auth-btn logout-btn" id="logoutBtn" style="display: none;">🔒 退出管理</button>
+            </div>
+            <div class="auth-status" id="authStatus"></div>
+        </div>
+
         <div class="controls">
             <button class="refresh-btn">
                 🔄 手动刷新
@@ -21,6 +31,16 @@
                 <span>自动刷新</span>
                 <div class="switch"></div>
             </div>
+        </div>
+
+        <!-- 管理操作区域 -->
+        <div class="admin-actions" id="adminActions" style="display: none;">
+            <button class="action-btn export-btn" id="exportAllBtn">
+                📥 导出全部配置
+            </button>
+            <button class="action-btn delete-invalid-btn" id="deleteInvalidBtn">
+                🗑️ 批量删除失效Token
+            </button>
         </div>
         
         <div class="status-bar">
@@ -50,11 +70,12 @@
                             <th>过期时间</th>
                             <th>最后使用</th>
                             <th>状态</th>
+                            <th class="admin-only" style="display: none;">操作</th>
                         </tr>
                     </thead>
                     <tbody id="tokenTableBody">
                         <tr>
-                            <td colspan="7" class="loading">
+                            <td colspan="8" class="loading">
                                 <div class="spinner"></div>
                                 正在加载Token数据...
                             </td>

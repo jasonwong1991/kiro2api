@@ -241,28 +241,224 @@ tr:hover {
     text-align: center;
 }
 
+/* 管理员认证区域 */
+.admin-auth-section {
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 15px;
+    padding: 20px;
+    margin-bottom: 20px;
+    backdrop-filter: blur(10px);
+}
+
+.auth-input-group {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.admin-token-input {
+    flex: 1;
+    min-width: 300px;
+    padding: 12px 20px;
+    border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 25px;
+    background: rgba(255,255,255,0.1);
+    color: white;
+    font-size: 1rem;
+    outline: none;
+    transition: all 0.3s ease;
+}
+
+.admin-token-input::placeholder {
+    color: rgba(255,255,255,0.5);
+}
+
+.admin-token-input:focus {
+    background: rgba(255,255,255,0.2);
+    border-color: rgba(255,255,255,0.5);
+}
+
+.auth-btn {
+    padding: 12px 24px;
+    border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 25px;
+    background: rgba(76, 175, 80, 0.6);
+    color: white;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(10px);
+}
+
+.auth-btn:hover {
+    background: rgba(76, 175, 80, 0.8);
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+}
+
+.logout-btn {
+    background: rgba(244, 67, 54, 0.6);
+}
+
+.logout-btn:hover {
+    background: rgba(244, 67, 54, 0.8);
+}
+
+.auth-status {
+    text-align: center;
+    margin-top: 10px;
+    padding: 8px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    transition: all 0.3s ease;
+}
+
+.auth-status.success {
+    background: rgba(76, 175, 80, 0.2);
+    color: #4caf50;
+    border: 1px solid rgba(76, 175, 80, 0.3);
+}
+
+.auth-status.error {
+    background: rgba(244, 67, 54, 0.2);
+    color: #ff5252;
+    border: 1px solid rgba(244, 67, 54, 0.3);
+}
+
+.auth-status.info {
+    background: rgba(33, 150, 243, 0.2);
+    color: #2196f3;
+    border: 1px solid rgba(33, 150, 243, 0.3);
+}
+
+/* 管理操作区域 */
+.admin-actions {
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.action-btn {
+    padding: 12px 24px;
+    border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 25px;
+    color: white;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(10px);
+}
+
+.export-btn {
+    background: rgba(33, 150, 243, 0.6);
+}
+
+.export-btn:hover {
+    background: rgba(33, 150, 243, 0.8);
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+}
+
+.delete-invalid-btn {
+    background: rgba(244, 67, 54, 0.6);
+}
+
+.delete-invalid-btn:hover {
+    background: rgba(244, 67, 54, 0.8);
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+}
+
+/* 表格操作按钮 */
+.action-cell {
+    display: flex;
+    gap: 5px;
+    justify-content: center;
+    align-items: center;
+}
+
+.action-btn-small {
+    padding: 6px 10px;
+    border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.1);
+    color: white;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.action-btn-small:hover {
+    background: rgba(255,255,255,0.2);
+    transform: scale(1.1);
+}
+
+.export-btn-small:hover {
+    background: rgba(33, 150, 243, 0.6);
+}
+
+.delete-btn-small:hover {
+    background: rgba(244, 67, 54, 0.6);
+}
+
+/* 失效行高亮 */
+.invalid-row {
+    background: rgba(244, 67, 54, 0.1) !important;
+}
+
+.invalid-row:hover {
+    background: rgba(244, 67, 54, 0.15) !important;
+}
+
+/* 失效状态徽章 */
+.status-invalid {
+    background: rgba(244, 67, 54, 0.8);
+    color: white;
+}
+
 @media (max-width: 768px) {
     .header h1 {
         font-size: 2rem;
     }
-    
+
     .controls {
         flex-direction: column;
         gap: 15px;
     }
-    
+
     .status-bar {
         flex-direction: column;
         gap: 15px;
     }
-    
+
     .status-item {
         flex-direction: row;
         gap: 10px;
     }
-    
+
     th, td {
         padding: 10px 15px;
         font-size: 0.9rem;
+    }
+
+    .admin-token-input {
+        min-width: 100%;
+    }
+
+    .auth-input-group {
+        flex-direction: column;
+    }
+
+    .admin-actions {
+        flex-direction: column;
+    }
+
+    .action-btn {
+        width: 100%;
     }
 }
