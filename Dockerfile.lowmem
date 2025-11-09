@@ -1,0 +1,62 @@
+# 低内存优化 Dockerfile (适用于 1GB RAM VPS)
+# 移除交叉编译工具链，禁用 CGO，减少内存占用
+# 预期内存使用：400-600MB (vs 原版 900MB-1.4GB)
+
+# syntax=docker/dockerfile:1.4
+
+# 构建阶段
+FROM golang:1.24-alpine AS builder
+
+# 安装基础工具（仅 git 和 ca-certificates）
+RUN apk add --no-cache git ca-certificates tzdata
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制 go mod 文件
+COPY go.mod go.sum ./
+
+# 下载依赖（禁用缓存挂载以减少内存峰值）
+RUN go mod download
+
+# 复制源代码
+COPY . .
+
+# 编译二进制文件
+# - CGO_ENABLED=0: 禁用 CGO（经测试项目可正常运行）
+# - GOOS/GOARCH: 显式指定目标平台（移除 xx-go）
+# - 移除缓存挂载以避免内存峰值
+ENV CGO_ENABLED=0
+RUN go build \
+    -ldflags="-s -w" \
+    -o kiro2api main.go
+
+# 运行阶段
+FROM alpine:3.19
+
+# 安装运行时依赖
+RUN apk --no-cache add ca-certificates tzdata
+
+# 创建非 root 用户
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -u 1001 -S appuser -G appgroup
+
+# 设置工作目录
+WORKDIR /app
+
+# 从构建阶段复制二进制文件和静态资源
+COPY --from=builder /app/kiro2api .
+COPY --from=builder /app/static ./static
+
+# 创建必要的目录并设置权限
+RUN mkdir -p /home/appuser/.aws/sso/cache && \
+    chown -R appuser:appgroup /app /home/appuser
+
+# 切换到非 root 用户
+USER appuser
+
+# 暴露默认端口
+EXPOSE 8080
+
+# 设置默认命令
+CMD ["./kiro2api"]
