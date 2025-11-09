@@ -9,9 +9,9 @@ services:
       - "5656:8080"
     environment:
       # Token配置 (JSON格式，支持多账号池和双认证方式)
-      - KIRO_AUTH_TOKEN=${KIRO_AUTH_TOKEN}
+      - KIRO_AUTH_TOKEN=${KIRO_AUTH_TOKEN:-/app/tokens.json}
       # Token选择策略: sequential(顺序), random(随机), round_robin(轮询)
-      - TOKEN_SELECTION_STRATEGY=${TOKEN_SELECTION_STRATEGY:-round_robin}
+      - TOKEN_SELECTION_STRATEGY=${TOKEN_SELECTION_STRATEGY:-sequential}
       # 客户端认证Token
       - KIRO_CLIENT_TOKEN=${KIRO_CLIENT_TOKEN:-Wang1234}
       # 服务配置
@@ -24,8 +24,7 @@ services:
       - LOG_FILE=${LOG_FILE:-}
     volumes:
       - aws_sso_cache:/home/appuser/.aws/sso/cache
-    env_file:
-      - .env
+      - ./tokens.json:/app/tokens.json:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/v1/models"]
       interval: 30s

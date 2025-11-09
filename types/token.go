@@ -4,6 +4,22 @@ import (
 	"time"
 )
 
+// DeviceFingerprint 设备指纹信息（存储在 Token 中）
+type DeviceFingerprint struct {
+	UserAgent           string `json:"userAgent,omitempty"`           // 完整的 User-Agent
+	XAmzUserAgent       string `json:"xAmzUserAgent,omitempty"`       // AWS SDK User-Agent
+	DeviceHash          string `json:"deviceHash,omitempty"`          // 设备指纹 hash
+	OSVersion           string `json:"osVersion,omitempty"`           // 操作系统版本
+	NodeVersion         string `json:"nodeVersion,omitempty"`         // Node.js 版本
+	SDKVersion          string `json:"sdkVersion,omitempty"`          // SDK 版本
+	KiroAgentMode       string `json:"kiroAgentMode,omitempty"`       // Kiro Agent Mode
+	IDEVersion          string `json:"ideVersion,omitempty"`          // IDE 版本号
+	RefreshUserAgent    string `json:"refreshUserAgent,omitempty"`    // Token 刷新专用 User-Agent
+	RefreshXAmzAgent    string `json:"refreshXAmzAgent,omitempty"`    // Token 刷新专用 X-Amz-User-Agent
+	UsageUserAgent      string `json:"usageUserAgent,omitempty"`      // 使用限制检查专用 User-Agent
+	UsageXAmzAgent      string `json:"usageXAmzAgent,omitempty"`      // 使用限制检查专用 X-Amz-User-Agent
+}
+
 // Token 统一的token管理结构，合并了TokenInfo、RefreshResponse、RefreshRequest的功能
 type Token struct {
 	// 核心token信息
@@ -14,6 +30,9 @@ type Token struct {
 	// API响应字段
 	ExpiresIn  int    `json:"expiresIn,omitempty"`  // 多少秒后失效，来自RefreshResponse
 	ProfileArn string `json:"profileArn,omitempty"` // 来自RefreshResponse
+
+	// 设备指纹信息（每个账号的固定设备标识）
+	Fingerprint *DeviceFingerprint `json:"fingerprint,omitempty"`
 }
 
 // FromRefreshResponse 从RefreshResponse创建Token
@@ -62,4 +81,20 @@ type IdcRefreshRequest struct {
 	ClientSecret string `json:"clientSecret"`
 	GrantType    string `json:"grantType"`
 	RefreshToken string `json:"refreshToken"`
+}
+
+// TokenInvalidError token 失效错误（非额度耗尽）
+type TokenInvalidError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *TokenInvalidError) Error() string {
+	return e.Message
+}
+
+// IsTokenInvalidError 检查错误是否是 token 失效错误
+func IsTokenInvalidError(err error) bool {
+	_, ok := err.(*TokenInvalidError)
+	return ok
 }

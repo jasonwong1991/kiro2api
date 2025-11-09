@@ -151,3 +151,27 @@ func processConfigs(configs []AuthConfig) []AuthConfig {
 
 	return validConfigs
 }
+
+// SaveConfigToFile 保存配置到文件
+func SaveConfigToFile(configs []AuthConfig, filePath string) error {
+	if filePath == "" {
+		return fmt.Errorf("配置文件路径为空")
+	}
+
+	// 序列化配置
+	data, err := json.MarshalIndent(configs, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化配置失败: %w", err)
+	}
+
+	// 写入文件
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
+		return fmt.Errorf("写入配置文件失败: %w", err)
+	}
+
+	logger.Info("配置文件已更新",
+		logger.String("file_path", filePath),
+		logger.Int("config_count", len(configs)))
+
+	return nil
+}

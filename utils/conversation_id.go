@@ -4,15 +4,14 @@ import (
 	"crypto/md5"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 // ConversationIDManager 会话ID管理器 (SOLID-SRP: 单一职责)
 type ConversationIDManager struct {
-	mu    sync.RWMutex      // 保护cache的并发访问
-	cache map[string]string // 简单的内存缓存，生产环境可以使用Redis
+	mu    sync.RWMutex      // 保护cache的并发访问（虽然现在不使用缓存，保留用于兼容性）
+	cache map[string]string // 保留字段用于兼容性
 }
 
 // NewConversationIDManager 创建新的会话ID管理器
@@ -22,55 +21,27 @@ func NewConversationIDManager() *ConversationIDManager {
 	}
 }
 
-// GenerateConversationID 基于客户端信息生成稳定的会话ID
-// 遵循KISS原则：使用客户端特征生成稳定的标识符
+// GenerateConversationID 生成完全随机的会话ID
+// 改进：每次请求生成新的随机ID，避免规律性模式，增强账号安全
 func (c *ConversationIDManager) GenerateConversationID(ctx *gin.Context) string {
-	// 从请求头中获取客户端标识信息
-	clientIP := ctx.ClientIP()
-	userAgent := ctx.GetHeader("User-Agent")
-
 	// 检查是否有自定义的会话ID头（优先级最高）
 	if customConvID := ctx.GetHeader("X-Conversation-ID"); customConvID != "" {
 		return customConvID
 	}
 
-	// 为避免过于细粒度的会话分割，使用时间窗口来保持会话持久性
-	// 每小时内的同一客户端使用相同的conversationId
-	timeWindow := time.Now().Format("2006010215") // 精确到小时
-
-	// 构建客户端特征字符串
-	clientSignature := fmt.Sprintf("%s|%s|%s", clientIP, userAgent, timeWindow)
-
-	// 检查缓存 (使用读锁)
-	c.mu.RLock()
-	if cachedID, exists := c.cache[clientSignature]; exists {
-		c.mu.RUnlock()
-		return cachedID
-	}
-	c.mu.RUnlock()
-
-	// 生成基于特征的MD5哈希
-	hash := md5.Sum([]byte(clientSignature))
-	conversationID := fmt.Sprintf("conv-%x", hash[:8]) // 使用前8字节，保持简洁
-
-	// 缓存结果 (使用写锁，YAGNI: 简单内存缓存，未来可扩展为持久化)
-	c.mu.Lock()
-	c.cache[clientSignature] = conversationID
-	c.mu.Unlock()
-
-	return conversationID
+	// 生成完全随机的会话ID
+	randomID := GenerateRandomHex(16) // 生成16字节的随机十六进制字符串
+	return fmt.Sprintf("conv-%s", randomID)
 }
 
-// GetOrCreateConversationID 获取或创建会话ID
+// GetOrCreateConversationID 获取或创建会话ID（向后兼容）
 func (c *ConversationIDManager) GetOrCreateConversationID(ctx *gin.Context) string {
 	return c.GenerateConversationID(ctx)
 }
 
-// InvalidateOldSessions 清理过期的会话缓存
-// SOLID-SRP: 单独的清理职责，避免内存泄漏
+// InvalidateOldSessions 清理过期的会话缓存（保留用于兼容性）
 func (c *ConversationIDManager) InvalidateOldSessions() {
-	// 简单实现：清空所有缓存，依赖时间窗口重新生成
-	// 生产环境可以实现基于TTL的精确清理
+	// 由于现在使用随机ID，不再需要缓存清理
 	c.mu.Lock()
 	c.cache = make(map[string]string)
 	c.mu.Unlock()
@@ -79,14 +50,14 @@ func (c *ConversationIDManager) InvalidateOldSessions() {
 // 全局实例 - 单例模式 (SOLID-DIP: 提供抽象访问)
 var globalConversationIDManager = NewConversationIDManager()
 
-// GenerateStableConversationID 生成稳定的会话ID的全局函数
-// 为了向后兼容和简化调用，提供全局访问函数
+// GenerateStableConversationID 生成会话ID的全局函数
+// 注意：现在生成的是随机ID，名称保留用于向后兼容
 func GenerateStableConversationID(ctx *gin.Context) string {
 	return globalConversationIDManager.GetOrCreateConversationID(ctx)
 }
 
-// GenerateStableAgentContinuationID 生成稳定的代理延续GUID
-// 基于客户端特征生成确定性的标准GUID格式，遵循SOLID-SRP原则
+// GenerateStableAgentContinuationID 生成随机的代理延续GUID
+// 改进：每次请求生成新的随机GUID，避免规律性模式
 func GenerateStableAgentContinuationID(ctx *gin.Context) string {
 	// 向后兼容：如果没有提供context，使用随机UUID
 	if ctx == nil {
@@ -98,26 +69,11 @@ func GenerateStableAgentContinuationID(ctx *gin.Context) string {
 		return customAgentID
 	}
 
-	// 提取客户端特征信息
-	clientSignature := buildAgentClientSignature(ctx)
-
-	// 生成确定性GUID
-	return generateDeterministicGUID(clientSignature, "agent")
+	// 生成完全随机的GUID
+	return GenerateUUID()
 }
 
-// buildAgentClientSignature 构建代理客户端特征签名 (SOLID-SRP: 单一职责)
-func buildAgentClientSignature(ctx *gin.Context) string {
-	clientIP := ctx.ClientIP()
-	userAgent := ctx.GetHeader("User-Agent")
-
-	// 统一使用1小时时间窗口，与ConversationId保持一致
-	// 确保在同一会话内AgentContinuationId保持稳定
-	timeWindow := time.Now().Format("2006010215") // 精确到小时
-
-	return fmt.Sprintf("agent|%s|%s|%s", clientIP, userAgent, timeWindow)
-}
-
-// generateDeterministicGUID 基于输入字符串生成确定性GUID (SOLID-SRP: 单一职责)
+// generateDeterministicGUID 基于输入字符串生成确定性GUID (保留用于特殊场景)
 // 遵循UUID v5规范，使用MD5哈希生成标准GUID格式
 func generateDeterministicGUID(input, namespace string) string {
 	// 在输入中加入命名空间以避免冲突

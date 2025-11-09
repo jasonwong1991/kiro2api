@@ -171,10 +171,23 @@ func buildCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReque
 		req.Header.Set("Accept", "text/event-stream")
 	}
 
-	// 添加上游请求必需的header
-	req.Header.Set("x-amzn-kiro-agent-mode", "spec")
-	req.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.18 KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1")
-	req.Header.Set("user-agent", "aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1")
+	// 添加上游请求必需的header (使用账号专属的设备指纹)
+	var userAgent, xAmzUserAgent, agentMode string
+	if tokenInfo.Fingerprint != nil && tokenInfo.Fingerprint.UserAgent != "" {
+		userAgent = tokenInfo.Fingerprint.UserAgent
+		xAmzUserAgent = tokenInfo.Fingerprint.XAmzUserAgent
+		agentMode = tokenInfo.Fingerprint.KiroAgentMode
+	} else {
+		// 如果没有指纹信息，临时生成（向后兼容）
+		fp := utils.GenerateFingerprint(tokenInfo.RefreshToken)
+		userAgent = fp.UserAgent
+		xAmzUserAgent = fp.XAmzUserAgent
+		agentMode = fp.KiroAgentMode
+	}
+
+	req.Header.Set("x-amzn-kiro-agent-mode", agentMode)
+	req.Header.Set("x-amz-user-agent", xAmzUserAgent)
+	req.Header.Set("user-agent", userAgent)
 
 	return req, nil
 }

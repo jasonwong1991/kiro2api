@@ -40,9 +40,20 @@ func (c *UsageLimitsChecker) CheckUsageLimits(token types.TokenInfo) (*types.Usa
 		return nil, fmt.Errorf("创建使用限制检查请求失败: %v", err)
 	}
 
-	// 设置请求头 (严格按照token.md中的示例)
-	req.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.0 KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1")
-	req.Header.Set("user-agent", "aws-sdk-js/1.0.0 ua/2.1 os/darwin#24.6.0 lang/js md/nodejs#20.16.0 api/codewhispererruntime#1.0.0 m/E KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1")
+	// 设置请求头 (使用账号专属的设备指纹)
+	var userAgent, xAmzUserAgent string
+	if token.Fingerprint != nil && token.Fingerprint.UsageUserAgent != "" {
+		userAgent = token.Fingerprint.UsageUserAgent
+		xAmzUserAgent = token.Fingerprint.UsageXAmzAgent
+	} else {
+		// 如果没有指纹信息，临时生成（向后兼容）
+		fp := utils.GenerateUsageCheckerFingerprint(token.RefreshToken)
+		userAgent = fp.UserAgent
+		xAmzUserAgent = fp.XAmzUserAgent
+	}
+
+	req.Header.Set("x-amz-user-agent", xAmzUserAgent)
+	req.Header.Set("user-agent", userAgent)
 	req.Header.Set("host", "codewhisperer.us-east-1.amazonaws.com")
 	req.Header.Set("amz-sdk-invocation-id", generateInvocationID())
 	req.Header.Set("amz-sdk-request", "attempt=1; max=1")

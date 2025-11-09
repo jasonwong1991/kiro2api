@@ -26,10 +26,12 @@ type TokenManager struct {
 	configs      []AuthConfig
 	mutex        sync.RWMutex
 	lastRefresh  time.Time
-	configOrder  []string        // 配置顺序
-	currentIndex int             // 当前使用的token索引
-	exhausted    map[string]bool // 已耗尽的token记录
+	configOrder  []string          // 配置顺序
+	currentIndex int               // 当前使用的token索引
+	exhausted    map[string]bool   // 已耗尽的token记录
+	invalidated  map[int]time.Time // 失效的token记录（索引 -> 失效时间）
 	strategy     SelectionStrategy // token选择策略
+	configPath   string            // 配置文件路径（用于同步更新）
 }
 
 // SimpleTokenCache 简化的token缓存（纯数据结构，无锁）
@@ -64,10 +66,14 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 	// 从环境变量读取策略配置
 	strategy := getSelectionStrategy()
 
+	// 获取配置文件路径（如果使用文件配置）
+	configPath := getConfigPath()
+
 	logger.Info("TokenManager初始化",
 		logger.Int("config_count", len(configs)),
 		logger.Int("config_order_count", len(configOrder)),
-		logger.String("selection_strategy", string(strategy)))
+		logger.String("selection_strategy", string(strategy)),
+		logger.String("config_path", configPath))
 
 	return &TokenManager{
 		cache:        NewSimpleTokenCache(config.TokenCacheTTL),
@@ -75,8 +81,25 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		configOrder:  configOrder,
 		currentIndex: 0,
 		exhausted:    make(map[string]bool),
+		invalidated:  make(map[int]time.Time),
 		strategy:     strategy,
+		configPath:   configPath,
 	}
+}
+
+// getConfigPath 获取配置文件路径
+func getConfigPath() string {
+	authToken := os.Getenv("KIRO_AUTH_TOKEN")
+	if authToken == "" {
+		return ""
+	}
+
+	// 检查是否是文件路径
+	if fileInfo, err := os.Stat(authToken); err == nil && !fileInfo.IsDir() {
+		return authToken
+	}
+
+	return ""
 }
 
 // getSelectionStrategy 从环境变量获取选择策略
@@ -330,12 +353,25 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		// 刷新token
 		token, err := tm.refreshSingleToken(cfg)
 		if err != nil {
-			logger.Warn("刷新单个token失败",
-				logger.Int("config_index", i),
-				logger.String("auth_type", cfg.AuthType),
-				logger.Err(err))
+			// 检查是否是 token 失效错误
+			if types.IsTokenInvalidError(err) {
+				logger.Warn("检测到token失效",
+					logger.Int("config_index", i),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(err))
+				// 记录失效时间
+				tm.invalidated[i] = time.Now()
+			} else {
+				logger.Warn("刷新单个token失败",
+					logger.Int("config_index", i),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(err))
+			}
 			continue
 		}
+
+		// 如果刷新成功，清除失效标记
+		delete(tm.invalidated, i)
 
 		// 检查使用限制
 		var usageInfo *types.UsageLimits
@@ -423,4 +459,245 @@ func generateConfigOrder(configs []AuthConfig) []string {
 		logger.Any("order", order))
 
 	return order
+}
+
+// TokenStatus token 状态信息
+type TokenStatus struct {
+	Index         int                `json:"index"`
+	AuthType      string             `json:"auth_type"`
+	RefreshToken  string             `json:"refresh_token_preview"` // 只显示前后各4位
+	Disabled      bool               `json:"disabled"`
+	IsInvalid     bool               `json:"is_invalid"`
+	InvalidatedAt *time.Time         `json:"invalidated_at,omitempty"`
+	Available     float64            `json:"available"`
+	UsageInfo     *types.UsageLimits `json:"usage_info,omitempty"`
+	LastUsed      *time.Time         `json:"last_used,omitempty"`
+}
+
+// GetAllTokensStatus 获取所有 token 的状态
+func (tm *TokenManager) GetAllTokensStatus() []TokenStatus {
+	tm.mutex.RLock()
+	defer tm.mutex.RUnlock()
+
+	statuses := make([]TokenStatus, 0, len(tm.configs))
+
+	for i, cfg := range tm.configs {
+		status := TokenStatus{
+			Index:        i,
+			AuthType:     cfg.AuthType,
+			RefreshToken: maskToken(cfg.RefreshToken),
+			Disabled:     cfg.Disabled,
+		}
+
+		// 检查是否失效
+		if invalidTime, exists := tm.invalidated[i]; exists {
+			status.IsInvalid = true
+			status.InvalidatedAt = &invalidTime
+		}
+
+		// 获取缓存信息
+		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
+		if cached, exists := tm.cache.tokens[cacheKey]; exists {
+			status.Available = cached.Available
+			status.UsageInfo = cached.UsageInfo
+			if !cached.LastUsed.IsZero() {
+				status.LastUsed = &cached.LastUsed
+			}
+		}
+
+		statuses = append(statuses, status)
+	}
+
+	return statuses
+}
+
+// GetTokenStatus 获取单个 token 的状态
+func (tm *TokenManager) GetTokenStatus(index int) (*TokenStatus, error) {
+	tm.mutex.RLock()
+	defer tm.mutex.RUnlock()
+
+	if index < 0 || index >= len(tm.configs) {
+		return nil, fmt.Errorf("索引超出范围: %d", index)
+	}
+
+	cfg := tm.configs[index]
+	status := &TokenStatus{
+		Index:        index,
+		AuthType:     cfg.AuthType,
+		RefreshToken: maskToken(cfg.RefreshToken),
+		Disabled:     cfg.Disabled,
+	}
+
+	// 检查是否失效
+	if invalidTime, exists := tm.invalidated[index]; exists {
+		status.IsInvalid = true
+		status.InvalidatedAt = &invalidTime
+	}
+
+	// 获取缓存信息
+	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+	if cached, exists := tm.cache.tokens[cacheKey]; exists {
+		status.Available = cached.Available
+		status.UsageInfo = cached.UsageInfo
+		if !cached.LastUsed.IsZero() {
+			status.LastUsed = &cached.LastUsed
+		}
+	}
+
+	return status, nil
+}
+
+// RemoveToken 删除单个 token（仅失效的可删除）
+func (tm *TokenManager) RemoveToken(index int) error {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	if index < 0 || index >= len(tm.configs) {
+		return fmt.Errorf("索引超出范围: %d", index)
+	}
+
+	// 检查是否失效
+	if _, exists := tm.invalidated[index]; !exists {
+		return fmt.Errorf("只能删除失效的 token，索引 %d 的 token 未失效", index)
+	}
+
+	// 从配置中移除
+	tm.configs = append(tm.configs[:index], tm.configs[index+1:]...)
+
+	// 更新失效记录（索引需要调整）
+	newInvalidated := make(map[int]time.Time)
+	for i, t := range tm.invalidated {
+		if i < index {
+			newInvalidated[i] = t
+		} else if i > index {
+			newInvalidated[i-1] = t
+		}
+		// i == index 的被删除，不添加
+	}
+	tm.invalidated = newInvalidated
+
+	// 重新生成配置顺序
+	tm.configOrder = generateConfigOrder(tm.configs)
+
+	// 清理缓存中对应的 token
+	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+	delete(tm.cache.tokens, cacheKey)
+
+	logger.Info("删除失效token",
+		logger.Int("index", index),
+		logger.Int("remaining_count", len(tm.configs)))
+
+	// 同步配置文件（如果使用文件配置）
+	if tm.configPath != "" {
+		if err := SaveConfigToFile(tm.configs, tm.configPath); err != nil {
+			logger.Warn("同步配置文件失败", logger.Err(err))
+			// 不返回错误，因为内存中的删除已经成功
+		}
+	}
+
+	return nil
+}
+
+// RemoveInvalidTokens 批量删除所有失效的 token
+func (tm *TokenManager) RemoveInvalidTokens() (int, error) {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	if len(tm.invalidated) == 0 {
+		return 0, nil
+	}
+
+	// 收集需要删除的索引（从大到小排序，避免删除时索引错乱）
+	indices := make([]int, 0, len(tm.invalidated))
+	for i := range tm.invalidated {
+		indices = append(indices, i)
+	}
+
+	// 排序（降序）
+	for i := 0; i < len(indices); i++ {
+		for j := i + 1; j < len(indices); j++ {
+			if indices[i] < indices[j] {
+				indices[i], indices[j] = indices[j], indices[i]
+			}
+		}
+	}
+
+	// 从后往前删除
+	removedCount := 0
+	for _, index := range indices {
+		if index >= 0 && index < len(tm.configs) {
+			tm.configs = append(tm.configs[:index], tm.configs[index+1:]...)
+			removedCount++
+
+			// 清理缓存
+			cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+			delete(tm.cache.tokens, cacheKey)
+		}
+	}
+
+	// 清空失效记录
+	tm.invalidated = make(map[int]time.Time)
+
+	// 重新生成配置顺序
+	tm.configOrder = generateConfigOrder(tm.configs)
+
+	logger.Info("批量删除失效token",
+		logger.Int("removed_count", removedCount),
+		logger.Int("remaining_count", len(tm.configs)))
+
+	// 同步配置文件（如果使用文件配置）
+	if tm.configPath != "" {
+		if err := SaveConfigToFile(tm.configs, tm.configPath); err != nil {
+			logger.Warn("同步配置文件失败", logger.Err(err))
+			// 不返回错误，因为内存中的删除已经成功
+		}
+	}
+
+	return removedCount, nil
+}
+
+// ExportTokens 导出 token 配置（支持单个或全部）
+func (tm *TokenManager) ExportTokens(indices []int) ([]AuthConfig, error) {
+	tm.mutex.RLock()
+	defer tm.mutex.RUnlock()
+
+	// 如果 indices 为空，导出全部
+	if len(indices) == 0 {
+		exported := make([]AuthConfig, len(tm.configs))
+		copy(exported, tm.configs)
+		return exported, nil
+	}
+
+	// 导出指定索引的配置
+	exported := make([]AuthConfig, 0, len(indices))
+	for _, index := range indices {
+		if index < 0 || index >= len(tm.configs) {
+			return nil, fmt.Errorf("索引超出范围: %d", index)
+		}
+		exported = append(exported, tm.configs[index])
+	}
+
+	return exported, nil
+}
+
+// maskToken 遮蔽 token，只显示前后各4位
+func maskToken(token string) string {
+	if len(token) <= 8 {
+		return "****"
+	}
+	return token[:4] + "****" + token[len(token)-4:]
+}
+
+// SyncConfigFile 同步配置到文件（如果使用文件配置）
+func (tm *TokenManager) SyncConfigFile() error {
+	if tm.configPath == "" {
+		return fmt.Errorf("未使用文件配置，无需同步")
+	}
+
+	tm.mutex.RLock()
+	configs := make([]AuthConfig, len(tm.configs))
+	copy(configs, tm.configs)
+	tm.mutex.RUnlock()
+
+	return SaveConfigToFile(configs, tm.configPath)
 }

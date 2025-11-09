@@ -35,8 +35,8 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 	// 注入请求ID，便于日志追踪
 	r.Use(RequestIDMiddleware())
 	r.Use(corsMiddleware())
-	// 只对 /v1 开头的端点进行认证
-	r.Use(PathBasedAuthMiddleware(authToken, []string{"/v1"}))
+	// 只对 /v1 开头的端点进行认证（排除管理 API）
+	r.Use(PathBasedAuthMiddleware(authToken, []string{"/v1/messages", "/v1/chat", "/v1/models"}))
 
 	// 静态资源服务 - 前后端完全分离
 	r.Static("/static", "./static")
@@ -46,6 +46,15 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 
 	// API端点 - 纯数据服务
 	r.GET("/api/tokens", handleTokenPoolAPI)
+
+	// 注册管理 API 路由
+	adminToken := os.Getenv("KIRO_ADMIN_TOKEN")
+	if adminToken != "" {
+		RegisterAdminRoutes(r, authService, adminToken)
+		logger.Info("管理 API 已启用", logger.String("admin_token", "***"))
+	} else {
+		logger.Warn("管理 API 未启用：未设置 KIRO_ADMIN_TOKEN 环境变量")
+	}
 
 	// GET /v1/models 端点
 	r.GET("/v1/models", func(c *gin.Context) {
