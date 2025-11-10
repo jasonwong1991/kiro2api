@@ -94,12 +94,13 @@ func getConfigPath() string {
 		return ""
 	}
 
-	// 检查是否是文件路径
-	if fileInfo, err := os.Stat(authToken); err == nil && !fileInfo.IsDir() {
-		return authToken
+	// 如果以 [ 开头，说明是 JSON 字符串，不是文件路径
+	if len(authToken) > 0 && authToken[0] == '[' {
+		return ""
 	}
 
-	return ""
+	// 否则认为是文件路径（即使文件暂时不存在，也返回路径用于后续保存）
+	return authToken
 }
 
 // getSelectionStrategy 从环境变量获取选择策略
