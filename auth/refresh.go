@@ -216,8 +216,10 @@ func isTokenInvalidError(statusCode int, body []byte) bool {
 	invalidPatterns := []string{
 		"invalid_grant",
 		"invalid_token",
+		"invalid_client",      // IdC 认证失败
 		"token_expired",
 		"unauthorized_client",
+		"Bad credentials",     // Social 认证失败
 		"InvalidToken",
 		"ExpiredToken",
 		"UnauthorizedClient",

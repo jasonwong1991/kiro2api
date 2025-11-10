@@ -32,6 +32,6 @@ server.py
 jetbrainsai2api
 parser.test
 auth.json
-*.json
+*.json(!tokens.json)
 .go*
 *.out
