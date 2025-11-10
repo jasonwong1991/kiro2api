@@ -15,10 +15,10 @@ KIRO_CLIENT_TOKEN=your_client_token_here
 KIRO_AUTH_TOKEN='[{"auth":"Social","refreshToken":"your_refresh_token"}]'
 
 # 方式2: 配置文件路径（推荐）
-KIRO_AUTH_TOKEN=/path/to/auth_config.json
+KIRO_AUTH_TOKEN=/path/to/tokens.json
 
-# 管理员 Token（可选，用于 Dashboard 管理功能）
-KIRO_ADMIN_TOKEN=your_admin_token_here
+# 管理员 Token（可选，用于 Dashboard 管理功能，不设置则禁用管理 API）
+# KIRO_ADMIN_TOKEN=your_admin_token_here
 
 # 服务端口（默认 8080）
 PORT=8080
@@ -30,7 +30,7 @@ LOG_FORMAT=json
 
 ### 2. 配置 Token 文件
 
-创建 `auth_config.json`：
+创建 `tokens.json`：
 
 ```json
 [
@@ -68,9 +68,9 @@ LOG_FORMAT=json
 docker run -d \
   --name kiro2api \
   -p 8080:8080 \
-  -v $(pwd)/auth_config.json:/app/auth_config.json \
+  -v $(pwd)/tokens.json:/app/tokens.json \
   -e KIRO_CLIENT_TOKEN=your_token \
-  -e KIRO_AUTH_TOKEN=/app/auth_config.json \
+  -e KIRO_AUTH_TOKEN=/app/tokens.json \
   -e KIRO_ADMIN_TOKEN=your_admin_token \
   your-registry/kiro2api:latest
 ```
@@ -280,9 +280,9 @@ docker build -f Dockerfile.lowmem -t kiro2api:lowmem .
 docker run -d \
   --name kiro2api \
   -p 8080:8080 \
-  -v $(pwd)/auth_config.json:/app/auth_config.json \
+  -v $(pwd)/tokens.json:/app/tokens.json \
   -e KIRO_CLIENT_TOKEN=your_token \
-  -e KIRO_AUTH_TOKEN=/app/auth_config.json \
+  -e KIRO_AUTH_TOKEN=/app/tokens.json \
   -e KIRO_ADMIN_TOKEN=your_admin_token \
   -e LOG_LEVEL=info \
   kiro2api:latest
@@ -300,10 +300,10 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./auth_config.json:/app/auth_config.json
+      - ./tokens.json:/app/tokens.json
     environment:
       - KIRO_CLIENT_TOKEN=your_client_token
-      - KIRO_AUTH_TOKEN=/app/auth_config.json
+      - KIRO_AUTH_TOKEN=/app/tokens.json
       - KIRO_ADMIN_TOKEN=your_admin_token
       - LOG_LEVEL=info
       - LOG_FORMAT=json
@@ -317,7 +317,7 @@ services:
 |--------|------|--------|------|
 | `KIRO_CLIENT_TOKEN` | ✅ | - | API 认证密钥 |
 | `KIRO_AUTH_TOKEN` | ✅ | - | Token 配置（JSON 字符串或文件路径） |
-| `KIRO_ADMIN_TOKEN` | ❌ | - | 管理员 Token（启用管理 API） |
+| `KIRO_ADMIN_TOKEN` | ❌ | 空（禁用） | 管理员 Token（启用管理 API） |
 | `PORT` | ❌ | `8080` | 服务端口 |
 | `LOG_LEVEL` | ❌ | `info` | 日志级别（debug/info/warn/error） |
 | `LOG_FORMAT` | ❌ | `json` | 日志格式（text/json） |
@@ -342,7 +342,7 @@ services:
 
 ### 3. 配置文件
 
-- ✅ 设置正确的文件权限（`chmod 600 auth_config.json`）
+- ✅ 设置正确的文件权限（`chmod 600 tokens.json`）
 - ✅ 定期备份配置文件
 - ✅ 使用 `.gitignore` 排除敏感文件
 
