@@ -383,7 +383,17 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 			usageInfo = usage
 			available = CalculateAvailableCount(usage)
 		} else {
-			logger.Warn("检查使用限制失败", logger.Err(checkErr))
+			// 检查是否是 token 失效错误
+			if types.IsTokenInvalidError(checkErr) {
+				logger.Warn("使用限制检查检测到token失效",
+					logger.Int("config_index", i),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(checkErr))
+				// 记录失效时间
+				tm.invalidated[i] = time.Now()
+			} else {
+				logger.Warn("检查使用限制失败", logger.Err(checkErr))
+			}
 		}
 
 		// 更新缓存（直接访问，已在tm.mutex保护下）

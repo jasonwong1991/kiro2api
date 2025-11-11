@@ -82,6 +82,13 @@ func (c *UsageLimitsChecker) CheckUsageLimits(token types.TokenInfo) (*types.Usa
 		logger.String("response_body", string(body)))
 
 	if resp.StatusCode != http.StatusOK {
+		// 检查是否是 token 失效错误
+		if isUsageLimitsTokenInvalidError(resp.StatusCode, body) {
+			return nil, &types.TokenInvalidError{
+				StatusCode: resp.StatusCode,
+				Message:    string(body),
+			}
+		}
 		return nil, fmt.Errorf("使用限制检查失败: 状态码 %d, 响应: %s", resp.StatusCode, string(body))
 	}
 
@@ -159,4 +166,32 @@ func (c *UsageLimitsChecker) logUsageLimits(limits *types.UsageLimits) {
 // generateInvocationID 生成请求ID (简化版本)
 func generateInvocationID() string {
 	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), "kiro2api")
+}
+
+// isUsageLimitsTokenInvalidError 判断使用限制检查错误是否是 token 失效
+func isUsageLimitsTokenInvalidError(statusCode int, body []byte) bool {
+	// 403 Forbidden 通常表示账号被暂停或 token 失效
+	if statusCode != http.StatusForbidden && statusCode != http.StatusUnauthorized {
+		return false
+	}
+
+	bodyStr := string(body)
+
+	// 检查账号暂停或失效的标识
+	suspendedPatterns := []string{
+		"TEMPORARILY_SUSPENDED",  // 账号暂停
+		"PERMANENTLY_SUSPENDED",  // 账号永久暂停
+		"SUSPENDED",              // 通用暂停
+		"InvalidToken",           // Token 无效
+		"ExpiredToken",           // Token 过期
+		"Unauthorized",           // 未授权
+	}
+
+	for _, pattern := range suspendedPatterns {
+		if contains(bodyStr, pattern) {
+			return true
+		}
+	}
+
+	return false
 }
