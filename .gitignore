@@ -24,6 +24,10 @@ test/raw_data_replay/
 .DS_Store
 .serena
 
+# 敏感配置文件（不要提交到版本控制）
+tokens.json
+auth_config.json
+
 # 旧文件清理标记
 1.json
 2.json
@@ -32,6 +36,5 @@ server.py
 jetbrainsai2api
 parser.test
 auth.json
-*.json(!tokens.json)
 .go*
 *.out

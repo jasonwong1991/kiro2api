@@ -15,9 +15,10 @@ import (
 type SelectionStrategy string
 
 const (
-	StrategySequential SelectionStrategy = "sequential"   // 顺序选择
-	StrategyRandom     SelectionStrategy = "random"       // 随机选择
-	StrategyRoundRobin SelectionStrategy = "round_robin" // 轮询选择
+	StrategySequential   SelectionStrategy = "sequential"     // 顺序选择
+	StrategyRandom       SelectionStrategy = "random"         // 随机选择
+	StrategyRoundRobin   SelectionStrategy = "round_robin"   // 轮询选择
+	StrategyBatchRotate  SelectionStrategy = "batch_rotate"  // 分批轮换（避免单IP频繁刷新）
 )
 
 // TokenManager 简化的token管理器
@@ -32,6 +33,13 @@ type TokenManager struct {
 	invalidated  map[int]time.Time // 失效的token记录（索引 -> 失效时间）
 	strategy     SelectionStrategy // token选择策略
 	configPath   string            // 配置文件路径（用于同步更新）
+
+	// 分批轮换策略相关字段
+	batchSize         int       // 每批使用的账号数量
+	currentBatch      int       // 当前批次索引
+	batchStartIndex   int       // 当前批次起始索引
+	batchRoundRobin   int       // 批次内轮询索引
+	lastBatchRotation time.Time // 上次批次切换时间
 }
 
 // SimpleTokenCache 简化的token缓存（纯数据结构，无锁）
@@ -69,21 +77,30 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 	// 获取配置文件路径（如果使用文件配置）
 	configPath := getConfigPath()
 
+	// 获取批次大小配置
+	batchSize := getBatchSize()
+
 	logger.Info("TokenManager初始化",
 		logger.Int("config_count", len(configs)),
 		logger.Int("config_order_count", len(configOrder)),
 		logger.String("selection_strategy", string(strategy)),
+		logger.Int("batch_size", batchSize),
 		logger.String("config_path", configPath))
 
 	return &TokenManager{
-		cache:        NewSimpleTokenCache(config.TokenCacheTTL),
-		configs:      configs,
-		configOrder:  configOrder,
-		currentIndex: 0,
-		exhausted:    make(map[string]bool),
-		invalidated:  make(map[int]time.Time),
-		strategy:     strategy,
-		configPath:   configPath,
+		cache:             NewSimpleTokenCache(config.TokenCacheTTL),
+		configs:           configs,
+		configOrder:       configOrder,
+		currentIndex:      0,
+		exhausted:         make(map[string]bool),
+		invalidated:       make(map[int]time.Time),
+		strategy:          strategy,
+		configPath:        configPath,
+		batchSize:         batchSize,
+		currentBatch:      0,
+		batchStartIndex:   0,
+		batchRoundRobin:   0,
+		lastBatchRotation: time.Now(),
 	}
 }
 
@@ -112,7 +129,7 @@ func getSelectionStrategy() SelectionStrategy {
 
 	strategy := SelectionStrategy(strategyEnv)
 	switch strategy {
-	case StrategySequential, StrategyRandom, StrategyRoundRobin:
+	case StrategySequential, StrategyRandom, StrategyRoundRobin, StrategyBatchRotate:
 		return strategy
 	default:
 		logger.Warn("未知的token选择策略，使用默认策略",
@@ -120,6 +137,30 @@ func getSelectionStrategy() SelectionStrategy {
 			logger.String("default_strategy", string(StrategyRoundRobin)))
 		return StrategyRoundRobin
 	}
+}
+
+// getBatchSize 从环境变量获取批次大小
+func getBatchSize() int {
+	batchSizeEnv := os.Getenv("KIRO_BATCH_SIZE")
+	if batchSizeEnv == "" {
+		return 0 // 0 表示不使用分批策略（使用全部账号）
+	}
+
+	var batchSize int
+	if _, err := fmt.Sscanf(batchSizeEnv, "%d", &batchSize); err != nil {
+		logger.Warn("无效的批次大小配置，使用默认值0",
+			logger.String("invalid_value", batchSizeEnv),
+			logger.Err(err))
+		return 0
+	}
+
+	if batchSize < 0 {
+		logger.Warn("批次大小不能为负数，使用默认值0",
+			logger.Int("invalid_value", batchSize))
+		return 0
+	}
+
+	return batchSize
 }
 
 // getBestToken 获取最优可用token
@@ -206,6 +247,8 @@ func (tm *TokenManager) selectBestTokenUnlocked() *CachedToken {
 		return tm.selectRoundRobinToken()
 	case StrategySequential:
 		return tm.selectSequentialToken()
+	case StrategyBatchRotate:
+		return tm.selectBatchRotateToken()
 	default:
 		logger.Warn("未知策略，回退到轮询",
 			logger.String("strategy", string(tm.strategy)))
@@ -341,12 +384,140 @@ func (tm *TokenManager) selectRandomToken() *CachedToken {
 	return selected
 }
 
+// selectBatchRotateToken 分批轮换策略
+// 核心逻辑：
+// 1. 将所有 token 分成多个批次，每批 batchSize 个
+// 2. 当前批次内使用 round_robin 策略轮流使用
+// 3. 当前批次所有 token 都不可用时，自动切换到下一批次
+// 4. 只刷新当前批次的 token，其他批次不刷新（避免单IP频繁刷新）
+// 5. 所有批次都耗尽后，重置到第一批次并触发全局刷新
+func (tm *TokenManager) selectBatchRotateToken() *CachedToken {
+	if len(tm.configOrder) == 0 {
+		return nil
+	}
+
+	// 如果 batchSize 为 0 或大于等于总数，降级为普通轮询策略
+	if tm.batchSize <= 0 || tm.batchSize >= len(tm.configOrder) {
+		logger.Debug("批次大小无效，降级为轮询策略",
+			logger.Int("batch_size", tm.batchSize),
+			logger.Int("total_count", len(tm.configOrder)))
+		return tm.selectRoundRobinToken()
+	}
+
+	// 计算总批次数
+	totalBatches := (len(tm.configOrder) + tm.batchSize - 1) / tm.batchSize
+
+	// 尝试从当前批次选择可用 token
+	for batchAttempts := 0; batchAttempts < totalBatches; batchAttempts++ {
+		// 计算当前批次的起始和结束索引
+		batchStart := tm.currentBatch * tm.batchSize
+		batchEnd := batchStart + tm.batchSize
+		if batchEnd > len(tm.configOrder) {
+			batchEnd = len(tm.configOrder)
+		}
+
+		logger.Debug("尝试从当前批次选择token",
+			logger.Int("current_batch", tm.currentBatch),
+			logger.Int("batch_start", batchStart),
+			logger.Int("batch_end", batchEnd),
+			logger.Int("batch_round_robin", tm.batchRoundRobin))
+
+		// 在当前批次内轮询查找可用 token
+		batchSize := batchEnd - batchStart
+		for tokenAttempts := 0; tokenAttempts < batchSize; tokenAttempts++ {
+			// 计算当前要检查的 token 在批次内的相对索引
+			relativeIndex := tm.batchRoundRobin % batchSize
+			// 计算在 configOrder 中的绝对索引
+			absoluteIndex := batchStart + relativeIndex
+			currentKey := tm.configOrder[absoluteIndex]
+
+			// 移动到下一个位置（为下次调用准备）
+			tm.batchRoundRobin = (tm.batchRoundRobin + 1) % batchSize
+
+			// 检查 token 是否存在且可用
+			if cached, exists := tm.cache.tokens[currentKey]; exists {
+				if time.Since(cached.CachedAt) <= tm.cache.ttl && cached.IsUsable() {
+					logger.Debug("分批轮换策略选择token",
+						logger.String("selected_key", currentKey),
+						logger.Int("batch", tm.currentBatch),
+						logger.Int("absolute_index", absoluteIndex),
+						logger.Float64("available_count", cached.Available))
+					return cached
+				}
+			}
+
+			logger.Debug("token不可用，尝试批次内下一个",
+				logger.String("skipped_key", currentKey),
+				logger.Int("absolute_index", absoluteIndex))
+		}
+
+		// 当前批次所有 token 都不可用，切换到下一批次
+		tm.currentBatch = (tm.currentBatch + 1) % totalBatches
+		tm.batchRoundRobin = 0 // 重置批次内轮询索引
+		tm.lastBatchRotation = time.Now()
+
+		logger.Info("当前批次耗尽，切换到下一批次",
+			logger.Int("new_batch", tm.currentBatch),
+			logger.Int("total_batches", totalBatches),
+			logger.String("rotation_time", tm.lastBatchRotation.Format(time.RFC3339)))
+
+		// 如果回到第一批次，说明所有批次都耗尽了
+		if tm.currentBatch == 0 {
+			logger.Warn("所有批次都已耗尽，需要全局刷新",
+				logger.Int("total_batches", totalBatches),
+				logger.Int("total_tokens", len(tm.configOrder)))
+			// 触发全局刷新（在下次 getBestToken 时会自动刷新）
+			tm.lastRefresh = time.Time{} // 重置刷新时间，强制下次刷新
+			return nil
+		}
+	}
+
+	// 所有批次都尝试过了，仍然没有可用 token
+	logger.Warn("所有批次都不可用（分批轮换策略）",
+		logger.Int("total_batches", totalBatches),
+		logger.Int("total_tokens", len(tm.configOrder)))
+
+	return nil
+}
+
 // refreshCacheUnlocked 刷新token缓存
 // 内部方法：调用者必须持有 tm.mutex
+// 分批轮换策略优化：只刷新当前批次的 token，避免单 IP 频繁刷新
 func (tm *TokenManager) refreshCacheUnlocked() error {
 	logger.Debug("开始刷新token缓存")
 
-	for i, cfg := range tm.configs {
+	// 确定需要刷新的索引范围
+	var refreshIndices []int
+	if tm.strategy == StrategyBatchRotate && tm.batchSize > 0 && tm.batchSize < len(tm.configs) {
+		// 分批轮换策略：只刷新当前批次
+		batchStart := tm.currentBatch * tm.batchSize
+		batchEnd := batchStart + tm.batchSize
+		if batchEnd > len(tm.configs) {
+			batchEnd = len(tm.configs)
+		}
+
+		for i := batchStart; i < batchEnd; i++ {
+			refreshIndices = append(refreshIndices, i)
+		}
+
+		logger.Info("分批刷新策略：只刷新当前批次",
+			logger.Int("current_batch", tm.currentBatch),
+			logger.Int("batch_start", batchStart),
+			logger.Int("batch_end", batchEnd),
+			logger.Int("refresh_count", len(refreshIndices)))
+	} else {
+		// 其他策略：刷新所有 token
+		for i := range tm.configs {
+			refreshIndices = append(refreshIndices, i)
+		}
+
+		logger.Debug("全局刷新策略：刷新所有token",
+			logger.Int("refresh_count", len(refreshIndices)))
+	}
+
+	// 刷新指定索引的 token
+	for _, i := range refreshIndices {
+		cfg := tm.configs[i]
 		if cfg.Disabled {
 			continue
 		}

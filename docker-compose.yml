@@ -1,30 +1,73 @@
 services:
   kiro2api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # 使用 GitHub Container Registry 预构建镜像
+    # 支持 linux/amd64 和 linux/arm64 架构
+    image: ghcr.io/jasonwong/kiro2api:latest
+
+    # 如果需要本地构建，取消注释以下行并注释掉上面的 image 行
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+
     container_name: kiro2api
     restart: unless-stopped
     ports:
       - "5656:8080"
     environment:
+      # ============================================================================
+      # Token 管理配置
+      # ============================================================================
       # Token配置 (JSON格式，支持多账号池和双认证方式)
+      # 支持文件路径或 JSON 字符串
       - KIRO_AUTH_TOKEN=${KIRO_AUTH_TOKEN:-/app/tokens.json}
-      # Token选择策略: sequential(顺序), random(随机), round_robin(轮询)
-      - TOKEN_SELECTION_STRATEGY=${TOKEN_SELECTION_STRATEGY:-sequential}
-      # 客户端认证Token
-      - KIRO_CLIENT_TOKEN=${KIRO_CLIENT_TOKEN:-Wang1234}
+
+      # Token选择策略: sequential(顺序), random(随机), round_robin(轮询), batch_rotate(分批轮换)
+      # 推荐使用 batch_rotate 避免单IP频繁刷新导致封号
+      - TOKEN_SELECTION_STRATEGY=${TOKEN_SELECTION_STRATEGY:-round_robin}
+
+      # 分批轮换策略配置（仅在 TOKEN_SELECTION_STRATEGY=batch_rotate 时生效）
+      # 每批同时使用的账号数量，建议设置为总账号数的 1/3 到 1/5
+      # 例如：15个账号设置为3-5，30个账号设置为6-10
+      - KIRO_BATCH_SIZE=${KIRO_BATCH_SIZE:-0}
+
+      # ============================================================================
+      # 认证配置
+      # ============================================================================
+      # 客户端认证Token（用于访问 /v1/* API）
+      - KIRO_CLIENT_TOKEN=${KIRO_CLIENT_TOKEN:-123456}
+
+      # 管理员认证Token（用于访问 /v1/admin/* 管理接口）
+      # 不设置则禁用管理 API
+      - KIRO_ADMIN_TOKEN=${KIRO_ADMIN_TOKEN:-}
+
+      # ============================================================================
       # 服务配置
+      # ============================================================================
       - PORT=${PORT:-8080}
       - GIN_MODE=${GIN_MODE:-release}
+
+      # ============================================================================
       # 日志配置
+      # ============================================================================
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - LOG_FORMAT=${LOG_FORMAT:-json}
       - LOG_CONSOLE=${LOG_CONSOLE:-true}
       - LOG_FILE=${LOG_FILE:-}
+
+      # ============================================================================
+      # 工具配置
+      # ============================================================================
+      # 工具描述的最大长度（字符数，默认: 10000）
+      - MAX_TOOL_DESCRIPTION_LENGTH=${MAX_TOOL_DESCRIPTION_LENGTH:-10000}
+
     volumes:
+      # AWS SSO 缓存目录（持久化设备指纹）
       - aws_sso_cache:/home/appuser/.aws/sso/cache
+
+      # Token 配置文件（只读挂载）
+      # 请确保 tokens.json 文件存在且格式正确
       - ./tokens.json:/app/tokens.json:ro
+
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/v1/models"]
       interval: 30s
@@ -32,5 +75,16 @@ services:
       retries: 3
       start_period: 10s
 
+    # 资源限制（可选，根据实际需求调整）
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'
+    #       memory: 512M
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 256M
+
 volumes:
   aws_sso_cache:
+    driver: local
