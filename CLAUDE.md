@@ -56,14 +56,18 @@ go build -ldflags="-s -w" -o kiro2api main.go
 - `server/` - HTTP 服务器、路由、处理器、中间件
 - `converter/` - API 格式转换（Anthropic ↔ OpenAI ↔ CodeWhisperer）
 - `parser/` - EventStream 解析、工具调用处理、会话管理
-- `auth/` - Token 管理（顺序选择策略、并发控制、使用限制监控）
+- `auth/` - Token 管理（多策略选择、分批轮换、失效检测、并发控制、使用限制监控）
 - `utils/` - 请求分析、Token 估算、HTTP 工具
 - `types/` - 数据结构定义
 - `logger/` - 结构化日志
 - `config/` - 配置常量和模型映射
 
 **关键实现**：
-- Token 管理：顺序选择策略，支持 Social/IdC 双认证
+- Token 管理：
+  - 多种选择策略（sequential/random/round_robin/batch_rotate）
+  - 分批轮换策略：动态构建有效账号池，避免单 IP 频繁刷新导致封号
+  - 失效检测与自动清理：检测失效 token 并支持自动删除（可选）
+  - 支持 Social/IdC 双认证
 - 流式优化：零延迟传输，直接内存分配（已移除对象池）
 - 智能超时：根据 MaxTokens、内容长度、工具使用动态调整
 - EventStream 解析：`CompliantEventStreamParser`（BigEndian 格式）

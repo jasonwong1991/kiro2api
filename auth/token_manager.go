@@ -40,6 +40,9 @@ type TokenManager struct {
 	batchStartIndex   int       // 当前批次起始索引
 	batchRoundRobin   int       // 批次内轮询索引
 	lastBatchRotation time.Time // 上次批次切换时间
+
+	// 自动管理相关字段
+	autoRemoveInvalid bool // 是否自动删除失效的账号
 }
 
 // SimpleTokenCache 简化的token缓存（纯数据结构，无锁）
@@ -80,11 +83,15 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 	// 获取批次大小配置
 	batchSize := getBatchSize()
 
+	// 获取自动删除失效账号配置
+	autoRemove := getAutoRemoveInvalid()
+
 	logger.Info("TokenManager初始化",
 		logger.Int("config_count", len(configs)),
 		logger.Int("config_order_count", len(configOrder)),
 		logger.String("selection_strategy", string(strategy)),
 		logger.Int("batch_size", batchSize),
+		logger.Bool("auto_remove_invalid", autoRemove),
 		logger.String("config_path", configPath))
 
 	return &TokenManager{
@@ -101,6 +108,7 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		batchStartIndex:   0,
 		batchRoundRobin:   0,
 		lastBatchRotation: time.Now(),
+		autoRemoveInvalid: autoRemove,
 	}
 }
 
@@ -161,6 +169,26 @@ func getBatchSize() int {
 	}
 
 	return batchSize
+}
+
+// getAutoRemoveInvalid 从环境变量获取是否自动删除失效账号
+func getAutoRemoveInvalid() bool {
+	autoRemoveEnv := os.Getenv("KIRO_AUTO_REMOVE_INVALID")
+	if autoRemoveEnv == "" {
+		return false // 默认不自动删除，保守策略
+	}
+
+	// 支持的值: true, false, 1, 0, yes, no
+	switch autoRemoveEnv {
+	case "true", "1", "yes", "YES", "True", "TRUE":
+		return true
+	case "false", "0", "no", "NO", "False", "FALSE":
+		return false
+	default:
+		logger.Warn("无效的自动删除配置，使用默认值false",
+			logger.String("invalid_value", autoRemoveEnv))
+		return false
+	}
 }
 
 // getBestToken 获取最优可用token
@@ -384,52 +412,70 @@ func (tm *TokenManager) selectRandomToken() *CachedToken {
 	return selected
 }
 
-// selectBatchRotateToken 分批轮换策略
+// selectBatchRotateToken 分批轮换策略（优化版）
 // 核心逻辑：
-// 1. 将所有 token 分成多个批次，每批 batchSize 个
-// 2. 当前批次内使用 round_robin 策略轮流使用
-// 3. 当前批次所有 token 都不可用时，自动切换到下一批次
-// 4. 只刷新当前批次的 token，其他批次不刷新（避免单IP频繁刷新）
-// 5. 所有批次都耗尽后，重置到第一批次并触发全局刷新
+// 1. 动态构建有效账号池（排除失效和禁用的账号）
+// 2. 从有效账号池中选取前 N 个作为当前批次
+// 3. 当前批次内使用 round_robin 策略轮流使用
+// 4. 当前批次所有 token 都不可用时，自动切换到下一批次
+// 5. 只刷新当前批次的 token，其他批次不刷新（避免单IP频繁刷新）
+// 6. 所有批次都耗尽后，重置到第一批次并触发全局刷新
 func (tm *TokenManager) selectBatchRotateToken() *CachedToken {
 	if len(tm.configOrder) == 0 {
 		return nil
 	}
 
-	// 如果 batchSize 为 0 或大于等于总数，降级为普通轮询策略
-	if tm.batchSize <= 0 || tm.batchSize >= len(tm.configOrder) {
-		logger.Debug("批次大小无效，降级为轮询策略",
-			logger.Int("batch_size", tm.batchSize),
-			logger.Int("total_count", len(tm.configOrder)))
+	// 如果 batchSize 为 0，降级为普通轮询策略
+	if tm.batchSize <= 0 {
+		logger.Debug("批次大小为0，降级为轮询策略")
 		return tm.selectRoundRobinToken()
 	}
 
-	// 计算总批次数
-	totalBatches := (len(tm.configOrder) + tm.batchSize - 1) / tm.batchSize
+	// 第一步：构建有效账号池（排除失效和禁用的账号）
+	validIndices := tm.getValidAccountIndices()
+	if len(validIndices) == 0 {
+		logger.Warn("没有有效的账号可用")
+		return nil
+	}
 
-	// 尝试从当前批次选择可用 token
+	// 如果有效账号数量少于等于 batchSize，直接使用全部有效账号
+	if len(validIndices) <= tm.batchSize {
+		logger.Debug("有效账号数量不足一个批次，使用全部有效账号",
+			logger.Int("valid_count", len(validIndices)),
+			logger.Int("batch_size", tm.batchSize))
+		return tm.selectFromValidPool(validIndices)
+	}
+
+	// 第二步：计算批次信息
+	totalBatches := (len(validIndices) + tm.batchSize - 1) / tm.batchSize
+
+	// 第三步：尝试从当前批次选择可用 token
 	for batchAttempts := 0; batchAttempts < totalBatches; batchAttempts++ {
-		// 计算当前批次的起始和结束索引
+		// 计算当前批次的起始和结束索引（在有效账号池中）
 		batchStart := tm.currentBatch * tm.batchSize
 		batchEnd := batchStart + tm.batchSize
-		if batchEnd > len(tm.configOrder) {
-			batchEnd = len(tm.configOrder)
+		if batchEnd > len(validIndices) {
+			batchEnd = len(validIndices)
 		}
+
+		// 提取当前批次的账号索引
+		currentBatchIndices := validIndices[batchStart:batchEnd]
 
 		logger.Debug("尝试从当前批次选择token",
 			logger.Int("current_batch", tm.currentBatch),
 			logger.Int("batch_start", batchStart),
 			logger.Int("batch_end", batchEnd),
+			logger.Int("valid_total", len(validIndices)),
 			logger.Int("batch_round_robin", tm.batchRoundRobin))
 
-		// 在当前批次内轮询查找可用 token
-		batchSize := batchEnd - batchStart
+		// 第四步：在当前批次内轮询查找可用 token
+		batchSize := len(currentBatchIndices)
 		for tokenAttempts := 0; tokenAttempts < batchSize; tokenAttempts++ {
 			// 计算当前要检查的 token 在批次内的相对索引
 			relativeIndex := tm.batchRoundRobin % batchSize
-			// 计算在 configOrder 中的绝对索引
-			absoluteIndex := batchStart + relativeIndex
-			currentKey := tm.configOrder[absoluteIndex]
+			// 获取实际的配置索引
+			configIndex := currentBatchIndices[relativeIndex]
+			currentKey := tm.configOrder[configIndex]
 
 			// 移动到下一个位置（为下次调用准备）
 			tm.batchRoundRobin = (tm.batchRoundRobin + 1) % batchSize
@@ -440,7 +486,7 @@ func (tm *TokenManager) selectBatchRotateToken() *CachedToken {
 					logger.Debug("分批轮换策略选择token",
 						logger.String("selected_key", currentKey),
 						logger.Int("batch", tm.currentBatch),
-						logger.Int("absolute_index", absoluteIndex),
+						logger.Int("config_index", configIndex),
 						logger.Float64("available_count", cached.Available))
 					return cached
 				}
@@ -448,7 +494,7 @@ func (tm *TokenManager) selectBatchRotateToken() *CachedToken {
 
 			logger.Debug("token不可用，尝试批次内下一个",
 				logger.String("skipped_key", currentKey),
-				logger.Int("absolute_index", absoluteIndex))
+				logger.Int("config_index", configIndex))
 		}
 
 		// 当前批次所有 token 都不可用，切换到下一批次
@@ -459,13 +505,14 @@ func (tm *TokenManager) selectBatchRotateToken() *CachedToken {
 		logger.Info("当前批次耗尽，切换到下一批次",
 			logger.Int("new_batch", tm.currentBatch),
 			logger.Int("total_batches", totalBatches),
+			logger.Int("valid_accounts", len(validIndices)),
 			logger.String("rotation_time", tm.lastBatchRotation.Format(time.RFC3339)))
 
 		// 如果回到第一批次，说明所有批次都耗尽了
 		if tm.currentBatch == 0 {
 			logger.Warn("所有批次都已耗尽，需要全局刷新",
 				logger.Int("total_batches", totalBatches),
-				logger.Int("total_tokens", len(tm.configOrder)))
+				logger.Int("valid_accounts", len(validIndices)))
 			// 触发全局刷新（在下次 getBestToken 时会自动刷新）
 			tm.lastRefresh = time.Time{} // 重置刷新时间，强制下次刷新
 			return nil
@@ -475,7 +522,59 @@ func (tm *TokenManager) selectBatchRotateToken() *CachedToken {
 	// 所有批次都尝试过了，仍然没有可用 token
 	logger.Warn("所有批次都不可用（分批轮换策略）",
 		logger.Int("total_batches", totalBatches),
-		logger.Int("total_tokens", len(tm.configOrder)))
+		logger.Int("valid_accounts", len(validIndices)))
+
+	return nil
+}
+
+// getValidAccountIndices 获取所有有效账号的索引
+// 排除：1. 被标记为失效的账号  2. 被禁用的账号
+func (tm *TokenManager) getValidAccountIndices() []int {
+	var validIndices []int
+
+	for i, cfg := range tm.configs {
+		// 跳过禁用的账号
+		if cfg.Disabled {
+			continue
+		}
+
+		// 跳过失效的账号
+		if _, isInvalid := tm.invalidated[i]; isInvalid {
+			continue
+		}
+
+		validIndices = append(validIndices, i)
+	}
+
+	return validIndices
+}
+
+// selectFromValidPool 从有效账号池中选择可用的 token
+func (tm *TokenManager) selectFromValidPool(validIndices []int) *CachedToken {
+	if len(validIndices) == 0 {
+		return nil
+	}
+
+	// 轮询所有有效账号
+	startIndex := tm.currentIndex % len(validIndices)
+	for attempts := 0; attempts < len(validIndices); attempts++ {
+		relativeIndex := (startIndex + attempts) % len(validIndices)
+		configIndex := validIndices[relativeIndex]
+		currentKey := tm.configOrder[configIndex]
+
+		if cached, exists := tm.cache.tokens[currentKey]; exists {
+			if time.Since(cached.CachedAt) <= tm.cache.ttl && cached.IsUsable() {
+				// 更新当前索引
+				tm.currentIndex = (relativeIndex + 1) % len(validIndices)
+
+				logger.Debug("从有效账号池选择token",
+					logger.String("selected_key", currentKey),
+					logger.Int("config_index", configIndex),
+					logger.Float64("available_count", cached.Available))
+				return cached
+			}
+		}
+	}
 
 	return nil
 }
@@ -488,30 +587,53 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 
 	// 确定需要刷新的索引范围
 	var refreshIndices []int
-	if tm.strategy == StrategyBatchRotate && tm.batchSize > 0 && tm.batchSize < len(tm.configs) {
-		// 分批轮换策略：只刷新当前批次
-		batchStart := tm.currentBatch * tm.batchSize
-		batchEnd := batchStart + tm.batchSize
-		if batchEnd > len(tm.configs) {
-			batchEnd = len(tm.configs)
+	if tm.strategy == StrategyBatchRotate && tm.batchSize > 0 {
+		// 分批轮换策略：只刷新当前批次的有效账号
+		validIndices := tm.getValidAccountIndices()
+		if len(validIndices) == 0 {
+			logger.Warn("没有有效账号可刷新")
+			return nil
 		}
 
-		for i := batchStart; i < batchEnd; i++ {
-			refreshIndices = append(refreshIndices, i)
-		}
+		// 如果有效账号少于等于 batchSize，刷新所有有效账号
+		if len(validIndices) <= tm.batchSize {
+			refreshIndices = validIndices
+			logger.Info("刷新所有有效账号（数量不足一个批次）",
+				logger.Int("valid_count", len(validIndices)),
+				logger.Int("batch_size", tm.batchSize))
+		} else {
+			// 计算当前批次的范围（基于有效账号池）
+			batchStart := tm.currentBatch * tm.batchSize
+			batchEnd := batchStart + tm.batchSize
+			if batchEnd > len(validIndices) {
+				batchEnd = len(validIndices)
+			}
 
-		logger.Info("分批刷新策略：只刷新当前批次",
-			logger.Int("current_batch", tm.currentBatch),
-			logger.Int("batch_start", batchStart),
-			logger.Int("batch_end", batchEnd),
-			logger.Int("refresh_count", len(refreshIndices)))
+			// 提取当前批次的账号索引
+			refreshIndices = validIndices[batchStart:batchEnd]
+
+			logger.Info("分批刷新策略：只刷新当前批次",
+				logger.Int("current_batch", tm.currentBatch),
+				logger.Int("batch_start", batchStart),
+				logger.Int("batch_end", batchEnd),
+				logger.Int("valid_total", len(validIndices)),
+				logger.Int("refresh_count", len(refreshIndices)))
+		}
 	} else {
-		// 其他策略：刷新所有 token
-		for i := range tm.configs {
+		// 其他策略：刷新所有非禁用且未失效的 token
+		for i, cfg := range tm.configs {
+			// 跳过禁用的账号
+			if cfg.Disabled {
+				continue
+			}
+			// 跳过已失效的账号（避免重复刷新失败）
+			if _, isInvalid := tm.invalidated[i]; isInvalid {
+				continue
+			}
 			refreshIndices = append(refreshIndices, i)
 		}
 
-		logger.Debug("全局刷新策略：刷新所有token",
+		logger.Debug("全局刷新策略：刷新所有有效token",
 			logger.Int("refresh_count", len(refreshIndices)))
 	}
 
@@ -579,6 +701,18 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		logger.Debug("token缓存更新",
 			logger.String("cache_key", cacheKey),
 			logger.Float64("available", available))
+	}
+
+	// 自动删除失效的账号（如果启用）
+	if tm.autoRemoveInvalid && len(tm.invalidated) > 0 {
+		removed, err := tm.removeInvalidTokensUnlocked()
+		if err != nil {
+			logger.Warn("自动删除失效账号失败", logger.Err(err))
+		} else if removed > 0 {
+			logger.Info("自动删除失效账号成功",
+				logger.Int("removed_count", removed),
+				logger.Int("remaining_count", len(tm.configs)))
+		}
 	}
 
 	tm.lastRefresh = time.Now()
@@ -780,11 +914,8 @@ func (tm *TokenManager) RemoveToken(index int) error {
 	return nil
 }
 
-// RemoveInvalidTokens 批量删除所有失效的 token
-func (tm *TokenManager) RemoveInvalidTokens() (int, error) {
-	tm.mutex.Lock()
-	defer tm.mutex.Unlock()
-
+// removeInvalidTokensUnlocked 批量删除所有失效的 token（内部方法，调用者必须持有锁）
+func (tm *TokenManager) removeInvalidTokensUnlocked() (int, error) {
 	if len(tm.invalidated) == 0 {
 		return 0, nil
 	}
@@ -823,7 +954,7 @@ func (tm *TokenManager) RemoveInvalidTokens() (int, error) {
 	// 重新生成配置顺序
 	tm.configOrder = generateConfigOrder(tm.configs)
 
-	logger.Info("批量删除失效token",
+	logger.Info("批量删除失效token（内部）",
 		logger.Int("removed_count", removedCount),
 		logger.Int("remaining_count", len(tm.configs)))
 
@@ -837,6 +968,15 @@ func (tm *TokenManager) RemoveInvalidTokens() (int, error) {
 
 	return removedCount, nil
 }
+
+// RemoveInvalidTokens 批量删除所有失效的 token（公开方法，带锁）
+func (tm *TokenManager) RemoveInvalidTokens() (int, error) {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	return tm.removeInvalidTokensUnlocked()
+}
+
 
 // ExportTokens 导出 token 配置（支持单个或全部）
 func (tm *TokenManager) ExportTokens(indices []int) ([]AuthConfig, error) {
