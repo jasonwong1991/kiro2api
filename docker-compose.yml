@@ -2,7 +2,7 @@ services:
   kiro2api:
     # 使用 GitHub Container Registry 预构建镜像
     # 支持 linux/amd64 和 linux/arm64 架构
-    image: ghcr.io/jasonwong/kiro2api:latest
+    image: ghcr.io/jasonwong1991/kiro2api:latest
 
     # 如果需要本地构建，取消注释以下行并注释掉上面的 image 行
     # build:

@@ -10,7 +10,7 @@
 
 ```bash
 # 镜像地址
-ghcr.io/jasonwong/kiro2api:latest
+ghcr.io/jasonwong1991/kiro2api:latest
 
 # 支持的架构
 - linux/amd64
@@ -291,7 +291,7 @@ curl -H "Authorization: Bearer your_admin_token" \
 services:
   kiro2api:
     # 注释掉预构建镜像
-    # image: ghcr.io/jasonwong/kiro2api:latest
+    # image: ghcr.io/jasonwong1991/kiro2api:latest
 
     # 启用本地构建
     build:
