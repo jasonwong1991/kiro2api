@@ -421,6 +421,12 @@ tr:hover {
     color: white;
 }
 
+/* 未刷新状态徽章 */
+.status-not-refreshed {
+    background: rgba(158, 158, 158, 0.6);
+    color: white;
+}
+
 @media (max-width: 768px) {
     .header h1 {
         font-size: 2rem;

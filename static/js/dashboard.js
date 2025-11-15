@@ -198,6 +198,13 @@ class TokenDashboard {
      * 工具方法 - 状态判断 (KISS原则)
      */
     getStatusClass(token) {
+        // 优先使用 refresh_status 字段（后端提供的准确状态）
+        if (token.refresh_status) {
+            if (token.refresh_status === 'not_refreshed') return 'status-not-refreshed';
+            if (token.refresh_status === 'invalid') return 'status-invalid';
+            // refresh_status === 'active' 继续检查额度和过期时间
+        }
+
         if (new Date(token.expires_at) < new Date()) {
             return 'status-expired';
         }
@@ -208,6 +215,13 @@ class TokenDashboard {
     }
 
     getStatusText(token) {
+        // 优先使用 refresh_status 字段（后端提供的准确状态）
+        if (token.refresh_status) {
+            if (token.refresh_status === 'not_refreshed') return '未刷新';
+            if (token.refresh_status === 'invalid') return '失效';
+            // refresh_status === 'active' 继续检查额度和过期时间
+        }
+
         if (new Date(token.expires_at) < new Date()) {
             return '已过期';
         }

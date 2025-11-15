@@ -838,6 +838,7 @@ type TokenStatus struct {
 	Disabled       bool               `json:"disabled"`
 	IsInvalid      bool               `json:"is_invalid"`
 	InvalidatedAt  *time.Time         `json:"invalidated_at,omitempty"`
+	RefreshStatus  string             `json:"refresh_status"` // not_refreshed: 未刷新, active: 正常, invalid: 失效
 	Available      float64            `json:"available"`
 	UsageInfo      *types.UsageLimits `json:"usage_info,omitempty"`
 	LastUsed       *time.Time         `json:"last_used,omitempty"`
@@ -869,6 +870,12 @@ func (tm *TokenManager) GetAllTokensStatus() []TokenStatus {
 		// 获取缓存信息
 		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
 		if cached, exists := tm.cache.tokens[cacheKey]; exists {
+			// 已刷新过的账号
+			if status.IsInvalid {
+				status.RefreshStatus = "invalid"
+			} else {
+				status.RefreshStatus = "active"
+			}
 			status.Available = cached.Available
 			status.UsageInfo = cached.UsageInfo
 			if !cached.LastUsed.IsZero() {
@@ -884,6 +891,9 @@ func (tm *TokenManager) GetAllTokensStatus() []TokenStatus {
 				}
 				status.DaysUntilReset = daysUntil
 			}
+		} else {
+			// 缓存中没有记录，说明从未刷新过
+			status.RefreshStatus = "not_refreshed"
 		}
 
 		statuses = append(statuses, status)
@@ -918,6 +928,12 @@ func (tm *TokenManager) GetTokenStatus(index int) (*TokenStatus, error) {
 	// 获取缓存信息
 	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
 	if cached, exists := tm.cache.tokens[cacheKey]; exists {
+		// 已刷新过的账号
+		if status.IsInvalid {
+			status.RefreshStatus = "invalid"
+		} else {
+			status.RefreshStatus = "active"
+		}
 		status.Available = cached.Available
 		status.UsageInfo = cached.UsageInfo
 		if !cached.LastUsed.IsZero() {
@@ -933,6 +949,9 @@ func (tm *TokenManager) GetTokenStatus(index int) (*TokenStatus, error) {
 			}
 			status.DaysUntilReset = daysUntil
 		}
+	} else {
+		// 缓存中没有记录，说明从未刷新过
+		status.RefreshStatus = "not_refreshed"
 	}
 
 	return status, nil
@@ -1097,4 +1116,120 @@ func (tm *TokenManager) SyncConfigFile() error {
 	tm.mutex.RUnlock()
 
 	return SaveConfigToFile(configs, tm.configPath)
+}
+
+// InitializeBatchTokens 在启动时初始化首批 token
+// 批次轮换模式下，刷新 batchSize 数量的账号
+// 其他模式下，刷新第一个账号（保持原有行为）
+func (tm *TokenManager) InitializeBatchTokens() error {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	logger.Info("开始初始化首批token")
+
+	// 确定需要初始化的账号数量
+	var initCount int
+	if tm.strategy == StrategyBatchRotate && tm.batchSize > 0 {
+		// 批次轮换模式：刷新 batchSize 数量的账号
+		initCount = tm.batchSize
+		if initCount > len(tm.configs) {
+			initCount = len(tm.configs)
+		}
+		logger.Info("使用批次轮换策略",
+			logger.Int("batch_size", tm.batchSize),
+			logger.Int("init_count", initCount),
+			logger.Int("total_configs", len(tm.configs)))
+	} else {
+		// 其他策略：只刷新第一个账号
+		initCount = 1
+		logger.Info("使用常规策略，只刷新第一个账号")
+	}
+
+	// 刷新指定数量的账号
+	successCount := 0
+	for i := 0; i < initCount && i < len(tm.configs); i++ {
+		cfg := tm.configs[i]
+		if cfg.Disabled {
+			logger.Debug("跳过禁用的账号",
+				logger.Int("index", i))
+			continue
+		}
+
+		// 刷新 token
+		token, err := tm.refreshSingleToken(cfg)
+		if err != nil {
+			// 检查是否是 token 失效错误
+			if types.IsTokenInvalidError(err) {
+				logger.Warn("初始化时检测到token失效",
+					logger.Int("index", i),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(err))
+				// 记录失效时间
+				tm.invalidated[i] = time.Now()
+			} else {
+				logger.Warn("初始化刷新token失败",
+					logger.Int("index", i),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(err))
+			}
+			continue
+		}
+
+		// 检查使用限制
+		var usageInfo *types.UsageLimits
+		var available float64
+		var nextResetTime time.Time
+
+		checker := NewUsageLimitsChecker()
+		if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+			usageInfo = usage
+			available = CalculateAvailableCount(usage)
+			nextResetTime = GetNextResetTime(usage)
+		} else {
+			// 检查是否是 token 失效错误
+			if types.IsTokenInvalidError(checkErr) {
+				logger.Warn("初始化时使用限制检查检测到token失效",
+					logger.Int("index", i),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(checkErr))
+				// 记录失效时间
+				tm.invalidated[i] = time.Now()
+			} else {
+				logger.Warn("初始化时检查使用限制失败",
+					logger.Int("index", i),
+					logger.Err(checkErr))
+			}
+		}
+
+		// 更新缓存
+		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
+		tm.cache.tokens[cacheKey] = &CachedToken{
+			Token:         token,
+			UsageInfo:     usageInfo,
+			CachedAt:      time.Now(),
+			Available:     available,
+			NextResetTime: nextResetTime,
+		}
+
+		successCount++
+		logger.Info("成功初始化token",
+			logger.Int("index", i),
+			logger.String("auth_type", cfg.AuthType),
+			logger.Float64("available", available),
+			logger.String("next_reset", nextResetTime.Format(time.RFC3339)))
+	}
+
+	// 更新最后刷新时间
+	tm.lastRefresh = time.Now()
+
+	logger.Info("首批token初始化完成",
+		logger.Int("success_count", successCount),
+		logger.Int("total_attempted", initCount),
+		logger.Int("invalid_count", len(tm.invalidated)))
+
+	if successCount == 0 {
+		return fmt.Errorf("没有成功初始化任何token")
+	}
+
+	return nil
 }

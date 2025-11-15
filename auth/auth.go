@@ -29,10 +29,15 @@ func NewAuthService() (*AuthService, error) {
 	// 创建token管理器
 	tokenManager := NewTokenManager(configs)
 
-	// 预热第一个可用token
-	_, warmupErr := tokenManager.getBestToken()
-	if warmupErr != nil {
-		logger.Warn("token预热失败", logger.Err(warmupErr))
+	// 初始化首批token（批次轮换模式下会刷新多个账号）
+	initErr := tokenManager.InitializeBatchTokens()
+	if initErr != nil {
+		logger.Warn("初始化首批token失败", logger.Err(initErr))
+		// 回退到原有的预热逻辑
+		_, warmupErr := tokenManager.getBestToken()
+		if warmupErr != nil {
+			logger.Warn("token预热失败", logger.Err(warmupErr))
+		}
 	}
 
 	logger.Info("AuthService创建完成", logger.Int("config_count", len(configs)))
