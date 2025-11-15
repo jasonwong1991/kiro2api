@@ -54,11 +54,12 @@ type SimpleTokenCache struct {
 
 // CachedToken 缓存的token信息
 type CachedToken struct {
-	Token     types.TokenInfo
-	UsageInfo *types.UsageLimits
-	CachedAt  time.Time
-	LastUsed  time.Time
-	Available float64
+	Token         types.TokenInfo
+	UsageInfo     *types.UsageLimits
+	CachedAt      time.Time
+	LastUsed      time.Time
+	Available     float64
+	NextResetTime time.Time // 额度重置时间
 }
 
 // NewSimpleTokenCache 创建简单的token缓存
@@ -590,13 +591,29 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 	if tm.strategy == StrategyBatchRotate && tm.batchSize > 0 {
 		// 分批轮换策略：只刷新当前批次的有效账号
 		validIndices := tm.getValidAccountIndices()
-		if len(validIndices) == 0 {
-			logger.Warn("没有有效账号可刷新")
-			return nil
-		}
 
-		// 如果有效账号少于等于 batchSize，刷新所有有效账号
-		if len(validIndices) <= tm.batchSize {
+		// 如果所有账号都失效，刷新前 N 个账号（最早重置额度）
+		if len(validIndices) == 0 {
+			logger.Warn("所有账号都失效，尝试刷新前面的账号以检查额度是否已重置")
+
+			refreshCount := tm.batchSize
+			if refreshCount > len(tm.configs) {
+				refreshCount = len(tm.configs)
+			}
+
+			// 选择前 N 个未禁用的账号刷新
+			for i := 0; i < len(tm.configs) && len(refreshIndices) < refreshCount; i++ {
+				if !tm.configs[i].Disabled {
+					refreshIndices = append(refreshIndices, i)
+				}
+			}
+
+			logger.Info("全部失效场景：刷新前面的账号",
+				logger.Int("refresh_count", len(refreshIndices)),
+				logger.Int("batch_size", tm.batchSize),
+				logger.Int("total_configs", len(tm.configs)))
+		} else if len(validIndices) <= tm.batchSize {
+			// 如果有效账号少于等于 batchSize，刷新所有有效账号
 			refreshIndices = validIndices
 			logger.Info("刷新所有有效账号（数量不足一个批次）",
 				logger.Int("valid_count", len(validIndices)),
@@ -644,6 +661,21 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 			continue
 		}
 
+		// 优化：检查是否额度耗尽且未到重置日期
+		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
+		if cached, exists := tm.cache.tokens[cacheKey]; exists {
+			// 如果额度耗尽（available <= 0）且重置日期未到（在未来）
+			if cached.Available <= 0 && !cached.NextResetTime.IsZero() && time.Now().Before(cached.NextResetTime) {
+				logger.Info("跳过刷新：额度耗尽且未到重置日期",
+					logger.Int("config_index", i),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Float64("available", cached.Available),
+					logger.String("next_reset", cached.NextResetTime.Format(time.RFC3339)),
+					logger.String("time_until_reset", time.Until(cached.NextResetTime).Round(time.Hour).String()))
+				continue
+			}
+		}
+
 		// 刷新token
 		token, err := tm.refreshSingleToken(cfg)
 		if err != nil {
@@ -670,11 +702,13 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		// 检查使用限制
 		var usageInfo *types.UsageLimits
 		var available float64
+		var nextResetTime time.Time
 
 		checker := NewUsageLimitsChecker()
 		if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
 			usageInfo = usage
 			available = CalculateAvailableCount(usage)
+			nextResetTime = GetNextResetTime(usage)
 		} else {
 			// 检查是否是 token 失效错误
 			if types.IsTokenInvalidError(checkErr) {
@@ -690,17 +724,19 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		}
 
 		// 更新缓存（直接访问，已在tm.mutex保护下）
-		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
+		cacheKey = fmt.Sprintf(config.TokenCacheKeyFormat, i)
 		tm.cache.tokens[cacheKey] = &CachedToken{
-			Token:     token,
-			UsageInfo: usageInfo,
-			CachedAt:  time.Now(),
-			Available: available,
+			Token:         token,
+			UsageInfo:     usageInfo,
+			CachedAt:      time.Now(),
+			Available:     available,
+			NextResetTime: nextResetTime,
 		}
 
 		logger.Debug("token缓存更新",
 			logger.String("cache_key", cacheKey),
-			logger.Float64("available", available))
+			logger.Float64("available", available),
+			logger.String("next_reset", nextResetTime.Format(time.RFC3339)))
 	}
 
 	// 自动删除失效的账号（如果启用）
@@ -760,6 +796,23 @@ func CalculateAvailableCount(usage *types.UsageLimits) float64 {
 	return 0.0
 }
 
+// GetNextResetTime 获取下次重置时间 (基于CREDIT资源类型)
+func GetNextResetTime(usage *types.UsageLimits) time.Time {
+	for _, breakdown := range usage.UsageBreakdownList {
+		if breakdown.ResourceType == "CREDIT" {
+			if breakdown.NextDateReset > 0 {
+				// NextDateReset 是秒级时间戳
+				return time.Unix(int64(breakdown.NextDateReset), 0)
+			}
+		}
+	}
+	// 如果没有资源级别的重置时间，使用顶层的
+	if usage.NextDateReset > 0 {
+		return time.Unix(int64(usage.NextDateReset), 0)
+	}
+	return time.Time{}
+}
+
 // generateConfigOrder 生成token配置的顺序
 func generateConfigOrder(configs []AuthConfig) []string {
 	var order []string
@@ -779,15 +832,17 @@ func generateConfigOrder(configs []AuthConfig) []string {
 
 // TokenStatus token 状态信息
 type TokenStatus struct {
-	Index         int                `json:"index"`
-	AuthType      string             `json:"auth_type"`
-	RefreshToken  string             `json:"refresh_token_preview"` // 只显示前后各4位
-	Disabled      bool               `json:"disabled"`
-	IsInvalid     bool               `json:"is_invalid"`
-	InvalidatedAt *time.Time         `json:"invalidated_at,omitempty"`
-	Available     float64            `json:"available"`
-	UsageInfo     *types.UsageLimits `json:"usage_info,omitempty"`
-	LastUsed      *time.Time         `json:"last_used,omitempty"`
+	Index          int                `json:"index"`
+	AuthType       string             `json:"auth_type"`
+	RefreshToken   string             `json:"refresh_token_preview"` // 只显示前后各4位
+	Disabled       bool               `json:"disabled"`
+	IsInvalid      bool               `json:"is_invalid"`
+	InvalidatedAt  *time.Time         `json:"invalidated_at,omitempty"`
+	Available      float64            `json:"available"`
+	UsageInfo      *types.UsageLimits `json:"usage_info,omitempty"`
+	LastUsed       *time.Time         `json:"last_used,omitempty"`
+	NextResetDate  *time.Time         `json:"next_reset_date,omitempty"`
+	DaysUntilReset int                `json:"days_until_reset"`
 }
 
 // GetAllTokensStatus 获取所有 token 的状态
@@ -818,6 +873,16 @@ func (tm *TokenManager) GetAllTokensStatus() []TokenStatus {
 			status.UsageInfo = cached.UsageInfo
 			if !cached.LastUsed.IsZero() {
 				status.LastUsed = &cached.LastUsed
+			}
+			// 添加重置日期信息
+			if !cached.NextResetTime.IsZero() {
+				status.NextResetDate = &cached.NextResetTime
+				// 计算距离重置的天数
+				daysUntil := int(time.Until(cached.NextResetTime).Hours() / 24)
+				if daysUntil < 0 {
+					daysUntil = 0 // 已过期则显示 0
+				}
+				status.DaysUntilReset = daysUntil
 			}
 		}
 
@@ -857,6 +922,16 @@ func (tm *TokenManager) GetTokenStatus(index int) (*TokenStatus, error) {
 		status.UsageInfo = cached.UsageInfo
 		if !cached.LastUsed.IsZero() {
 			status.LastUsed = &cached.LastUsed
+		}
+		// 添加重置日期信息
+		if !cached.NextResetTime.IsZero() {
+			status.NextResetDate = &cached.NextResetTime
+			// 计算距离重置的天数
+			daysUntil := int(time.Until(cached.NextResetTime).Hours() / 24)
+			if daysUntil < 0 {
+				daysUntil = 0 // 已过期则显示 0
+			}
+			status.DaysUntilReset = daysUntil
 		}
 	}
 
