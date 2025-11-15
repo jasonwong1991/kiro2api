@@ -35,6 +35,11 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 	// 注入请求ID，便于日志追踪
 	r.Use(RequestIDMiddleware())
 	r.Use(corsMiddleware())
+	// 注入AuthService到context
+	r.Use(func(c *gin.Context) {
+		c.Set("authService", authService)
+		c.Next()
+	})
 	// 只对 /v1 开头的端点进行认证（排除管理 API）
 	r.Use(PathBasedAuthMiddleware(authToken, []string{"/v1/messages", "/v1/chat", "/v1/models"}))
 

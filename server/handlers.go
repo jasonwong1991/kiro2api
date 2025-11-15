@@ -487,21 +487,37 @@ func maskEmail(email string) string {
 	return maskedUsername + "@" + maskedDomain
 }
 
-// handleTokenPoolAPI 处理Token池API请求 - 恢复多token显示
+// handleTokenPoolAPI 处理Token池API请求 - 从TokenManager缓存读取，不触发刷新
 func handleTokenPoolAPI(c *gin.Context) {
-	var tokenList []any
-	var activeCount int
-
-	// 从auth包获取配置信息
-	configs, err := auth.GetConfigs()
-	if err != nil {
+	// 从context获取AuthService
+	authServiceInterface, exists := c.Get("authService")
+	if !exists {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "加载配置失败: " + err.Error(),
+			"error": "AuthService 未初��化",
 		})
 		return
 	}
 
-	if len(configs) == 0 {
+	authService, ok := authServiceInterface.(*auth.AuthService)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "AuthService 类型错误",
+		})
+		return
+	}
+
+	tm := authService.GetTokenManager()
+	if tm == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "TokenManager 未初始化",
+		})
+		return
+	}
+
+	// 从TokenManager获取所有token状态（只读，不触发刷新）
+	statuses := tm.GetAllTokensStatus()
+
+	if len(statuses) == 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"timestamp":     time.Now().Format(time.RFC3339),
 			"total_tokens":  0,
@@ -515,74 +531,62 @@ func handleTokenPoolAPI(c *gin.Context) {
 		return
 	}
 
-	// 遍历所有配置
-	for i, authConfig := range configs {
-		// 检查配置是否被禁用
-		if authConfig.Disabled {
-			tokenData := map[string]any{
-				"index":           i,
-				"user_email":      "已禁用",
-				"token_preview":   "***已禁用",
-				"auth_type":       strings.ToLower(authConfig.AuthType),
-				"remaining_usage": 0,
-				"expires_at":      time.Now().Add(time.Hour).Format(time.RFC3339),
-				"last_used":       "未知",
-				"status":          "disabled",
-				"error":           "配置已禁用",
-			}
-			tokenList = append(tokenList, tokenData)
-			continue
-		}
+	// 转换TokenStatus为前端需要的格式
+	var tokenList []any
+	var activeCount int
 
-		// 尝试获取token信息
-		tokenInfo, err := refreshSingleTokenByConfig(authConfig)
-		if err != nil {
-			tokenData := map[string]any{
-				"index":           i,
-				"user_email":      "获取失败",
-				"token_preview":   createTokenPreview(authConfig.RefreshToken),
-				"auth_type":       strings.ToLower(authConfig.AuthType),
-				"remaining_usage": 0,
-				"expires_at":      time.Now().Add(time.Hour).Format(time.RFC3339),
-				"last_used":       "未知",
-				"status":          "error",
-				"error":           err.Error(),
-			}
-			tokenList = append(tokenList, tokenData)
-			continue
-		}
-
-		// 检查使用限制
-		var usageInfo *types.UsageLimits
-		var available float64 // 默认值 (浮点数)
-		var userEmail = "未知用户"
-
-		checker := auth.NewUsageLimitsChecker()
-		if usage, checkErr := checker.CheckUsageLimits(tokenInfo); checkErr == nil {
-			usageInfo = usage
-			available = auth.CalculateAvailableCount(usage)
-
-			// 提取用户邮箱
-			if usage.UserInfo.Email != "" {
-				userEmail = usage.UserInfo.Email
-			}
-		}
-
+	for _, status := range statuses {
 		// 构建token数据
 		tokenData := map[string]any{
-			"index":           i,
-			"user_email":      maskEmail(userEmail), // 对邮箱进行脱敏处理
-			"token_preview":   createTokenPreview(tokenInfo.AccessToken),
-			"auth_type":       strings.ToLower(authConfig.AuthType),
-			"remaining_usage": available,
-			"expires_at":      tokenInfo.ExpiresAt.Format(time.RFC3339),
-			"last_used":       time.Now().Format(time.RFC3339),
-			"status":          "active",
+			"index":           status.Index,
+			"token_preview":   status.RefreshToken, // 已经是脱敏后的
+			"auth_type":       strings.ToLower(status.AuthType),
+			"remaining_usage": status.Available,
+			"is_invalid":      status.IsInvalid,
 		}
 
-		// 添加使用限制详细信息 (基于CREDIT资源类型)
-		if usageInfo != nil {
-			for _, breakdown := range usageInfo.UsageBreakdownList {
+		// 用户邮箱
+		if status.UsageInfo != nil && status.UsageInfo.UserInfo.Email != "" {
+			tokenData["user_email"] = maskEmail(status.UsageInfo.UserInfo.Email)
+		} else {
+			tokenData["user_email"] = "未知用户"
+		}
+
+		// 过期时间（从重置日期获取，或使用默认值）
+		if status.NextResetDate != nil {
+			tokenData["expires_at"] = status.NextResetDate.Format(time.RFC3339)
+		} else {
+			tokenData["expires_at"] = time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+		}
+
+		// 最后使用时间
+		if status.LastUsed != nil {
+			tokenData["last_used"] = status.LastUsed.Format(time.RFC3339)
+		} else {
+			tokenData["last_used"] = "未使用"
+		}
+
+		// 状态判断
+		if status.Disabled {
+			tokenData["status"] = "disabled"
+			tokenData["error"] = "配置已禁用"
+		} else if status.IsInvalid {
+			tokenData["status"] = "error"
+			if status.InvalidatedAt != nil {
+				tokenData["error"] = "Token失效于 " + status.InvalidatedAt.Format("2006-01-02 15:04:05")
+			} else {
+				tokenData["error"] = "Token已失效"
+			}
+		} else if status.Available <= 0 {
+			tokenData["status"] = "exhausted"
+		} else {
+			tokenData["status"] = "active"
+			activeCount++
+		}
+
+		// 添加使用限制详细信息
+		if status.UsageInfo != nil {
+			for _, breakdown := range status.UsageInfo.UsageBreakdownList {
 				if breakdown.ResourceType == "CREDIT" {
 					var totalLimit float64
 					var totalUsed float64
@@ -598,30 +602,19 @@ func handleTokenPoolAPI(c *gin.Context) {
 					}
 
 					tokenData["usage_limits"] = map[string]any{
-						"total_limit":   totalLimit, // 保留浮点精度
-						"current_usage": totalUsed,  // 保留浮点精度
-						"is_exceeded":   available <= 0,
+						"total_limit":   totalLimit,
+						"current_usage": totalUsed,
+						"is_exceeded":   status.Available <= 0,
 					}
 					break
 				}
 			}
 		}
 
-		// 如果token不可用，标记状态
-		if available <= 0 {
-			tokenData["status"] = "exhausted"
-		} else {
-			activeCount++
-		}
-
-		// 如果是 IdC 认证，显示额外信息
-		if authConfig.AuthType == auth.AuthMethodIdC && authConfig.ClientID != "" {
-			tokenData["client_id"] = func() string {
-				if len(authConfig.ClientID) > 10 {
-					return authConfig.ClientID[:5] + "***" + authConfig.ClientID[len(authConfig.ClientID)-3:]
-				}
-				return authConfig.ClientID
-			}()
+		// 添加重置日期信息（新增）
+		if status.NextResetDate != nil {
+			tokenData["next_reset_date"] = status.NextResetDate.Format(time.RFC3339)
+			tokenData["days_until_reset"] = status.DaysUntilReset
 		}
 
 		tokenList = append(tokenList, tokenData)
@@ -634,7 +627,7 @@ func handleTokenPoolAPI(c *gin.Context) {
 		"active_tokens": activeCount,
 		"tokens":        tokenList,
 		"pool_stats": map[string]any{
-			"total_tokens":  len(configs),
+			"total_tokens":  len(statuses),
 			"active_tokens": activeCount,
 		},
 	})
