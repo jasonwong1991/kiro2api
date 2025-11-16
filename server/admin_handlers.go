@@ -191,6 +191,89 @@ func (h *AdminHandlers) HandleSyncConfig(c *gin.Context) {
 	})
 }
 
+// RefreshRequest 刷新请求
+type RefreshRequest struct {
+	Indices []int `json:"indices"` // 空数组表示刷新全部
+}
+
+// HandleRefreshToken 刷新单个账号状态
+// POST /v1/admin/tokens/:index/refresh
+func (h *AdminHandlers) HandleRefreshToken(c *gin.Context) {
+	tm := h.authService.GetTokenManager()
+	if tm == nil {
+		respondError(c, http.StatusInternalServerError, "TokenManager 未初始化")
+		return
+	}
+
+	indexStr := c.Param("index")
+	index, err := strconv.Atoi(indexStr)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, "无效的索引: %s", indexStr)
+		return
+	}
+
+	result, err := tm.RefreshToken(index)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, "%v", err)
+		return
+	}
+
+	logger.Info("刷新单个账号",
+		logger.Int("index", index),
+		logger.Bool("success", result.Success),
+		logger.String("request_id", c.GetString("request_id")))
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    result,
+	})
+}
+
+// HandleRefreshTokens 批量刷新账号状态
+// POST /v1/admin/tokens/refresh
+func (h *AdminHandlers) HandleRefreshTokens(c *gin.Context) {
+	tm := h.authService.GetTokenManager()
+	if tm == nil {
+		respondError(c, http.StatusInternalServerError, "TokenManager 未初始化")
+		return
+	}
+
+	var req RefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		// 如果没有请求体或解析失败，刷新全部
+		req.Indices = []int{}
+	}
+
+	results, err := tm.RefreshTokens(req.Indices)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "%v", err)
+		return
+	}
+
+	successCount := 0
+	for _, r := range results {
+		if r.Success {
+			successCount++
+		}
+	}
+
+	logger.Info("批量刷新账号",
+		logger.Int("total", len(results)),
+		logger.Int("success", successCount),
+		logger.Any("indices", req.Indices),
+		logger.String("request_id", c.GetString("request_id")))
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"results": results,
+			"total":   len(results),
+			"success": successCount,
+			"failed":  len(results) - successCount,
+		},
+	})
+}
+
 // RegisterAdminRoutes 注册管理 API 路由
 func RegisterAdminRoutes(r *gin.Engine, authService *auth.AuthService, adminToken string) {
 	handlers := NewAdminHandlers(authService)
@@ -205,17 +288,21 @@ func RegisterAdminRoutes(r *gin.Engine, authService *auth.AuthService, adminToke
 	admin.GET("/tokens", handlers.HandleListTokens)
 	admin.GET("/tokens/:index", handlers.HandleGetToken)
 	admin.POST("/tokens/export", handlers.HandleExportTokens)
+	admin.POST("/tokens/refresh", handlers.HandleRefreshTokens)
+	admin.POST("/tokens/:index/refresh", handlers.HandleRefreshToken)
 	admin.DELETE("/tokens/:index", handlers.HandleDeleteToken)
 	admin.DELETE("/tokens/invalid", handlers.HandleDeleteInvalidTokens)
 	admin.POST("/tokens/sync", handlers.HandleSyncConfig)
 
 	logger.Info("管理 API 路由已注册")
-	logger.Info("  GET    /v1/admin/tokens           - 列出所有 token 状态")
-	logger.Info("  GET    /v1/admin/tokens/:index    - 获取单个 token 状态")
-	logger.Info("  POST   /v1/admin/tokens/export    - 导出 token 配置")
-	logger.Info("  DELETE /v1/admin/tokens/:index    - 删除单个失效 token")
-	logger.Info("  DELETE /v1/admin/tokens/invalid   - 批量删除所有失效 token")
-	logger.Info("  POST   /v1/admin/tokens/sync      - 手动同步配置文件")
+	logger.Info("  GET    /v1/admin/tokens                - 列出所有 token 状态")
+	logger.Info("  GET    /v1/admin/tokens/:index         - 获取单个 token 状态")
+	logger.Info("  POST   /v1/admin/tokens/export         - 导出 token 配置")
+	logger.Info("  POST   /v1/admin/tokens/refresh        - 批量刷新账号状态")
+	logger.Info("  POST   /v1/admin/tokens/:index/refresh - 刷新单个账号状态")
+	logger.Info("  DELETE /v1/admin/tokens/:index         - 删除单个失效 token")
+	logger.Info("  DELETE /v1/admin/tokens/invalid        - 批量删除所有失效 token")
+	logger.Info("  POST   /v1/admin/tokens/sync           - 手动同步配置文件")
 }
 
 // AdminAuthMiddleware 管理员认证中间件

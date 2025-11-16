@@ -63,6 +63,12 @@ class TokenDashboard {
         if (deleteInvalidBtn) {
             deleteInvalidBtn.addEventListener('click', () => this.deleteInvalidTokens());
         }
+
+        // 批量刷新账号状态按钮
+        const refreshAllBtn = document.getElementById('refreshAllBtn');
+        if (refreshAllBtn) {
+            refreshAllBtn.addEventListener('click', () => this.refreshAllTokens());
+        }
     }
 
     /**
@@ -117,6 +123,9 @@ class TokenDashboard {
         if (this.isAdminMode) {
             actionButtons = `
                 <td class="admin-only action-cell">
+                    <button class="action-btn-small refresh-btn-small" onclick="dashboard.refreshSingleToken(${token.index})" title="刷新账号状态">
+                        🔄
+                    </button>
                     <button class="action-btn-small export-btn-small" onclick="dashboard.exportSingleToken(${token.index})" title="导出配置">
                         📥
                     </button>
@@ -514,6 +523,81 @@ class TokenDashboard {
             this.showAuthStatus('配置已导出', 'success');
         } catch (error) {
             this.showAuthStatus('导出失败: ' + error.message, 'error');
+        }
+    }
+
+    /**
+     * 批量刷新所有账号状态
+     */
+    async refreshAllTokens() {
+        if (!this.adminToken) return;
+
+        if (!confirm('确定要刷新所有账号的状态吗？这可能需要一些时间。')) {
+            return;
+        }
+
+        this.showAuthStatus('正在刷新账号状态...', 'info');
+
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/tokens/refresh`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.adminToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({})
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            this.showAuthStatus(
+                `刷新完成：成功 ${data.data.success} 个，失败 ${data.data.failed} 个`,
+                data.data.failed === 0 ? 'success' : 'info'
+            );
+
+            // 刷新表格显示
+            this.refreshTokens();
+        } catch (error) {
+            this.showAuthStatus('刷新失败: ' + error.message, 'error');
+        }
+    }
+
+    /**
+     * 刷新单个账号状态
+     */
+    async refreshSingleToken(index) {
+        if (!this.adminToken) return;
+
+        this.showAuthStatus(`正在刷新账号 ${index}...`, 'info');
+
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/tokens/${index}/refresh`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.adminToken}`
+                }
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error?.message || `HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            if (data.data.success) {
+                this.showAuthStatus(`账号 ${index} 刷新成功`, 'success');
+            } else {
+                this.showAuthStatus(`账号 ${index} 刷新失败: ${data.data.error}`, 'error');
+            }
+
+            // 刷新表格显示
+            this.refreshTokens();
+        } catch (error) {
+            this.showAuthStatus('刷新失败: ' + error.message, 'error');
         }
     }
 }

@@ -1234,3 +1234,291 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 
 	return nil
 }
+
+// RefreshResult 单个账号刷新结果
+type RefreshResult struct {
+	Index   int    `json:"index"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+	Status  *TokenStatus `json:"status,omitempty"`
+}
+
+// RefreshToken 刷新单个账号的状态（公开方法）
+// POST /v1/admin/tokens/:index/refresh
+func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	if index < 0 || index >= len(tm.configs) {
+		return nil, fmt.Errorf("索引超出范围: %d", index)
+	}
+
+	cfg := tm.configs[index]
+	if cfg.Disabled {
+		return &RefreshResult{
+			Index:   index,
+			Success: false,
+			Error:   "账号已禁用",
+		}, nil
+	}
+
+	// 刷新 token
+	token, err := tm.refreshSingleToken(cfg)
+	if err != nil {
+		// 检查是否是 token 失效错误
+		if types.IsTokenInvalidError(err) {
+			logger.Warn("刷新时检测到token失效",
+				logger.Int("index", index),
+				logger.String("auth_type", cfg.AuthType),
+				logger.Err(err))
+			// 记录失效时间
+			tm.invalidated[index] = time.Now()
+		}
+
+		return &RefreshResult{
+			Index:   index,
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
+
+	// 如果刷新成功，清除失效标记
+	delete(tm.invalidated, index)
+
+	// 检查使用限制
+	var usageInfo *types.UsageLimits
+	var available float64
+	var nextResetTime time.Time
+
+	checker := NewUsageLimitsChecker()
+	if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+		usageInfo = usage
+		available = CalculateAvailableCount(usage)
+		nextResetTime = GetNextResetTime(usage)
+	} else {
+		// 检查是否是 token 失效错误
+		if types.IsTokenInvalidError(checkErr) {
+			logger.Warn("使用限制检查检测到token失效",
+				logger.Int("index", index),
+				logger.String("auth_type", cfg.AuthType),
+				logger.Err(checkErr))
+			// 记录失效时间
+			tm.invalidated[index] = time.Now()
+
+			return &RefreshResult{
+				Index:   index,
+				Success: false,
+				Error:   checkErr.Error(),
+			}, nil
+		}
+		logger.Warn("检查使用限制失败", logger.Err(checkErr))
+	}
+
+	// 更新缓存
+	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+	tm.cache.tokens[cacheKey] = &CachedToken{
+		Token:         token,
+		UsageInfo:     usageInfo,
+		CachedAt:      time.Now(),
+		Available:     available,
+		NextResetTime: nextResetTime,
+	}
+
+	logger.Info("成功刷新单个账号",
+		logger.Int("index", index),
+		logger.String("auth_type", cfg.AuthType),
+		logger.Float64("available", available))
+
+	// 获取更新后的状态
+	status, _ := tm.getTokenStatusUnlocked(index)
+
+	return &RefreshResult{
+		Index:   index,
+		Success: true,
+		Status:  status,
+	}, nil
+}
+
+// RefreshTokens 批量刷新账号状态（公开方法）
+// POST /v1/admin/tokens/refresh
+func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	// 如果 indices 为空，刷新所有非禁用的账号
+	if len(indices) == 0 {
+		indices = make([]int, 0, len(tm.configs))
+		for i, cfg := range tm.configs {
+			if !cfg.Disabled {
+				indices = append(indices, i)
+			}
+		}
+	}
+
+	results := make([]RefreshResult, 0, len(indices))
+
+	for _, index := range indices {
+		if index < 0 || index >= len(tm.configs) {
+			results = append(results, RefreshResult{
+				Index:   index,
+				Success: false,
+				Error:   fmt.Sprintf("索引超出范围: %d", index),
+			})
+			continue
+		}
+
+		cfg := tm.configs[index]
+		if cfg.Disabled {
+			results = append(results, RefreshResult{
+				Index:   index,
+				Success: false,
+				Error:   "账号已禁用",
+			})
+			continue
+		}
+
+		// 刷新 token
+		token, err := tm.refreshSingleToken(cfg)
+		if err != nil {
+			// 检查是否是 token 失效错误
+			if types.IsTokenInvalidError(err) {
+				logger.Warn("刷新时检测到token失效",
+					logger.Int("index", index),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(err))
+				// 记录失效时间
+				tm.invalidated[index] = time.Now()
+			}
+
+			results = append(results, RefreshResult{
+				Index:   index,
+				Success: false,
+				Error:   err.Error(),
+			})
+			continue
+		}
+
+		// 如果刷新成功，清除失效标记
+		delete(tm.invalidated, index)
+
+		// 检查使用限制
+		var usageInfo *types.UsageLimits
+		var available float64
+		var nextResetTime time.Time
+
+		checker := NewUsageLimitsChecker()
+		if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+			usageInfo = usage
+			available = CalculateAvailableCount(usage)
+			nextResetTime = GetNextResetTime(usage)
+		} else {
+			// 检查是否是 token 失效错误
+			if types.IsTokenInvalidError(checkErr) {
+				logger.Warn("使用限制检查检测到token失效",
+					logger.Int("index", index),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(checkErr))
+				// 记录失效时间
+				tm.invalidated[index] = time.Now()
+
+				results = append(results, RefreshResult{
+					Index:   index,
+					Success: false,
+					Error:   checkErr.Error(),
+				})
+				continue
+			}
+			logger.Warn("检查使用限制失败", logger.Err(checkErr))
+		}
+
+		// 更新缓存
+		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+		tm.cache.tokens[cacheKey] = &CachedToken{
+			Token:         token,
+			UsageInfo:     usageInfo,
+			CachedAt:      time.Now(),
+			Available:     available,
+			NextResetTime: nextResetTime,
+		}
+
+		logger.Info("成功刷新账号",
+			logger.Int("index", index),
+			logger.String("auth_type", cfg.AuthType),
+			logger.Float64("available", available))
+
+		// 获取更新后的状态
+		status, _ := tm.getTokenStatusUnlocked(index)
+
+		results = append(results, RefreshResult{
+			Index:   index,
+			Success: true,
+			Status:  status,
+		})
+	}
+
+	successCount := 0
+	for _, r := range results {
+		if r.Success {
+			successCount++
+		}
+	}
+
+	logger.Info("批量刷新完成",
+		logger.Int("total", len(results)),
+		logger.Int("success", successCount),
+		logger.Int("failed", len(results)-successCount))
+
+	return results, nil
+}
+
+// getTokenStatusUnlocked 获取单个 token 的状态（内部方法，调用者必须持有锁）
+func (tm *TokenManager) getTokenStatusUnlocked(index int) (*TokenStatus, error) {
+	if index < 0 || index >= len(tm.configs) {
+		return nil, fmt.Errorf("索引超出范围: %d", index)
+	}
+
+	cfg := tm.configs[index]
+	status := &TokenStatus{
+		Index:        index,
+		AuthType:     cfg.AuthType,
+		RefreshToken: maskToken(cfg.RefreshToken),
+		Disabled:     cfg.Disabled,
+	}
+
+	// 检查是否失效
+	if invalidTime, exists := tm.invalidated[index]; exists {
+		status.IsInvalid = true
+		status.InvalidatedAt = &invalidTime
+	}
+
+	// 获取缓存信息
+	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+	if cached, exists := tm.cache.tokens[cacheKey]; exists {
+		// 已刷新过的账号
+		if status.IsInvalid {
+			status.RefreshStatus = "invalid"
+		} else {
+			status.RefreshStatus = "active"
+		}
+		status.Available = cached.Available
+		status.UsageInfo = cached.UsageInfo
+		if !cached.LastUsed.IsZero() {
+			status.LastUsed = &cached.LastUsed
+		}
+		// 添加重置日期信息
+		if !cached.NextResetTime.IsZero() {
+			status.NextResetDate = &cached.NextResetTime
+			// 计算距离重置的天数
+			daysUntil := int(time.Until(cached.NextResetTime).Hours() / 24)
+			if daysUntil < 0 {
+				daysUntil = 0 // 已过期则显示 0
+			}
+			status.DaysUntilReset = daysUntil
+		}
+	} else {
+		// 缓存中没有记录，说明从未刷新过
+		status.RefreshStatus = "not_refreshed"
+	}
+
+	return status, nil
+}
