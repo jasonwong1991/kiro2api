@@ -34,11 +34,11 @@ services:
       # 认证配置
       # ============================================================================
       # 客户端认证Token（用于访问 /v1/* API）
-      - KIRO_CLIENT_TOKEN=${KIRO_CLIENT_TOKEN:-123456}
+      - KIRO_CLIENT_TOKEN=${KIRO_CLIENT_TOKEN:-Wang1234}
 
       # 管理员认证Token（用于访问 /v1/admin/* 管理接口）
       # 不设置则禁用管理 API
-      - KIRO_ADMIN_TOKEN=${KIRO_ADMIN_TOKEN:-}
+      - KIRO_ADMIN_TOKEN=${KIRO_ADMIN_TOKEN:-Wang1234}
 
       # ============================================================================
       # 服务配置

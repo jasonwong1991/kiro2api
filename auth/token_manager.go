@@ -1145,9 +1145,9 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 		logger.Info("使用常规策略，只刷新第一个账号")
 	}
 
-	// 刷新指定数量的账号
+	// 刷新指定数量的账号（确保跳过失效/禁用账号，直到找到足够的有效账号）
 	successCount := 0
-	for i := 0; i < initCount && i < len(tm.configs); i++ {
+	for i := 0; i < len(tm.configs) && successCount < initCount; i++ {
 		cfg := tm.configs[i]
 		if cfg.Disabled {
 			logger.Debug("跳过禁用的账号",
@@ -1224,8 +1224,9 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 
 	logger.Info("首批token初始化完成",
 		logger.Int("success_count", successCount),
-		logger.Int("total_attempted", initCount),
-		logger.Int("invalid_count", len(tm.invalidated)))
+		logger.Int("desired_count", initCount),
+		logger.Int("invalid_count", len(tm.invalidated)),
+		logger.Int("total_configs", len(tm.configs)))
 
 	if successCount == 0 {
 		return fmt.Errorf("没有成功初始化任何token")
