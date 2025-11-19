@@ -483,12 +483,31 @@ func (tm *TokenManager) selectBatchRotateToken() *CachedToken {
 
 			// 检查 token 是否存在且可用
 			if cached, exists := tm.cache.tokens[currentKey]; exists {
-				if time.Since(cached.CachedAt) <= tm.cache.ttl && cached.IsUsable() {
+				// 修复2：优化可用性判断，避免过度悲观的TTL检查
+				isUsable := false
+
+				// 如果缓存未过期，直接使用缓存的可用性
+				if time.Since(cached.CachedAt) <= tm.cache.ttl {
+					isUsable = cached.IsUsable()
+				} else {
+					// 如果缓存过期，但有历史可用性记录，尝试乐观判断
+					// 特别是在分批轮换场景下，避免因为缓存过期就切换整个批次
+					if cached.Available > 0 && !cached.Token.IsExpired() {
+						isUsable = true
+						logger.Debug("token缓存过期但历史可用，乐观判断",
+							logger.String("key", currentKey),
+							logger.Float64("historical_available", cached.Available),
+							logger.String("cached_at", cached.CachedAt.Format(time.RFC3339)))
+					}
+				}
+
+				if isUsable {
 					logger.Debug("分批轮换策略选择token",
 						logger.String("selected_key", currentKey),
 						logger.Int("batch", tm.currentBatch),
 						logger.Int("config_index", configIndex),
-						logger.Float64("available_count", cached.Available))
+						logger.Float64("available_count", cached.Available),
+						logger.Bool("cache_fresh", time.Since(cached.CachedAt) <= tm.cache.ttl))
 					return cached
 				}
 			}
@@ -508,6 +527,33 @@ func (tm *TokenManager) selectBatchRotateToken() *CachedToken {
 			logger.Int("total_batches", totalBatches),
 			logger.Int("valid_accounts", len(validIndices)),
 			logger.String("rotation_time", tm.lastBatchRotation.Format(time.RFC3339)))
+
+		// 修复1：切换到新批次时，立即刷新新批次的token状态
+		tm.refreshCurrentBatchTokens(validIndices)
+
+		// 修复2：给新批次一次机会，重新尝试选择
+		// 在新批次中继续查找可用的token（使用刚刚刷新的状态）
+		batchStart = tm.currentBatch * tm.batchSize
+		batchEnd = batchStart + tm.batchSize
+		if batchEnd > len(validIndices) {
+			batchEnd = len(validIndices)
+		}
+		currentBatchIndices = validIndices[batchStart:batchEnd]
+
+		// 在新刷新的批次中查找可用的token
+		for _, configIndex := range currentBatchIndices {
+			currentKey := tm.configOrder[configIndex]
+			if cached, exists := tm.cache.tokens[currentKey]; exists {
+				if cached.IsUsable() { // 新刷新的token不需要检查TTL
+					logger.Info("新批次中找到可用token",
+						logger.String("selected_key", currentKey),
+						logger.Int("batch", tm.currentBatch),
+						logger.Int("config_index", configIndex),
+						logger.Float64("available_count", cached.Available))
+					return cached
+				}
+			}
+		}
 
 		// 如果回到第一批次，说明所有批次都耗尽了
 		if tm.currentBatch == 0 {
@@ -548,6 +594,97 @@ func (tm *TokenManager) getValidAccountIndices() []int {
 	}
 
 	return validIndices
+}
+
+// refreshCurrentBatchTokens 刷新当前批次的token状态
+// 内部方法：调用者必须持有 tm.mutex
+func (tm *TokenManager) refreshCurrentBatchTokens(validIndices []int) {
+	// 计算当前批次的索引范围
+	batchStart := tm.currentBatch * tm.batchSize
+	batchEnd := batchStart + tm.batchSize
+	if batchEnd > len(validIndices) {
+		batchEnd = len(validIndices)
+	}
+
+	// 提取当前批次需要刷新的账号索引
+	if batchStart >= len(validIndices) {
+		return // 批次索引超出范围
+	}
+
+	currentBatchIndices := validIndices[batchStart:batchEnd]
+
+	logger.Info("开始刷新当前批次token状态",
+		logger.Int("batch", tm.currentBatch),
+		logger.Int("batch_size", len(currentBatchIndices)),
+		logger.Int("valid_total", len(validIndices)))
+
+	successCount := 0
+	for _, configIndex := range currentBatchIndices {
+		cfg := tm.configs[configIndex]
+		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, configIndex)
+
+		// 检查是否需要刷新（避免短时间内重复刷新）
+		if cached, exists := tm.cache.tokens[cacheKey]; exists {
+			if time.Since(cached.CachedAt) < 5*time.Minute {
+				logger.Debug("token状态新鲜，跳过刷新",
+					logger.String("key", cacheKey),
+					logger.String("last_refresh", cached.CachedAt.Format(time.RFC3339)))
+				continue
+			}
+		}
+
+		// 刷新单个token
+		token, err := tm.refreshSingleToken(cfg)
+		if err != nil {
+			// 检查是否是 token 失效错误
+			if types.IsTokenInvalidError(err) {
+				logger.Warn("批次刷新检测到token失效",
+					logger.Int("config_index", configIndex),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(err))
+				tm.invalidated[configIndex] = time.Now()
+			} else {
+				logger.Warn("批次刷新token失败",
+					logger.Int("config_index", configIndex),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Err(err))
+			}
+			continue
+		}
+
+		// 检查使用限制
+		var usageInfo *types.UsageLimits
+		var available float64
+		var nextResetTime time.Time
+
+		checker := NewUsageLimitsChecker()
+		usage, checkErr := checker.CheckUsageLimits(token)
+		if checkErr == nil {
+			usageInfo = usage
+			available = CalculateAvailableCount(usage)
+			nextResetTime = GetNextResetTime(usage)
+		}
+
+		// 更新缓存
+		tm.cache.tokens[cacheKey] = &CachedToken{
+			Token:         token,
+			UsageInfo:     usageInfo,
+			CachedAt:      time.Now(),
+			Available:     available,
+			NextResetTime: nextResetTime,
+		}
+
+		successCount++
+		logger.Debug("批次刷新token成功",
+			logger.String("cache_key", cacheKey),
+			logger.Float64("available", available),
+			logger.String("next_reset", nextResetTime.Format(time.RFC3339)))
+	}
+
+	logger.Info("当前批次token刷新完成",
+		logger.Int("batch", tm.currentBatch),
+		logger.Int("success_count", successCount),
+		logger.Int("attempted_count", len(currentBatchIndices)))
 }
 
 // selectFromValidPool 从有效账号池中选择可用的 token
@@ -797,9 +934,19 @@ func CalculateAvailableCount(usage *types.UsageLimits) float64 {
 }
 
 // GetNextResetTime 获取下次重置时间 (基于CREDIT资源类型)
+// 优先返回免费试用到期时间（如果存在且有效），否则返回额度重置时间
 func GetNextResetTime(usage *types.UsageLimits) time.Time {
 	for _, breakdown := range usage.UsageBreakdownList {
 		if breakdown.ResourceType == "CREDIT" {
+			// 优先使用免费试用到期时间（如果存在且状态为ACTIVE）
+			if breakdown.FreeTrialInfo != nil &&
+			   breakdown.FreeTrialInfo.FreeTrialStatus == "ACTIVE" &&
+			   breakdown.FreeTrialInfo.FreeTrialExpiry > 0 {
+				// FreeTrialExpiry 可能是浮点数秒级时间戳
+				return time.Unix(int64(breakdown.FreeTrialInfo.FreeTrialExpiry), 0)
+			}
+
+			// 如果没有有效的免费试用，使用额度重置时间
 			if breakdown.NextDateReset > 0 {
 				// NextDateReset 是秒级时间戳
 				return time.Unix(int64(breakdown.NextDateReset), 0)

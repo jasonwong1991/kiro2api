@@ -552,11 +552,18 @@ func handleTokenPoolAPI(c *gin.Context) {
 			tokenData["user_email"] = "未知用户"
 		}
 
-		// 过期时间（从重置日期获取，或使用默认值）
+		// 过期/重置时间逻辑：
+		// 1. 如果有免费试用且状态为ACTIVE，显示试用到期时间
+		// 2. 否则显示每月额度重置时间（固定每月1日）
+		// quota_reset_at: 新字段，语义更准确
+		// expires_at: 旧字段，保留用于向后兼容
 		if status.NextResetDate != nil {
-			tokenData["expires_at"] = status.NextResetDate.Format(time.RFC3339)
+			tokenData["quota_reset_at"] = status.NextResetDate.Format(time.RFC3339)
+			tokenData["expires_at"] = status.NextResetDate.Format(time.RFC3339) // 向后兼容
 		} else {
-			tokenData["expires_at"] = time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+			defaultResetTime := time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+			tokenData["quota_reset_at"] = defaultResetTime
+			tokenData["expires_at"] = defaultResetTime // 向后兼容
 		}
 
 		// 最后使用时间
