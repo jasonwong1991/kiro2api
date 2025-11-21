@@ -15,11 +15,13 @@ import (
 type SelectionStrategy string
 
 const (
-	StrategySequential   SelectionStrategy = "sequential"     // 顺序选择
-	StrategyRandom       SelectionStrategy = "random"         // 随机选择
-	StrategyRoundRobin   SelectionStrategy = "round_robin"   // 轮询选择
-	StrategyBatchRotate  SelectionStrategy = "batch_rotate"  // 分批轮换（避免单IP频繁刷新）
+	StrategySequential SelectionStrategy = "sequential"   // 顺序选择
+	StrategyRandom     SelectionStrategy = "random"       // 随机选择
+	StrategyRoundRobin SelectionStrategy = "round_robin" // 轮询选择
 )
+
+// MinAvailableThreshold 最小可用余额阈值，低于此值视为无效
+const MinAvailableThreshold = 0.1
 
 // TokenManager 简化的token管理器
 type TokenManager struct {
@@ -34,15 +36,16 @@ type TokenManager struct {
 	strategy     SelectionStrategy // token选择策略
 	configPath   string            // 配置文件路径（用于同步更新）
 
-	// 分批轮换策略相关字段
-	batchSize         int       // 每批使用的账号数量
-	currentBatch      int       // 当前批次索引
-	batchStartIndex   int       // 当前批次起始索引
-	batchRoundRobin   int       // 批次内轮询索引
-	lastBatchRotation time.Time // 上次批次切换时间
+	// 活跃池相关字段（用于 round_robin 策略 + KIRO_BATCH_SIZE）
+	batchSize      int   // 活跃池大小（0=使用全部账号）
+	activePool     []int // 活跃账号池（存储配置索引）
+	poolRoundRobin int   // 活跃池内轮询索引
 
 	// 自动管理相关字段
 	autoRemoveInvalid bool // 是否自动删除失效的账号
+
+	// 代理池管理器
+	proxyPool *ProxyPoolManager // 代理池（可选）
 }
 
 // SimpleTokenCache 简化的token缓存（纯数据结构，无锁）
@@ -56,7 +59,8 @@ type SimpleTokenCache struct {
 type CachedToken struct {
 	Token         types.TokenInfo
 	UsageInfo     *types.UsageLimits
-	CachedAt      time.Time
+	CachedAt      time.Time // 上次成功刷新的时间
+	LastCheckAt   time.Time // 上次尝试刷新的时间（包括失败的尝试）
 	LastUsed      time.Time
 	Available     float64
 	NextResetTime time.Time // 额度重置时间
@@ -87,13 +91,30 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 	// 获取自动删除失效账号配置
 	autoRemove := getAutoRemoveInvalid()
 
+	// 初始化代理池（如果配置了）
+	proxyURLs := LoadProxyPoolFromEnv()
+	var proxyPool *ProxyPoolManager
+	if len(proxyURLs) > 0 {
+		var err error
+		proxyPool, err = NewProxyPoolManager(proxyURLs)
+		if err != nil {
+			logger.Warn("初始化代理池失败，将不使用代理",
+				logger.Err(err),
+				logger.Int("proxy_count", len(proxyURLs)))
+		} else {
+			logger.Info("代理池初始化成功",
+				logger.Int("proxy_count", len(proxyURLs)))
+		}
+	}
+
 	logger.Info("TokenManager初始化",
 		logger.Int("config_count", len(configs)),
 		logger.Int("config_order_count", len(configOrder)),
 		logger.String("selection_strategy", string(strategy)),
 		logger.Int("batch_size", batchSize),
 		logger.Bool("auto_remove_invalid", autoRemove),
-		logger.String("config_path", configPath))
+		logger.String("config_path", configPath),
+		logger.Bool("proxy_pool_enabled", proxyPool != nil))
 
 	return &TokenManager{
 		cache:             NewSimpleTokenCache(config.TokenCacheTTL),
@@ -105,11 +126,10 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		strategy:          strategy,
 		configPath:        configPath,
 		batchSize:         batchSize,
-		currentBatch:      0,
-		batchStartIndex:   0,
-		batchRoundRobin:   0,
-		lastBatchRotation: time.Now(),
+		activePool:        []int{}, // 初始为空，首次使用时构建
+		poolRoundRobin:    0,
 		autoRemoveInvalid: autoRemove,
+		proxyPool:         proxyPool,
 	}
 }
 
@@ -138,7 +158,7 @@ func getSelectionStrategy() SelectionStrategy {
 
 	strategy := SelectionStrategy(strategyEnv)
 	switch strategy {
-	case StrategySequential, StrategyRandom, StrategyRoundRobin, StrategyBatchRotate:
+	case StrategySequential, StrategyRandom, StrategyRoundRobin:
 		return strategy
 	default:
 		logger.Warn("未知的token选择策略，使用默认策略",
@@ -276,8 +296,6 @@ func (tm *TokenManager) selectBestTokenUnlocked() *CachedToken {
 		return tm.selectRoundRobinToken()
 	case StrategySequential:
 		return tm.selectSequentialToken()
-	case StrategyBatchRotate:
-		return tm.selectBatchRotateToken()
 	default:
 		logger.Warn("未知策略，回退到轮询",
 			logger.String("strategy", string(tm.strategy)))
@@ -290,7 +308,7 @@ func (tm *TokenManager) selectSequentialToken() *CachedToken {
 	// 如果没有配置顺序，降级到按map遍历顺序
 	if len(tm.configOrder) == 0 {
 		for key, cached := range tm.cache.tokens {
-			if time.Since(cached.CachedAt) <= tm.cache.ttl && cached.IsUsable() {
+			if cached.IsUsable() {
 				logger.Debug("顺序策略选择token（无顺序配置）",
 					logger.String("selected_key", key),
 					logger.Float64("available_count", cached.Available))
@@ -306,12 +324,6 @@ func (tm *TokenManager) selectSequentialToken() *CachedToken {
 
 		// 检查这个token是否存在且可用
 		if cached, exists := tm.cache.tokens[currentKey]; exists {
-			// 检查token是否过期
-			if time.Since(cached.CachedAt) > tm.cache.ttl {
-				tm.exhausted[currentKey] = true
-				tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
-				continue
-			}
 
 			// 检查token是否可用
 			if cached.IsUsable() {
@@ -341,39 +353,14 @@ func (tm *TokenManager) selectSequentialToken() *CachedToken {
 }
 
 // selectRoundRobinToken 轮询选择策略
+// 根据 batchSize 决定使用全局轮询还是活跃池轮询
 func (tm *TokenManager) selectRoundRobinToken() *CachedToken {
-	if len(tm.configOrder) == 0 {
-		return nil
+	if tm.batchSize <= 0 {
+		// 全局轮询模式（使用全部账号）
+		return tm.selectRoundRobinAll()
 	}
-
-	startIndex := tm.currentIndex
-	for attempts := 0; attempts < len(tm.configOrder); attempts++ {
-		currentKey := tm.configOrder[tm.currentIndex]
-
-		if cached, exists := tm.cache.tokens[currentKey]; exists {
-			if time.Since(cached.CachedAt) <= tm.cache.ttl && cached.IsUsable() {
-				logger.Debug("轮询策略选择token",
-					logger.String("selected_key", currentKey),
-					logger.Int("index", tm.currentIndex),
-					logger.Float64("available_count", cached.Available))
-
-				// 轮询策略：每次使用后移动到下一个
-				tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
-				return cached
-			}
-		}
-
-		// 移动到下一个token
-		tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
-	}
-
-	// 恢复到起始索引
-	tm.currentIndex = startIndex
-
-	logger.Warn("所有token都不可用（轮询策略）",
-		logger.Int("total_count", len(tm.configOrder)))
-
-	return nil
+	// 活跃池轮询模式（维护固定数量的健康账号）
+	return tm.selectRoundRobinWithPool()
 }
 
 // selectRandomToken 随机选择策略
@@ -388,7 +375,7 @@ func (tm *TokenManager) selectRandomToken() *CachedToken {
 
 	for _, key := range tm.configOrder {
 		if cached, exists := tm.cache.tokens[key]; exists {
-			if time.Since(cached.CachedAt) <= tm.cache.ttl && cached.IsUsable() {
+			if cached.IsUsable() {
 				availableTokens = append(availableTokens, cached)
 				availableKeys = append(availableKeys, key)
 			}
@@ -413,383 +400,269 @@ func (tm *TokenManager) selectRandomToken() *CachedToken {
 	return selected
 }
 
-// selectBatchRotateToken 分批轮换策略（优化版）
-// 核心逻辑：
-// 1. 动态构建有效账号池（排除失效和禁用的账号）
-// 2. 从有效账号池中选取前 N 个作为当前批次
-// 3. 当前批次内使用 round_robin 策略轮流使用
-// 4. 当前批次所有 token 都不可用时，自动切换到下一批次
-// 5. 只刷新当前批次的 token，其他批次不刷新（避免单IP频繁刷新）
-// 6. 所有批次都耗尽后，重置到第一批次并触发全局刷新
-func (tm *TokenManager) selectBatchRotateToken() *CachedToken {
-	if len(tm.configOrder) == 0 {
-		return nil
+// ============================================================================
+// 活跃池管理方法（用于 RoundRobin + KIRO_BATCH_SIZE）
+// ============================================================================
+
+// isAccountHealthy 判断账号是否健康
+// 健康标准：未禁用 + 未失效 + 有余额
+func (tm *TokenManager) isAccountHealthy(index int) bool {
+	if index < 0 || index >= len(tm.configs) {
+		return false
 	}
 
-	// 如果 batchSize 为 0，降级为普通轮询策略
-	if tm.batchSize <= 0 {
-		logger.Debug("批次大小为0，降级为轮询策略")
-		return tm.selectRoundRobinToken()
+	// 检查是否禁用
+	if tm.configs[index].Disabled {
+		return false
 	}
 
-	// 第一步：构建有效账号池（排除失效和禁用的账号）
-	validIndices := tm.getValidAccountIndices()
-	if len(validIndices) == 0 {
-		logger.Warn("没有有效的账号可用")
-		return nil
+	// 检查是否失效
+	if _, isInvalid := tm.invalidated[index]; isInvalid {
+		return false
 	}
 
-	// 如果有效账号数量少于等于 batchSize，直接使用全部有效账号
-	if len(validIndices) <= tm.batchSize {
-		logger.Debug("有效账号数量不足一个批次，使用全部有效账号",
-			logger.Int("valid_count", len(validIndices)),
-			logger.Int("batch_size", tm.batchSize))
-		return tm.selectFromValidPool(validIndices)
+	// 检查是否有足够可用余额（大于阈值）
+	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+	if cached, exists := tm.cache.tokens[cacheKey]; exists {
+		return cached.IsUsable() && cached.Available >= MinAvailableThreshold
 	}
 
-	// 第二步：计算批次信息
-	totalBatches := (len(validIndices) + tm.batchSize - 1) / tm.batchSize
+	// 如果没有缓存，认为不健康（需要刷新）
+	return false
+}
 
-	// 第三步：尝试从当前批次选择可用 token
-	for batchAttempts := 0; batchAttempts < totalBatches; batchAttempts++ {
-		// 计算当前批次的起始和结束索引（在有效账号池中）
-		batchStart := tm.currentBatch * tm.batchSize
-		batchEnd := batchStart + tm.batchSize
-		if batchEnd > len(validIndices) {
-			batchEnd = len(validIndices)
+// buildActivePool 构建活跃池
+// 从所有账号中选择最多 batchSize 个健康账号
+func (tm *TokenManager) buildActivePool() {
+	var healthyIndices []int
+
+	// 收集所有健康账号
+	for i := range tm.configs {
+		if tm.isAccountHealthy(i) {
+			healthyIndices = append(healthyIndices, i)
 		}
+	}
 
-		// 提取当前批次的账号索引
-		currentBatchIndices := validIndices[batchStart:batchEnd]
+	// 如果健康账号数 <= batchSize，使用全部健康账号
+	if len(healthyIndices) <= tm.batchSize {
+		tm.activePool = healthyIndices
+	} else {
+		// 否则只取前 batchSize 个
+		tm.activePool = healthyIndices[:tm.batchSize]
+	}
 
-		logger.Debug("尝试从当前批次选择token",
-			logger.Int("current_batch", tm.currentBatch),
-			logger.Int("batch_start", batchStart),
-			logger.Int("batch_end", batchEnd),
-			logger.Int("valid_total", len(validIndices)),
-			logger.Int("batch_round_robin", tm.batchRoundRobin))
+	// 重置轮询索引
+	tm.poolRoundRobin = 0
 
-		// 第四步：在当前批次内轮询查找可用 token
-		batchSize := len(currentBatchIndices)
-		for tokenAttempts := 0; tokenAttempts < batchSize; tokenAttempts++ {
-			// 计算当前要检查的 token 在批次内的相对索引
-			relativeIndex := tm.batchRoundRobin % batchSize
-			// 获取实际的配置索引
-			configIndex := currentBatchIndices[relativeIndex]
-			currentKey := tm.configOrder[configIndex]
+	logger.Debug("构建活跃池",
+		logger.Int("pool_size", len(tm.activePool)),
+		logger.Int("batch_size", tm.batchSize),
+		logger.Int("healthy_total", len(healthyIndices)))
+}
 
-			// 移动到下一个位置（为下次调用准备）
-			tm.batchRoundRobin = (tm.batchRoundRobin + 1) % batchSize
-
-			// 检查 token 是否存在且可用
-			if cached, exists := tm.cache.tokens[currentKey]; exists {
-				// 修复2：优化可用性判断，避免过度悲观的TTL检查
-				isUsable := false
-
-				// 如果缓存未过期，直接使用缓存的可用性
-				if time.Since(cached.CachedAt) <= tm.cache.ttl {
-					isUsable = cached.IsUsable()
-				} else {
-					// 如果缓存过期，但有历史可用性记录，尝试乐观判断
-					// 特别是在分批轮换场景下，避免因为缓存过期就切换整个批次
-					if cached.Available > 0 && !cached.Token.IsExpired() {
-						isUsable = true
-						logger.Debug("token缓存过期但历史可用，乐观判断",
-							logger.String("key", currentKey),
-							logger.Float64("historical_available", cached.Available),
-							logger.String("cached_at", cached.CachedAt.Format(time.RFC3339)))
-					}
-				}
-
-				if isUsable {
-					logger.Debug("分批轮换策略选择token",
-						logger.String("selected_key", currentKey),
-						logger.Int("batch", tm.currentBatch),
-						logger.Int("config_index", configIndex),
-						logger.Float64("available_count", cached.Available),
-						logger.Bool("cache_fresh", time.Since(cached.CachedAt) <= tm.cache.ttl))
-					return cached
-				}
-			}
-
-			logger.Debug("token不可用，尝试批次内下一个",
-				logger.String("skipped_key", currentKey),
-				logger.Int("config_index", configIndex))
+// replaceUnhealthyAccount 替换不健康账号
+// 从池外找一个健康账号补充，返回是否成功替换
+func (tm *TokenManager) replaceUnhealthyAccount(unhealthyIndex int) bool {
+	// 从 activePool 中移除不健康账号
+	newPool := []int{}
+	for _, idx := range tm.activePool {
+		if idx != unhealthyIndex {
+			newPool = append(newPool, idx)
 		}
+	}
 
-		// 当前批次所有 token 都不可用，切换到下一批次
-		tm.currentBatch = (tm.currentBatch + 1) % totalBatches
-		tm.batchRoundRobin = 0 // 重置批次内轮询索引
-		tm.lastBatchRotation = time.Now()
+	// 查找池外的健康账号
+	inPool := make(map[int]bool)
+	for _, idx := range tm.activePool {
+		inPool[idx] = true
+	}
 
-		logger.Info("当前批次耗尽，切换到下一批次",
-			logger.Int("new_batch", tm.currentBatch),
-			logger.Int("total_batches", totalBatches),
-			logger.Int("valid_accounts", len(validIndices)),
-			logger.String("rotation_time", tm.lastBatchRotation.Format(time.RFC3339)))
-
-		// 修复1：切换到新批次时，立即刷新新批次的token状态
-		tm.refreshCurrentBatchTokens(validIndices)
-
-		// 修复2：给新批次一次机会，重新尝试选择
-		// 在新批次中继续查找可用的token（使用刚刚刷新的状态）
-		batchStart = tm.currentBatch * tm.batchSize
-		batchEnd = batchStart + tm.batchSize
-		if batchEnd > len(validIndices) {
-			batchEnd = len(validIndices)
+	var replacement int = -1
+	for i := range tm.configs {
+		// 跳过已在池中的账号
+		if inPool[i] {
+			continue
 		}
-		currentBatchIndices = validIndices[batchStart:batchEnd]
-
-		// 在新刷新的批次中查找可用的token
-		for _, configIndex := range currentBatchIndices {
-			currentKey := tm.configOrder[configIndex]
-			if cached, exists := tm.cache.tokens[currentKey]; exists {
-				if cached.IsUsable() { // 新刷新的token不需要检查TTL
-					logger.Info("新批次中找到可用token",
-						logger.String("selected_key", currentKey),
-						logger.Int("batch", tm.currentBatch),
-						logger.Int("config_index", configIndex),
-						logger.Float64("available_count", cached.Available))
-					return cached
-				}
-			}
+		// 找到第一个健康的账号
+		if tm.isAccountHealthy(i) {
+			replacement = i
+			break
 		}
+	}
 
-		// 如果回到第一批次，说明所有批次都耗尽了
-		if tm.currentBatch == 0 {
-			logger.Warn("所有批次都已耗尽，需要全局刷新",
-				logger.Int("total_batches", totalBatches),
-				logger.Int("valid_accounts", len(validIndices)))
-			// 触发全局刷新（在下次 getBestToken 时会自动刷新）
-			tm.lastRefresh = time.Time{} // 重置刷新时间，强制下次刷新
+	// 如果找到替换账号，加入池中
+	if replacement != -1 {
+		newPool = append(newPool, replacement)
+		tm.activePool = newPool
+
+		logger.Info("替换不健康账号",
+			logger.Int("removed_index", unhealthyIndex),
+			logger.Int("added_index", replacement),
+			logger.Int("pool_size", len(tm.activePool)))
+		return true
+	}
+
+	// 没有找到替换账号，保留移除后的池
+	tm.activePool = newPool
+
+	logger.Warn("无法找到替换账号",
+		logger.Int("removed_index", unhealthyIndex),
+		logger.Int("remaining_pool_size", len(tm.activePool)))
+	return false
+}
+
+// selectRoundRobinWithPool 活跃池轮询选择
+func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
+	// 如果活跃池为空，构建活跃池
+	if len(tm.activePool) == 0 {
+		tm.buildActivePool()
+
+		// 构建后仍为空，返回 nil
+		if len(tm.activePool) == 0 {
+			logger.Warn("无法构建活跃池，没有健康账号")
 			return nil
 		}
 	}
 
-	// 所有批次都尝试过了，仍然没有可用 token
-	logger.Warn("所有批次都不可用（分批轮换策略）",
-		logger.Int("total_batches", totalBatches),
-		logger.Int("valid_accounts", len(validIndices)))
+	// 在活跃池内轮询查找可用 token
+	poolSize := len(tm.activePool)
+	startIndex := tm.poolRoundRobin % poolSize
 
-	return nil
-}
+	// 记录本轮发现的不健康账号，避免重复处理
+	unhealthyAccounts := make(map[int]bool)
 
-// getValidAccountIndices 获取所有有效账号的索引
-// 排除：1. 被标记为失效的账号  2. 被禁用的账号
-func (tm *TokenManager) getValidAccountIndices() []int {
-	var validIndices []int
-
-	for i, cfg := range tm.configs {
-		// 跳过禁用的账号
-		if cfg.Disabled {
-			continue
-		}
-
-		// 跳过失效的账号
-		if _, isInvalid := tm.invalidated[i]; isInvalid {
-			continue
-		}
-
-		validIndices = append(validIndices, i)
-	}
-
-	return validIndices
-}
-
-// refreshCurrentBatchTokens 刷新当前批次的token状态
-// 内部方法：调用者必须持有 tm.mutex
-func (tm *TokenManager) refreshCurrentBatchTokens(validIndices []int) {
-	// 计算当前批次的索引范围
-	batchStart := tm.currentBatch * tm.batchSize
-	batchEnd := batchStart + tm.batchSize
-	if batchEnd > len(validIndices) {
-		batchEnd = len(validIndices)
-	}
-
-	// 提取当前批次需要刷新的账号索引
-	if batchStart >= len(validIndices) {
-		return // 批次索引超出范围
-	}
-
-	currentBatchIndices := validIndices[batchStart:batchEnd]
-
-	logger.Info("开始刷新当前批次token状态",
-		logger.Int("batch", tm.currentBatch),
-		logger.Int("batch_size", len(currentBatchIndices)),
-		logger.Int("valid_total", len(validIndices)))
-
-	successCount := 0
-	for _, configIndex := range currentBatchIndices {
-		cfg := tm.configs[configIndex]
-		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, configIndex)
-
-		// 检查是否需要刷新（避免短时间内重复刷新）
-		if cached, exists := tm.cache.tokens[cacheKey]; exists {
-			if time.Since(cached.CachedAt) < 5*time.Minute {
-				logger.Debug("token状态新鲜，跳过刷新",
-					logger.String("key", cacheKey),
-					logger.String("last_refresh", cached.CachedAt.Format(time.RFC3339)))
-				continue
-			}
-		}
-
-		// 刷新单个token
-		token, err := tm.refreshSingleToken(cfg)
-		if err != nil {
-			// 检查是否是 token 失效错误
-			if types.IsTokenInvalidError(err) {
-				logger.Warn("批次刷新检测到token失效",
-					logger.Int("config_index", configIndex),
-					logger.String("auth_type", cfg.AuthType),
-					logger.Err(err))
-				tm.invalidated[configIndex] = time.Now()
-			} else {
-				logger.Warn("批次刷新token失败",
-					logger.Int("config_index", configIndex),
-					logger.String("auth_type", cfg.AuthType),
-					logger.Err(err))
-			}
-			continue
-		}
-
-		// 检查使用限制
-		var usageInfo *types.UsageLimits
-		var available float64
-		var nextResetTime time.Time
-
-		checker := NewUsageLimitsChecker()
-		usage, checkErr := checker.CheckUsageLimits(token)
-		if checkErr == nil {
-			usageInfo = usage
-			available = CalculateAvailableCount(usage)
-			nextResetTime = GetNextResetTime(usage)
-		}
-
-		// 更新缓存
-		tm.cache.tokens[cacheKey] = &CachedToken{
-			Token:         token,
-			UsageInfo:     usageInfo,
-			CachedAt:      time.Now(),
-			Available:     available,
-			NextResetTime: nextResetTime,
-		}
-
-		successCount++
-		logger.Debug("批次刷新token成功",
-			logger.String("cache_key", cacheKey),
-			logger.Float64("available", available),
-			logger.String("next_reset", nextResetTime.Format(time.RFC3339)))
-	}
-
-	logger.Info("当前批次token刷新完成",
-		logger.Int("batch", tm.currentBatch),
-		logger.Int("success_count", successCount),
-		logger.Int("attempted_count", len(currentBatchIndices)))
-}
-
-// selectFromValidPool 从有效账号池中选择可用的 token
-func (tm *TokenManager) selectFromValidPool(validIndices []int) *CachedToken {
-	if len(validIndices) == 0 {
-		return nil
-	}
-
-	// 轮询所有有效账号
-	startIndex := tm.currentIndex % len(validIndices)
-	for attempts := 0; attempts < len(validIndices); attempts++ {
-		relativeIndex := (startIndex + attempts) % len(validIndices)
-		configIndex := validIndices[relativeIndex]
+	for attempt := 0; attempt < poolSize; attempt++ {
+		relativeIndex := (startIndex + attempt) % poolSize
+		configIndex := tm.activePool[relativeIndex]
 		currentKey := tm.configOrder[configIndex]
 
-		if cached, exists := tm.cache.tokens[currentKey]; exists {
-			if time.Since(cached.CachedAt) <= tm.cache.ttl && cached.IsUsable() {
-				// 更新当前索引
-				tm.currentIndex = (relativeIndex + 1) % len(validIndices)
+		// 检查账号是否健康
+		if !tm.isAccountHealthy(configIndex) {
+			// 记录不健康账号
+			if !unhealthyAccounts[configIndex] {
+				unhealthyAccounts[configIndex] = true
+				logger.Debug("活跃池中发现不健康账号",
+					logger.Int("config_index", configIndex),
+					logger.Int("pool_index", relativeIndex))
+			}
+			// 继续下一次尝试，不立即替换
+			continue
+		}
 
-				logger.Debug("从有效账号池选择token",
+		// 获取 token
+		if cached, exists := tm.cache.tokens[currentKey]; exists {
+			if cached.IsUsable() {
+				// 移动到下一个位置
+				tm.poolRoundRobin = (relativeIndex + 1) % poolSize
+
+				logger.Debug("活跃池轮询选择token",
 					logger.String("selected_key", currentKey),
 					logger.Int("config_index", configIndex),
+					logger.Int("pool_index", relativeIndex),
+					logger.Int("pool_size", poolSize),
 					logger.Float64("available_count", cached.Available))
 				return cached
 			}
 		}
 	}
 
+	// 一轮结束后，批量处理不健康账号（只替换一个）
+	if len(unhealthyAccounts) > 0 {
+		// 只替换第一个不健康账号，避免过度刷新
+		for unhealthyIndex := range unhealthyAccounts {
+			logger.Info("尝试替换不健康账号",
+				logger.Int("config_index", unhealthyIndex),
+				logger.Int("unhealthy_count", len(unhealthyAccounts)))
+
+			replaced := tm.replaceUnhealthyAccount(unhealthyIndex)
+			if !replaced {
+				// 如果找不到替换账号，只移除这一个不健康账号
+				logger.Warn("无可用替换账号，仅移除不健康账号",
+					logger.Int("removed_index", unhealthyIndex),
+					logger.Int("remaining_pool_size", len(tm.activePool)))
+			}
+			// 只处理一个，避免连续刷新
+			break
+		}
+	}
+
+	// 池内所有账号都不可用，尝试重建活跃池
+	logger.Info("活跃池内所有账号不可用，尝试重建活跃池")
+	tm.buildActivePool()
+
+	// 重建后再次尝试
+	if len(tm.activePool) > 0 {
+		configIndex := tm.activePool[0]
+		currentKey := tm.configOrder[configIndex]
+		if cached, exists := tm.cache.tokens[currentKey]; exists {
+			if cached.IsUsable() {
+				tm.poolRoundRobin = 1 % len(tm.activePool)
+				return cached
+			}
+		}
+	}
+
+	logger.Warn("活跃池轮询失败，无可用token")
+	return nil
+}
+
+// selectRoundRobinAll 全部账号轮询（原逻辑，batchSize=0 时使用）
+func (tm *TokenManager) selectRoundRobinAll() *CachedToken {
+	if len(tm.configOrder) == 0 {
+		return nil
+	}
+
+	startIndex := tm.currentIndex
+	for attempts := 0; attempts < len(tm.configOrder); attempts++ {
+		currentKey := tm.configOrder[tm.currentIndex]
+
+		if cached, exists := tm.cache.tokens[currentKey]; exists {
+			if cached.IsUsable() {
+				logger.Debug("全局轮询策略选择token",
+					logger.String("selected_key", currentKey),
+					logger.Int("index", tm.currentIndex),
+					logger.Float64("available_count", cached.Available))
+
+				// 轮询策略：每次使用后移动到下一个
+				tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
+				return cached
+			}
+		}
+
+		// 移动到下一个token
+		tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
+	}
+
+	// 恢复到起始索引
+	tm.currentIndex = startIndex
+
+	logger.Warn("所有token都不可用（全局轮询策略）",
+		logger.Int("total_count", len(tm.configOrder)))
+
 	return nil
 }
 
 // refreshCacheUnlocked 刷新token缓存
 // 内部方法：调用者必须持有 tm.mutex
-// 分批轮换策略优化：只刷新当前批次的 token，避免单 IP 频繁刷新
 func (tm *TokenManager) refreshCacheUnlocked() error {
 	logger.Debug("开始刷新token缓存")
 
-	// 确定需要刷新的索引范围
+	// 刷新所有非禁用且未失效的 token
 	var refreshIndices []int
-	if tm.strategy == StrategyBatchRotate && tm.batchSize > 0 {
-		// 分批轮换策略：只刷新当前批次的有效账号
-		validIndices := tm.getValidAccountIndices()
-
-		// 如果所有账号都失效，刷新前 N 个账号（最早重置额度）
-		if len(validIndices) == 0 {
-			logger.Warn("所有账号都失效，尝试刷新前面的账号以检查额度是否已重置")
-
-			refreshCount := tm.batchSize
-			if refreshCount > len(tm.configs) {
-				refreshCount = len(tm.configs)
-			}
-
-			// 选择前 N 个未禁用的账号刷新
-			for i := 0; i < len(tm.configs) && len(refreshIndices) < refreshCount; i++ {
-				if !tm.configs[i].Disabled {
-					refreshIndices = append(refreshIndices, i)
-				}
-			}
-
-			logger.Info("全部失效场景：刷新前面的账号",
-				logger.Int("refresh_count", len(refreshIndices)),
-				logger.Int("batch_size", tm.batchSize),
-				logger.Int("total_configs", len(tm.configs)))
-		} else if len(validIndices) <= tm.batchSize {
-			// 如果有效账号少于等于 batchSize，刷新所有有效账号
-			refreshIndices = validIndices
-			logger.Info("刷新所有有效账号（数量不足一个批次）",
-				logger.Int("valid_count", len(validIndices)),
-				logger.Int("batch_size", tm.batchSize))
-		} else {
-			// 计算当前批次的范围（基于有效账号池）
-			batchStart := tm.currentBatch * tm.batchSize
-			batchEnd := batchStart + tm.batchSize
-			if batchEnd > len(validIndices) {
-				batchEnd = len(validIndices)
-			}
-
-			// 提取当前批次的账号索引
-			refreshIndices = validIndices[batchStart:batchEnd]
-
-			logger.Info("分批刷新策略：只刷新当前批次",
-				logger.Int("current_batch", tm.currentBatch),
-				logger.Int("batch_start", batchStart),
-				logger.Int("batch_end", batchEnd),
-				logger.Int("valid_total", len(validIndices)),
-				logger.Int("refresh_count", len(refreshIndices)))
+	for i, cfg := range tm.configs {
+		// 跳过禁用的账号
+		if cfg.Disabled {
+			continue
 		}
-	} else {
-		// 其他策略：刷新所有非禁用且未失效的 token
-		for i, cfg := range tm.configs {
-			// 跳过禁用的账号
-			if cfg.Disabled {
-				continue
-			}
-			// 跳过已失效的账号（避免重复刷新失败）
-			if _, isInvalid := tm.invalidated[i]; isInvalid {
-				continue
-			}
-			refreshIndices = append(refreshIndices, i)
+		// 跳过已失效的账号（避免重复刷新失败）
+		if _, isInvalid := tm.invalidated[i]; isInvalid {
+			continue
 		}
-
-		logger.Debug("全局刷新策略：刷新所有有效token",
-			logger.Int("refresh_count", len(refreshIndices)))
+		refreshIndices = append(refreshIndices, i)
 	}
+
+	logger.Debug("刷新所有有效token",
+		logger.Int("refresh_count", len(refreshIndices)))
 
 	// 刷新指定索引的 token
 	for _, i := range refreshIndices {
@@ -814,8 +687,18 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		}
 
 		// 刷新token
-		token, err := tm.refreshSingleToken(cfg)
+		token, err := tm.refreshSingleToken(cfg, i)
 		if err != nil {
+			// 刷新失败时，更新LastCheckAt但保留旧的缓存状态
+			if cached, exists := tm.cache.tokens[cacheKey]; exists {
+				cached.LastCheckAt = time.Now()
+				logger.Debug("刷新失败但保留旧缓存",
+					logger.Int("config_index", i),
+					logger.String("auth_type", cfg.AuthType),
+					logger.Float64("cached_available", cached.Available),
+					logger.String("cached_at", cached.CachedAt.Format(time.RFC3339)))
+			}
+
 			// 检查是否是 token 失效错误
 			if types.IsTokenInvalidError(err) {
 				logger.Warn("检测到token失效",
@@ -841,7 +724,7 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		var available float64
 		var nextResetTime time.Time
 
-		checker := NewUsageLimitsChecker()
+		checker := tm.getUsageCheckerForToken(i)
 		if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
 			usageInfo = usage
 			available = CalculateAvailableCount(usage)
@@ -862,10 +745,12 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 
 		// 更新缓存（直接访问，已在tm.mutex保护下）
 		cacheKey = fmt.Sprintf(config.TokenCacheKeyFormat, i)
+		now := time.Now()
 		tm.cache.tokens[cacheKey] = &CachedToken{
 			Token:         token,
 			UsageInfo:     usageInfo,
-			CachedAt:      time.Now(),
+			CachedAt:      now, // 成功刷新时间
+			LastCheckAt:   now, // 最后检查时间
 			Available:     available,
 			NextResetTime: nextResetTime,
 		}
@@ -933,31 +818,93 @@ func CalculateAvailableCount(usage *types.UsageLimits) float64 {
 	return 0.0
 }
 
-// GetNextResetTime 获取下次重置时间 (基于CREDIT资源类型)
-// 优先返回免费试用到期时间（如果存在且有效），否则返回额度重置时间
+// GetNextResetTime 获取下次重置时间 (基于freeTrialExpiry注册日期)
+// AWS免费账号每月在注册日期重置额度，而不是固定的每月1号
 func GetNextResetTime(usage *types.UsageLimits) time.Time {
-	for _, breakdown := range usage.UsageBreakdownList {
-		if breakdown.ResourceType == "CREDIT" {
-			// 优先使用免费试用到期时间（如果存在且状态为ACTIVE）
-			if breakdown.FreeTrialInfo != nil &&
-			   breakdown.FreeTrialInfo.FreeTrialStatus == "ACTIVE" &&
-			   breakdown.FreeTrialInfo.FreeTrialExpiry > 0 {
-				// FreeTrialExpiry 可能是浮点数秒级时间戳
-				return time.Unix(int64(breakdown.FreeTrialInfo.FreeTrialExpiry), 0)
-			}
+	// 尝试从 freeTrialExpiry 获取注册日期
+	var registrationDay int
+	var hasRegistrationDay bool
 
-			// 如果没有有效的免费试用，使用额度重置时间
-			if breakdown.NextDateReset > 0 {
-				// NextDateReset 是秒级时间戳
-				return time.Unix(int64(breakdown.NextDateReset), 0)
+	for _, breakdown := range usage.UsageBreakdownList {
+		if breakdown.ResourceType == "CREDIT" && breakdown.FreeTrialInfo != nil {
+			if breakdown.FreeTrialInfo.FreeTrialExpiry > 0 {
+				// FreeTrialExpiry 是账号注册时间戳
+				registrationTime := time.Unix(int64(breakdown.FreeTrialInfo.FreeTrialExpiry), 0)
+				registrationDay = registrationTime.Day()
+				hasRegistrationDay = true
+				break
 			}
 		}
 	}
-	// 如果没有资源级别的重置时间，使用顶层的
+
+	// 如果找到了注册日期，计算下次重置时间
+	if hasRegistrationDay {
+		now := time.Now()
+		currentYear := now.Year()
+		currentMonth := now.Month()
+		currentDay := now.Day()
+
+		// 计算本月的重置日期
+		var resetTime time.Time
+		if currentDay < registrationDay {
+			// 如果当前日期小于注册日，下次重置是本月的注册日
+			resetTime = time.Date(currentYear, currentMonth, registrationDay, 8, 0, 0, 0, time.Local)
+		} else {
+			// 如果当前日期已经过了注册日，下次重置是下个月的注册日
+			nextMonth := currentMonth + 1
+			nextYear := currentYear
+			if nextMonth > 12 {
+				nextMonth = 1
+				nextYear++
+			}
+
+			// 处理月份天数不足的情况（例如注册日是31号，但2月只有28天）
+			resetTime = time.Date(nextYear, nextMonth, registrationDay, 8, 0, 0, 0, time.Local)
+
+			// 如果设置的日期被自动调整了（说明该月没有这么多天），使用该月的最后一天
+			if resetTime.Day() != registrationDay {
+				// 回退到上个月的最后一天，然后加一天得到下个月1号，再减一秒得到上个月最后一天最后一秒
+				resetTime = time.Date(nextYear, nextMonth+1, 0, 8, 0, 0, 0, time.Local)
+			}
+		}
+
+		return resetTime
+	}
+
+	// 回退方案：如果没有 freeTrialExpiry，使用 NextDateReset
+	for _, breakdown := range usage.UsageBreakdownList {
+		if breakdown.ResourceType == "CREDIT" && breakdown.NextDateReset > 0 {
+			return time.Unix(int64(breakdown.NextDateReset), 0)
+		}
+	}
+
+	// 最后回退到根级别的 NextDateReset
 	if usage.NextDateReset > 0 {
 		return time.Unix(int64(usage.NextDateReset), 0)
 	}
+
 	return time.Time{}
+}
+
+// getUsageCheckerForToken 获取指定token索引的usage checker（带代理支持）
+// 内部方法：调用者必须确保索引有效
+func (tm *TokenManager) getUsageCheckerForToken(tokenIndex int) *UsageLimitsChecker {
+	// 如果没有代理池，使用默认客户端
+	if tm.proxyPool == nil {
+		return NewUsageLimitsChecker()
+	}
+
+	// 获取代理客户端
+	tokenIndexStr := fmt.Sprintf("%d", tokenIndex)
+	_, client, err := tm.proxyPool.GetProxyForToken(tokenIndexStr)
+	if err != nil {
+		logger.Warn("获取代理失败，usage checker使用默认客户端",
+			logger.String("token_index", tokenIndexStr),
+			logger.Err(err))
+		return NewUsageLimitsChecker()
+	}
+
+	return NewUsageLimitsChecker(client)
 }
 
 // generateConfigOrder 生成token配置的顺序
@@ -1266,8 +1213,8 @@ func (tm *TokenManager) SyncConfigFile() error {
 }
 
 // InitializeBatchTokens 在启动时初始化首批 token
-// 批次轮换模式下，刷新 batchSize 数量的账号
-// 其他模式下，刷新第一个账号（保持原有行为）
+// 如果设置了 batchSize，初始化 batchSize 数量的账号
+// 否则只初始化第一个账号
 func (tm *TokenManager) InitializeBatchTokens() error {
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
@@ -1276,20 +1223,20 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 
 	// 确定需要初始化的账号数量
 	var initCount int
-	if tm.strategy == StrategyBatchRotate && tm.batchSize > 0 {
-		// 批次轮换模式：刷新 batchSize 数量的账号
+	if tm.batchSize > 0 {
+		// 使用活跃池模式：刷新 batchSize 数量的账号
 		initCount = tm.batchSize
 		if initCount > len(tm.configs) {
 			initCount = len(tm.configs)
 		}
-		logger.Info("使用批次轮换策略",
+		logger.Info("使用活跃池模式",
 			logger.Int("batch_size", tm.batchSize),
 			logger.Int("init_count", initCount),
 			logger.Int("total_configs", len(tm.configs)))
 	} else {
-		// 其他策略：只刷新第一个账号
+		// 常规模式：只刷新第一个账号
 		initCount = 1
-		logger.Info("使用常规策略，只刷新第一个账号")
+		logger.Info("使用常规模式，只刷新第一个账号")
 	}
 
 	// 刷新指定数量的账号（确保跳过失效/禁用账号，直到找到足够的有效账号）
@@ -1303,7 +1250,7 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 		}
 
 		// 刷新 token
-		token, err := tm.refreshSingleToken(cfg)
+		token, err := tm.refreshSingleToken(cfg, i)
 		if err != nil {
 			// 检查是否是 token 失效错误
 			if types.IsTokenInvalidError(err) {
@@ -1327,7 +1274,7 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 		var available float64
 		var nextResetTime time.Time
 
-		checker := NewUsageLimitsChecker()
+		checker := tm.getUsageCheckerForToken(i)
 		if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
 			usageInfo = usage
 			available = CalculateAvailableCount(usage)
@@ -1350,20 +1297,35 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 
 		// 更新缓存
 		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
+		now := time.Now()
 		tm.cache.tokens[cacheKey] = &CachedToken{
 			Token:         token,
 			UsageInfo:     usageInfo,
-			CachedAt:      time.Now(),
+			CachedAt:      now,
+			LastCheckAt:   now,
 			Available:     available,
 			NextResetTime: nextResetTime,
 		}
 
-		successCount++
-		logger.Info("成功初始化token",
-			logger.Int("index", i),
-			logger.String("auth_type", cfg.AuthType),
-			logger.Float64("available", available),
-			logger.String("next_reset", nextResetTime.Format(time.RFC3339)))
+		// 只有健康账号（available >= 阈值）才计入成功数并加入活跃池
+		if available >= MinAvailableThreshold {
+			successCount++
+			// 活跃池模式：将健康账号加入活跃池
+			if tm.batchSize > 0 {
+				tm.activePool = append(tm.activePool, i)
+			}
+			logger.Info("成功初始化健康token",
+				logger.Int("index", i),
+				logger.String("auth_type", cfg.AuthType),
+				logger.Float64("available", available),
+				logger.String("next_reset", nextResetTime.Format(time.RFC3339)))
+		} else {
+			logger.Warn("初始化token但余额为0，继续刷新更多账号",
+				logger.Int("index", i),
+				logger.String("auth_type", cfg.AuthType),
+				logger.Float64("available", available),
+				logger.String("next_reset", nextResetTime.Format(time.RFC3339)))
+		}
 	}
 
 	// 更新最后刷新时间
@@ -1372,11 +1334,12 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 	logger.Info("首批token初始化完成",
 		logger.Int("success_count", successCount),
 		logger.Int("desired_count", initCount),
+		logger.Int("active_pool_size", len(tm.activePool)),
 		logger.Int("invalid_count", len(tm.invalidated)),
 		logger.Int("total_configs", len(tm.configs)))
 
 	if successCount == 0 {
-		return fmt.Errorf("没有成功初始化任何token")
+		return fmt.Errorf("没有成功初始化任何健康token（余额>0）")
 	}
 
 	return nil
@@ -1410,7 +1373,7 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 	}
 
 	// 刷新 token
-	token, err := tm.refreshSingleToken(cfg)
+	token, err := tm.refreshSingleToken(cfg, index)
 	if err != nil {
 		// 检查是否是 token 失效错误
 		if types.IsTokenInvalidError(err) {
@@ -1437,7 +1400,7 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 	var available float64
 	var nextResetTime time.Time
 
-	checker := NewUsageLimitsChecker()
+	checker := tm.getUsageCheckerForToken(index)
 	if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
 		usageInfo = usage
 		available = CalculateAvailableCount(usage)
@@ -1463,10 +1426,12 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 
 	// 更新缓存
 	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+	now := time.Now()
 	tm.cache.tokens[cacheKey] = &CachedToken{
 		Token:         token,
 		UsageInfo:     usageInfo,
-		CachedAt:      time.Now(),
+		CachedAt:      now,
+		LastCheckAt:   now,
 		Available:     available,
 		NextResetTime: nextResetTime,
 	}
@@ -1525,7 +1490,7 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 		}
 
 		// 刷新 token
-		token, err := tm.refreshSingleToken(cfg)
+		token, err := tm.refreshSingleToken(cfg, index)
 		if err != nil {
 			// 检查是否是 token 失效错误
 			if types.IsTokenInvalidError(err) {
@@ -1553,7 +1518,7 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 		var available float64
 		var nextResetTime time.Time
 
-		checker := NewUsageLimitsChecker()
+		checker := tm.getUsageCheckerForToken(index)
 		if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
 			usageInfo = usage
 			available = CalculateAvailableCount(usage)
@@ -1580,10 +1545,12 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 
 		// 更新缓存
 		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+		now := time.Now()
 		tm.cache.tokens[cacheKey] = &CachedToken{
 			Token:         token,
 			UsageInfo:     usageInfo,
-			CachedAt:      time.Now(),
+			CachedAt:      now,
+			LastCheckAt:   now,
 			Available:     available,
 			NextResetTime: nextResetTime,
 		}

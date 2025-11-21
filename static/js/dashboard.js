@@ -144,7 +144,7 @@ class TokenDashboard {
                 <td><span class="token-preview">${token.token_preview || 'N/A'}</span></td>
                 <td>${token.auth_type || 'social'}</td>
                 <td>${token.remaining_usage || 0}</td>
-                <td>${this.formatDateTime(token.expires_at)}</td>
+                <td>${this.formatDateTime(token.quota_reset_at)}</td>
                 <td>${this.formatDateTime(token.last_used)}</td>
                 <td><span class="status-badge ${statusClass}">${statusText}</span></td>
                 ${actionButtons}
@@ -211,12 +211,10 @@ class TokenDashboard {
         if (token.refresh_status) {
             if (token.refresh_status === 'not_refreshed') return 'status-not-refreshed';
             if (token.refresh_status === 'invalid') return 'status-invalid';
-            // refresh_status === 'active' 继续检查额度和过期时间
+            // refresh_status === 'active' 继续检查额度
         }
 
-        if (new Date(token.expires_at) < new Date()) {
-            return 'status-expired';
-        }
+        // 基于剩余额度判断状态（重置时间只是提示信息，不影响可用性）
         const remaining = token.remaining_usage || 0;
         if (remaining === 0) return 'status-exhausted';
         if (remaining <= 5) return 'status-low';
@@ -228,12 +226,10 @@ class TokenDashboard {
         if (token.refresh_status) {
             if (token.refresh_status === 'not_refreshed') return '未刷新';
             if (token.refresh_status === 'invalid') return '失效';
-            // refresh_status === 'active' 继续检查额度和过期时间
+            // refresh_status === 'active' 继续检查额度
         }
 
-        if (new Date(token.expires_at) < new Date()) {
-            return '已过期';
-        }
+        // 基于剩余额度判断状态
         const remaining = token.remaining_usage || 0;
         if (remaining === 0) return '已耗尽';
         if (remaining <= 5) return '即将耗尽';

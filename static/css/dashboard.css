@@ -193,11 +193,6 @@ tr:hover {
     color: white;
 }
 
-.status-expired {
-    background: rgba(244, 67, 54, 0.8);
-    color: white;
-}
-
 .status-low {
     background: rgba(255, 152, 0, 0.8);
     color: white;
