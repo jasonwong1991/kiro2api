@@ -30,12 +30,13 @@ func TestContentLengthExceedsStrategy_MapError(t *testing.T) {
 				"reason": "CONTENT_LENGTH_EXCEEDS_THRESHOLD"
 			}`),
 			wantResponse: &ClaudeErrorResponse{
-				Type:       "message_delta",
-				StopReason: "max_tokens",
-				Message:    "Content length exceeds threshold, response truncated",
+				Type:                    "message",
+				Message:                 "Context limit reached. Auto-compacting conversation history...",
+				StopReason:              "end_turn",
+				ShouldTriggerCompaction: true,
 			},
 			wantHandled: true,
-			description: "应该正确映射内容长度超限错误",
+			description: "应该正确映射内容长度超限错误为触发压缩的成功响应",
 		},
 		{
 			name:         "非400状态码",
@@ -83,8 +84,11 @@ func TestContentLengthExceedsStrategy_MapError(t *testing.T) {
 			if tt.wantHandled {
 				assert.NotNil(t, gotResponse)
 				assert.Equal(t, tt.wantResponse.Type, gotResponse.Type)
+				assert.Equal(t, tt.wantResponse.ErrorType, gotResponse.ErrorType)
 				assert.Equal(t, tt.wantResponse.StopReason, gotResponse.StopReason)
 				assert.Equal(t, tt.wantResponse.Message, gotResponse.Message)
+				assert.Equal(t, tt.wantResponse.ShouldReturn400, gotResponse.ShouldReturn400)
+				assert.Equal(t, tt.wantResponse.ShouldTriggerCompaction, gotResponse.ShouldTriggerCompaction)
 			} else {
 				assert.Nil(t, gotResponse)
 			}
@@ -168,40 +172,52 @@ func TestErrorMapper_MapCodeWhispererError(t *testing.T) {
 	mapper := NewErrorMapper()
 
 	tests := []struct {
-		name                string
-		statusCode          int
-		responseBody        []byte
-		wantType            string
-		wantStopReason      string
-		wantMessageContains string
-		description         string
+		name                       string
+		statusCode                 int
+		responseBody               []byte
+		wantType                   string
+		wantErrorType              string
+		wantShouldReturn400        bool
+		wantShouldTriggerCompaction bool
+		wantStopReason             string
+		wantMessageContains        string
+		description                string
 	}{
 		{
-			name:                "内容长度超限错误",
-			statusCode:          http.StatusBadRequest,
-			responseBody:        []byte(`{"message": "error", "reason": "CONTENT_LENGTH_EXCEEDS_THRESHOLD"}`),
-			wantType:            "message_delta",
-			wantStopReason:      "max_tokens",
-			wantMessageContains: "Content length exceeds",
-			description:         "应该映射为max_tokens",
+			name:                        "内容长度超限错误",
+			statusCode:                  http.StatusBadRequest,
+			responseBody:                []byte(`{"message": "error", "reason": "CONTENT_LENGTH_EXCEEDS_THRESHOLD"}`),
+			wantType:                    "message",
+			wantErrorType:               "",
+			wantShouldReturn400:         false,
+			wantShouldTriggerCompaction: true,
+			wantStopReason:              "end_turn",
+			wantMessageContains:         "Context limit reached",
+			description:                 "应该映射为触发压缩的成功响应",
 		},
 		{
-			name:                "普通错误",
-			statusCode:          http.StatusInternalServerError,
-			responseBody:        []byte(`{"error": "server error"}`),
-			wantType:            "error",
-			wantStopReason:      "",
-			wantMessageContains: "Upstream error",
-			description:         "应该使用默认策略",
+			name:                        "普通错误",
+			statusCode:                  http.StatusInternalServerError,
+			responseBody:                []byte(`{"error": "server error"}`),
+			wantType:                    "error",
+			wantErrorType:               "",
+			wantShouldReturn400:         false,
+			wantShouldTriggerCompaction: false,
+			wantStopReason:              "",
+			wantMessageContains:         "Upstream error",
+			description:                 "应该使用默认策略",
 		},
 		{
-			name:                "未知错误",
-			statusCode:          http.StatusBadRequest,
-			responseBody:        []byte(`{"reason": "UNKNOWN"}`),
-			wantType:            "error",
-			wantStopReason:      "",
-			wantMessageContains: "Upstream error",
-			description:         "未知错误应该使用默认策略",
+			name:                        "未知错误",
+			statusCode:                  http.StatusBadRequest,
+			responseBody:                []byte(`{"reason": "UNKNOWN"}`),
+			wantType:                    "error",
+			wantErrorType:               "",
+			wantShouldReturn400:         false,
+			wantShouldTriggerCompaction: false,
+			wantStopReason:              "",
+			wantMessageContains:         "Upstream error",
+			description:                 "未知错误应该使用默认策略",
 		},
 	}
 
@@ -211,6 +227,9 @@ func TestErrorMapper_MapCodeWhispererError(t *testing.T) {
 
 			assert.NotNil(t, result)
 			assert.Equal(t, tt.wantType, result.Type, tt.description)
+			assert.Equal(t, tt.wantErrorType, result.ErrorType)
+			assert.Equal(t, tt.wantShouldReturn400, result.ShouldReturn400)
+			assert.Equal(t, tt.wantShouldTriggerCompaction, result.ShouldTriggerCompaction)
 			assert.Equal(t, tt.wantStopReason, result.StopReason)
 			assert.Contains(t, result.Message, tt.wantMessageContains)
 		})
@@ -306,6 +325,94 @@ func TestErrorMapper_SendClaudeError_StandardError(t *testing.T) {
 	}
 }
 
+// TestErrorMapper_SendClaudeError_InvalidRequestError 测试发送invalid_request_error（触发Claude Code压缩）
+func TestErrorMapper_SendClaudeError_InvalidRequestError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mapper := NewErrorMapper()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	claudeError := &ClaudeErrorResponse{
+		Type:            "error",
+		ErrorType:       "invalid_request_error",
+		Message:         "prompt is too long: input exceeds maximum context length",
+		ShouldReturn400: true,
+	}
+
+	mapper.SendClaudeError(c, claudeError)
+
+	// 验证响应状态码为400
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	// 验证响应体为JSON格式（不是SSE）
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+
+	// 验证错误结构符合Anthropic API规范
+	assert.Equal(t, "error", response["type"])
+	if errorObj, ok := response["error"].(map[string]interface{}); ok {
+		assert.Equal(t, "invalid_request_error", errorObj["type"])
+		assert.Equal(t, "prompt is too long: input exceeds maximum context length", errorObj["message"])
+	} else {
+		t.Error("error字段格式不正确")
+	}
+}
+
+// TestErrorMapper_SendClaudeError_CompactionTrigger 测试发送触发压缩的成功响应
+func TestErrorMapper_SendClaudeError_CompactionTrigger(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mapper := NewErrorMapper()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	claudeError := &ClaudeErrorResponse{
+		Type:                    "message",
+		Message:                 "Context limit reached. Auto-compacting conversation history...",
+		StopReason:              "end_turn",
+		ShouldTriggerCompaction: true,
+	}
+
+	mapper.SendClaudeError(c, claudeError)
+
+	// 验证响应状态码为200（成功响应）
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 验证响应体为JSON格式
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+
+	// 验证响应结构符合Anthropic API规范
+	assert.Equal(t, "message", response["type"])
+	assert.Equal(t, "assistant", response["role"])
+	assert.Equal(t, "end_turn", response["stop_reason"])
+
+	// 验证包含 usage 字段，且 input_tokens 为高值
+	if usage, ok := response["usage"].(map[string]interface{}); ok {
+		inputTokens := int(usage["input_tokens"].(float64))
+		assert.Greater(t, inputTokens, 190000, "input_tokens应该足够高以触发压缩")
+		assert.LessOrEqual(t, inputTokens, 200000, "input_tokens不应超过上限")
+	} else {
+		t.Error("usage字段格式不正确")
+	}
+
+	// 验证包含提示消息
+	if content, ok := response["content"].([]interface{}); ok {
+		assert.Greater(t, len(content), 0, "应该包含至少一个内容块")
+		if len(content) > 0 {
+			if textBlock, ok := content[0].(map[string]interface{}); ok {
+				assert.Equal(t, "text", textBlock["type"])
+				assert.Contains(t, textBlock["text"], "Context limit reached")
+			}
+		}
+	} else {
+		t.Error("content字段格式不正确")
+	}
+}
+
 // TestClaudeErrorResponse_JSON 测试ClaudeErrorResponse JSON序列化
 func TestClaudeErrorResponse_JSON(t *testing.T) {
 	tests := []struct {
@@ -329,6 +436,16 @@ func TestClaudeErrorResponse_JSON(t *testing.T) {
 				Message: "error message",
 			},
 			wantJSON: `{"type":"error","message":"error message"}`,
+		},
+		{
+			name: "invalid_request_error类型",
+			response: ClaudeErrorResponse{
+				Type:            "error",
+				ErrorType:       "invalid_request_error",
+				Message:         "prompt is too long",
+				ShouldReturn400: true, // json:"-" 标签，不会被序列化
+			},
+			wantJSON: `{"type":"error","message":"prompt is too long","error_type":"invalid_request_error"}`,
 		},
 	}
 

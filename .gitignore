@@ -38,3 +38,6 @@ parser.test
 auth.json
 .go*
 *.out
+tokens.json
+
+CLAUDE.md

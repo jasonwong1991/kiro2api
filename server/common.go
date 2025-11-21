@@ -229,11 +229,28 @@ func handleCodeWhispererError(c *gin.Context, resp *http.Response) bool {
 	claudeError := errorMapper.MapCodeWhispererError(resp.StatusCode, body)
 
 	// 根据映射结果发送符合Claude规范的响应
-	if claudeError.StopReason == "max_tokens" {
-		// CONTENT_LENGTH_EXCEEDS_THRESHOLD -> max_tokens stop_reason
-		logger.Info("内容长度超限，映射为max_tokens stop_reason",
+	if claudeError.ShouldTriggerCompaction {
+		// CONTENT_LENGTH_EXCEEDS_THRESHOLD -> 返回高 input_tokens 的成功响应
+		// 触发 Claude Code 自动压缩机制
+		logger.Info("内容长度超限，返回高input_tokens触发Claude Code自动压缩",
 			addReqFields(c,
 				logger.String("upstream_reason", "CONTENT_LENGTH_EXCEEDS_THRESHOLD"),
+				logger.String("strategy", "trigger_compaction"),
+			)...)
+		errorMapper.SendClaudeError(c, claudeError)
+	} else if claudeError.ShouldReturn400 {
+		// CONTENT_LENGTH_EXCEEDS_THRESHOLD -> invalid_request_error (400)
+		// 注意：这不会自动触发压缩，用户需要手动处理
+		logger.Warn("内容长度超限，返回invalid_request_error",
+			addReqFields(c,
+				logger.String("upstream_reason", "CONTENT_LENGTH_EXCEEDS_THRESHOLD"),
+				logger.String("error_type", claudeError.ErrorType),
+			)...)
+		errorMapper.SendClaudeError(c, claudeError)
+	} else if claudeError.StopReason == "max_tokens" {
+		// 其他max_tokens情况（保留向后兼容）
+		logger.Info("映射为max_tokens stop_reason",
+			addReqFields(c,
 				logger.String("claude_stop_reason", "max_tokens"),
 			)...)
 		errorMapper.SendClaudeError(c, claudeError)

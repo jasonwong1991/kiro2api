@@ -17,9 +17,12 @@ type ErrorMappingStrategy interface {
 
 // ClaudeErrorResponse Claude API规范的错误响应结构
 type ClaudeErrorResponse struct {
-	Type       string `json:"type"`
-	Message    string `json:"message"`
-	StopReason string `json:"stop_reason,omitempty"` // 用于内容长度超限等情况
+	Type                   string `json:"type"`
+	Message                string `json:"message"`
+	ErrorType              string `json:"error_type,omitempty"`    // Anthropic API错误类型（如invalid_request_error）
+	StopReason             string `json:"stop_reason,omitempty"`   // 用于内容长度超限等情况
+	ShouldReturn400        bool   `json:"-"`                       // 标记是否应返回400状态码（内部字段）
+	ShouldTriggerCompaction bool  `json:"-"`                       // 标记是否应返回触发压缩的成功响应（内部字段）
 }
 
 // CodeWhispererErrorBody AWS CodeWhisperer错误响应体
@@ -43,10 +46,14 @@ func (s *ContentLengthExceedsStrategy) MapError(statusCode int, responseBody []b
 
 	// 检查是否为内容长度超限错误
 	if errorBody.Reason == "CONTENT_LENGTH_EXCEEDS_THRESHOLD" {
+		// 返回一个成功响应，但设置高 input_tokens 来触发 Claude Code 自动压缩
+		// 原理：Claude Code 基于累计 input_tokens 监控上下文使用率
+		// 当 input_tokens 接近模型上限（200k）时，会自动触发 /compact
 		return &ClaudeErrorResponse{
-			Type:       "message_delta", // 按Claude规范发送message_delta事件
-			StopReason: "max_tokens",    // 映射为max_tokens stop_reason
-			Message:    "Content length exceeds threshold, response truncated",
+			Type:                    "message",
+			Message:                 "Context limit reached. Auto-compacting conversation history...",
+			StopReason:              "end_turn",
+			ShouldTriggerCompaction: true, // 标记需要返回触发压缩的成功响应
 		}, true
 	}
 
@@ -109,6 +116,18 @@ func (em *ErrorMapper) MapCodeWhispererError(statusCode int, responseBody []byte
 
 // SendClaudeError 发送Claude规范的错误响应 (KISS原则)
 func (em *ErrorMapper) SendClaudeError(c *gin.Context, claudeError *ClaudeErrorResponse) {
+	// 优先检查是否应返回触发压缩的成功响应
+	if claudeError.ShouldTriggerCompaction {
+		em.sendCompactionTriggerResponse(c, claudeError)
+		return
+	}
+
+	// 如果标记为需要返回400状态码（如内容过长错误），返回JSON错误
+	if claudeError.ShouldReturn400 {
+		em.sendInvalidRequestError(c, claudeError)
+		return
+	}
+
 	// 根据错误类型决定发送格式
 	if claudeError.StopReason == "max_tokens" {
 		// 发送message_delta事件，符合Claude规范
@@ -118,6 +137,80 @@ func (em *ErrorMapper) SendClaudeError(c *gin.Context, claudeError *ClaudeErrorR
 		em.sendStandardError(c, claudeError)
 	}
 }
+
+// sendInvalidRequestError 发送invalid_request_error类型的400错误响应 (SRP原则)
+// 注意：这不会触发Claude Code自动压缩，用户需要手动运行/compact或开始新任务
+// Claude Code的自动压缩是基于客户端上下文监控（约95%阈值），而非API错误响应
+func (em *ErrorMapper) sendInvalidRequestError(c *gin.Context, claudeError *ClaudeErrorResponse) {
+	errorResp := map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    claudeError.ErrorType,
+			"message": claudeError.Message,
+		},
+	}
+
+	c.JSON(http.StatusBadRequest, errorResp)
+
+	logger.Warn("已发送invalid_request_error响应，用户需要手动压缩上下文或开始新任务",
+		addReqFields(c,
+			logger.String("error_type", claudeError.ErrorType),
+			logger.String("message", claudeError.Message))...)
+}
+
+// sendCompactionTriggerResponse 发送触发压缩的成功响应 (SRP原则)
+// 通过返回高 input_tokens 值触发 Claude Code 自动执行上下文压缩
+// 原理：Claude Code 基于累计 input_tokens 监控上下文使用率（约95%阈值）
+func (em *ErrorMapper) sendCompactionTriggerResponse(c *gin.Context, claudeError *ClaudeErrorResponse) {
+	// Claude 3.5 Sonnet 的上下文限制是 200,000 tokens
+	// 返回 195,000 input_tokens (97.5%) 应该足以触发自动压缩
+	const triggerInputTokens = 195000
+
+	// 构造成功响应，包含提示消息
+	response := map[string]any{
+		"id":      generateMessageID(),
+		"type":    "message",
+		"role":    "assistant",
+		"model":   "claude-sonnet-4-20250514", // 使用默认模型
+		"content": []map[string]any{
+			{
+				"type": "text",
+				"text": claudeError.Message, // "Context limit reached. Auto-compacting conversation history..."
+			},
+		},
+		"stop_reason":   claudeError.StopReason, // "end_turn"
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":  triggerInputTokens, // 关键：高 input_tokens 触发压缩
+			"output_tokens": len(claudeError.Message) / 4, // 简单估算输出 tokens
+		},
+	}
+
+	c.JSON(http.StatusOK, response)
+
+	logger.Info("已发送触发压缩的成功响应，Claude Code应自动执行/compact",
+		addReqFields(c,
+			logger.Int("input_tokens", triggerInputTokens),
+			logger.String("message", claudeError.Message))...)
+}
+
+// generateMessageID 生成消息ID
+func generateMessageID() string {
+	// 生成类似 msg_xxx 的ID
+	return fmt.Sprintf("msg_%s", randomString(24))
+}
+
+// randomString 生成指定长度的随机字符串
+func randomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	result := make([]byte, length)
+	for i := range result {
+		result[i] = charset[i%len(charset)]
+	}
+	return string(result)
+}
+
+
 
 // sendMaxTokensResponse 发送max_tokens类型的响应 (SRP原则)
 func (em *ErrorMapper) sendMaxTokensResponse(c *gin.Context, claudeError *ClaudeErrorResponse) {

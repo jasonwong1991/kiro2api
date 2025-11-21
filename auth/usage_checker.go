@@ -17,9 +17,17 @@ type UsageLimitsChecker struct {
 }
 
 // NewUsageLimitsChecker 创建使用限制检查器
-func NewUsageLimitsChecker() *UsageLimitsChecker {
+// client 参数可选：如果为 nil，使用 utils.SharedHTTPClient
+func NewUsageLimitsChecker(client ...*http.Client) *UsageLimitsChecker {
+	var httpClient *http.Client
+	if len(client) > 0 && client[0] != nil {
+		httpClient = client[0]
+	} else {
+		httpClient = utils.SharedHTTPClient
+	}
+
 	return &UsageLimitsChecker{
-		httpClient: utils.SharedHTTPClient,
+		httpClient: httpClient,
 	}
 }
 

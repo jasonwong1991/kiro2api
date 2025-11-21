@@ -282,7 +282,87 @@ func (sjs *SonicJSONStreamer) tryParseWithSonic() string {
 		return "complete"
 	}
 
+	// 🔥 容错处理：尝试修复不完整的 JSON
+	// 常见情况：缺少闭合的引号或大括号
+	fixedContent := tryFixIncompleteJSON(contentStr)
+	if fixedContent != contentStr {
+		if err := utils.FastUnmarshal([]byte(fixedContent), &result); err == nil {
+			sjs.result = result
+			sjs.state.hasValidJSON = true
+			logger.Warn("JSON不完整，已自动修复",
+				logger.String("toolUseId", sjs.toolUseId),
+				logger.String("original", contentStr),
+				logger.String("fixed", fixedContent))
+			return "complete"
+		}
+	}
+
 	return "invalid"
+}
+
+// tryFixIncompleteJSON 尝试修复不完整的 JSON
+func tryFixIncompleteJSON(jsonStr string) string {
+	if jsonStr == "" {
+		return jsonStr
+	}
+
+	// 统计未闭合的引号、大括号、中括号
+	inString := false
+	escapeNext := false
+	openBraces := 0
+	openBrackets := 0
+
+	for _, ch := range jsonStr {
+		if escapeNext {
+			escapeNext = false
+			continue
+		}
+
+		switch ch {
+		case '\\':
+			if inString {
+				escapeNext = true
+			}
+		case '"':
+			inString = !inString
+		case '{':
+			if !inString {
+				openBraces++
+			}
+		case '}':
+			if !inString {
+				openBraces--
+			}
+		case '[':
+			if !inString {
+				openBrackets++
+			}
+		case ']':
+			if !inString {
+				openBrackets--
+			}
+		}
+	}
+
+	// 修复不完整的 JSON
+	fixed := jsonStr
+
+	// 如果在字符串中（未闭合的引号）
+	if inString {
+		fixed += "\""
+	}
+
+	// 闭合未闭合的中括号
+	for i := 0; i < openBrackets; i++ {
+		fixed += "]"
+	}
+
+	// 闭合未闭合的大括号
+	for i := 0; i < openBraces; i++ {
+		fixed += "}"
+	}
+
+	return fixed
 }
 
 // onAggregationComplete 聚合完成回调

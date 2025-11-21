@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"kiro2api/config"
+	"kiro2api/logger"
 	"kiro2api/types"
 	"kiro2api/utils"
 	"net/http"
@@ -12,19 +13,49 @@ import (
 )
 
 // refreshSingleToken 刷新单个token
-func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig) (types.TokenInfo, error) {
+func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex int) (types.TokenInfo, error) {
+	// 获取代理（如果配置了代理池）
+	var client *http.Client
+	var proxyURL string
+	if tm.proxyPool != nil {
+		tokenIndex := fmt.Sprintf("%d", configIndex)
+		var err error
+		proxyURL, client, err = tm.proxyPool.GetProxyForToken(tokenIndex)
+		if err != nil {
+			logger.Warn("获取代理失败，使用默认客户端",
+				logger.String("token_index", tokenIndex),
+				logger.Err(err))
+			client = nil // 使用默认客户端
+		} else {
+			logger.Debug("使用代理刷新token",
+				logger.String("token_index", tokenIndex),
+				logger.String("proxy_url", proxyURL))
+		}
+	}
+
+	var token types.TokenInfo
+	var err error
+
 	switch authConfig.AuthType {
 	case AuthMethodSocial:
-		return refreshSocialToken(authConfig.RefreshToken)
+		token, err = refreshSocialToken(authConfig.RefreshToken, client)
 	case AuthMethodIdC:
-		return refreshIdCToken(authConfig)
+		token, err = refreshIdCToken(authConfig, client)
 	default:
 		return types.TokenInfo{}, fmt.Errorf("不支持的认证类型: %s", authConfig.AuthType)
 	}
+
+	// 如果使用代理且刷新失败，报告代理失败
+	if err != nil && tm.proxyPool != nil && proxyURL != "" {
+		tm.proxyPool.ReportProxyFailure(proxyURL)
+	}
+
+	return token, err
 }
 
 // refreshSocialToken 刷新Social认证token
-func refreshSocialToken(refreshToken string) (types.TokenInfo, error) {
+// client 参数可选：如果为 nil，使用 utils.SharedHTTPClient
+func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenInfo, error) {
 	// 为该账号生成固定的设备指纹
 	fp := utils.GenerateRefreshFingerprint(refreshToken)
 
@@ -47,7 +78,11 @@ func refreshSocialToken(refreshToken string) (types.TokenInfo, error) {
 	req.Header.Set("x-amz-user-agent", fp.XAmzUserAgent)
 	req.Header.Set("User-Agent", fp.UserAgent)
 
-	client := utils.SharedHTTPClient
+	// 如果未提供客户端，使用默认客户端
+	if client == nil {
+		client = utils.SharedHTTPClient
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return types.TokenInfo{}, fmt.Errorf("请求失败: %v", err)
@@ -103,7 +138,8 @@ func refreshSocialToken(refreshToken string) (types.TokenInfo, error) {
 }
 
 // refreshIdCToken 刷新IdC认证token
-func refreshIdCToken(authConfig AuthConfig) (types.TokenInfo, error) {
+// client 参数可选：如果为 nil，使用 utils.SharedHTTPClient
+func refreshIdCToken(authConfig AuthConfig, client *http.Client) (types.TokenInfo, error) {
 	// 为该账号生成固定的设备指纹
 	fp := utils.GenerateRefreshFingerprint(authConfig.RefreshToken)
 
@@ -135,7 +171,11 @@ func refreshIdCToken(authConfig AuthConfig) (types.TokenInfo, error) {
 	req.Header.Set("User-Agent", fp.UserAgent)
 	req.Header.Set("Accept-Encoding", "br, gzip, deflate")
 
-	client := utils.SharedHTTPClient
+	// 如果未提供客户端，使用默认客户端
+	if client == nil {
+		client = utils.SharedHTTPClient
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return types.TokenInfo{}, fmt.Errorf("IdC请求失败: %v", err)
@@ -195,12 +235,12 @@ func refreshIdCToken(authConfig AuthConfig) (types.TokenInfo, error) {
 
 // RefreshSocialToken 公开的Social token刷新函数
 func RefreshSocialToken(refreshToken string) (types.TokenInfo, error) {
-	return refreshSocialToken(refreshToken)
+	return refreshSocialToken(refreshToken, nil)
 }
 
 // RefreshIdCToken 公开的IdC token刷新函数
 func RefreshIdCToken(authConfig AuthConfig) (types.TokenInfo, error) {
-	return refreshIdCToken(authConfig)
+	return refreshIdCToken(authConfig, nil)
 }
 
 // isTokenInvalidError 判断是否是 token 失效错误（非额度耗尽）
