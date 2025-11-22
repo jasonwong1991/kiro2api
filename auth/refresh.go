@@ -208,7 +208,17 @@ func refreshIdCToken(authConfig AuthConfig, client *http.Client) (types.TokenInf
 	token.AccessToken = refreshResp.AccessToken
 	token.RefreshToken = authConfig.RefreshToken
 	token.ExpiresIn = refreshResp.ExpiresIn
-	token.ExpiresAt = time.Now().Add(time.Duration(refreshResp.ExpiresIn) * time.Second)
+
+	// 确保合理的过期时间（至少1小时）
+	expiresIn := refreshResp.ExpiresIn
+	if expiresIn <= 0 || expiresIn < 3600 {
+		// 如果过期时间太短或无效，默认设置为1小时
+		expiresIn = 3600
+		logger.Warn("Token过期时间异常，使用默认1小时",
+			logger.Int("original_expires_in", refreshResp.ExpiresIn),
+			logger.Int("fixed_expires_in", expiresIn))
+	}
+	token.ExpiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
 
 	// 附加完整的设备指纹信息
 	fullFp := utils.GenerateFingerprint(authConfig.RefreshToken)

@@ -46,6 +46,10 @@ type TokenManager struct {
 
 	// 代理池管理器
 	proxyPool *ProxyPoolManager // 代理池（可选）
+
+	// 定时刷新相关字段
+	refreshTicker *time.Ticker    // 定时器
+	refreshStop   chan bool        // 停止信号
 }
 
 // SimpleTokenCache 简化的token缓存（纯数据结构，无锁）
@@ -116,7 +120,7 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		logger.String("config_path", configPath),
 		logger.Bool("proxy_pool_enabled", proxyPool != nil))
 
-	return &TokenManager{
+	tm := &TokenManager{
 		cache:             NewSimpleTokenCache(config.TokenCacheTTL),
 		configs:           configs,
 		configOrder:       configOrder,
@@ -130,7 +134,18 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		poolRoundRobin:    0,
 		autoRemoveInvalid: autoRemove,
 		proxyPool:         proxyPool,
+		refreshStop:       make(chan bool, 1),
 	}
+
+	// 如果使用活跃池策略，启动定时刷新任务
+	if batchSize > 0 && strategy == StrategyRoundRobin {
+		// 每5分钟刷新一次活跃池中快要过期的 token
+		tm.refreshTicker = time.NewTicker(5 * time.Minute)
+		go tm.startPeriodicRefresh()
+		logger.Info("启动活跃池定时刷新任务", logger.Duration("interval", 5*time.Minute))
+	}
+
+	return tm
 }
 
 // getConfigPath 获取配置文件路径
@@ -421,7 +436,9 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 	// 检查缓存
 	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
 	if cached, exists := tm.cache.tokens[cacheKey]; exists {
-		return cached.IsUsable() && cached.Available >= MinAvailableThreshold
+		// 注意：不检查 token 是否过期，因为过期的 token 可以刷新
+		// 只检查余额是否足够
+		return cached.Available >= MinAvailableThreshold
 	}
 
 	// 如果没有缓存且需要强制刷新
@@ -637,9 +654,26 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 			// 记录不健康账号
 			if !unhealthyAccounts[configIndex] {
 				unhealthyAccounts[configIndex] = true
-				logger.Debug("活跃池中发现不健康账号",
+				// 获取详细的不健康原因
+				reason := "未知"
+				if tm.configs[configIndex].Disabled {
+					reason = "账号已禁用"
+				} else if _, isInvalid := tm.invalidated[configIndex]; isInvalid {
+					reason = "账号已失效"
+				} else if cached, exists := tm.cache.tokens[currentKey]; exists {
+					// 不再检查过期时间，因为过期的 token 会在使用时刷新
+					if cached.Available < MinAvailableThreshold {
+						reason = fmt.Sprintf("余额不足 (当前: %.2f, 阈值: %.2f)", cached.Available, MinAvailableThreshold)
+					} else if cached.Available <= 0 {
+						reason = fmt.Sprintf("余额为0或负数 (当前: %.2f)", cached.Available)
+					}
+				} else {
+					reason = "缓存不存在"
+				}
+				logger.Info("活跃池中发现不健康账号",
 					logger.Int("config_index", configIndex),
-					logger.Int("pool_index", relativeIndex))
+					logger.Int("pool_index", relativeIndex),
+					logger.String("reason", reason))
 			}
 			// 继续下一次尝试，不立即替换
 			continue
@@ -647,7 +681,63 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 
 		// 获取 token
 		if cached, exists := tm.cache.tokens[currentKey]; exists {
-			if cached.IsUsable() {
+			// 如果 token 过期，尝试刷新
+			if time.Now().After(cached.Token.ExpiresAt) {
+				logger.Debug("活跃池中token过期，尝试刷新",
+					logger.Int("config_index", configIndex),
+					logger.String("expired_at", cached.Token.ExpiresAt.Format(time.RFC3339)))
+
+				// 刷新 token
+				cfg := tm.configs[configIndex]
+				if !cfg.Disabled {
+					if token, err := tm.refreshSingleToken(cfg, configIndex); err == nil {
+						// 清除失效标记
+						delete(tm.invalidated, configIndex)
+
+						// 检查使用限制
+						checker := tm.getUsageCheckerForToken(configIndex)
+						if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+							available := CalculateAvailableCount(usage)
+							nextResetTime := GetNextResetTime(usage)
+
+							// 更新缓存
+							now := time.Now()
+							tm.cache.tokens[currentKey] = &CachedToken{
+								Token:         token,
+								UsageInfo:     usage,
+								CachedAt:      now,
+								LastCheckAt:   now,
+								Available:     available,
+								NextResetTime: nextResetTime,
+							}
+							cached = tm.cache.tokens[currentKey]
+
+							logger.Info("成功刷新过期token",
+								logger.Int("config_index", configIndex),
+								logger.Float64("available", available))
+						} else {
+							logger.Warn("刷新后检查使用限制失败",
+								logger.Int("config_index", configIndex),
+								logger.Err(checkErr))
+							if types.IsTokenInvalidError(checkErr) {
+								tm.invalidated[configIndex] = time.Now()
+							}
+							continue
+						}
+					} else {
+						logger.Warn("刷新token失败",
+							logger.Int("config_index", configIndex),
+							logger.Err(err))
+						if types.IsTokenInvalidError(err) {
+							tm.invalidated[configIndex] = time.Now()
+						}
+						continue
+					}
+				}
+			}
+
+			// 检查 token 是否可用（余额足够）
+			if cached.Available >= MinAvailableThreshold {
 				// 移动到下一个位置
 				tm.poolRoundRobin = (relativeIndex + 1) % poolSize
 
@@ -1796,4 +1886,116 @@ func (tm *TokenManager) getTokenStatusUnlocked(index int) (*TokenStatus, error) 
 	}
 
 	return status, nil
+}
+// startPeriodicRefresh 定时刷新活跃池中的 token
+func (tm *TokenManager) startPeriodicRefresh() {
+	for {
+		select {
+		case <-tm.refreshTicker.C:
+			tm.refreshActivePoolTokens()
+		case <-tm.refreshStop:
+			logger.Info("停止活跃池定时刷新任务")
+			return
+		}
+	}
+}
+
+// refreshActivePoolTokens 刷新活跃池中快要过期的 token
+func (tm *TokenManager) refreshActivePoolTokens() {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	if len(tm.activePool) == 0 {
+		return
+	}
+
+	refreshCount := 0
+	threshold := 10 * time.Minute // 提前10分钟刷新
+
+	for _, configIndex := range tm.activePool {
+		if configIndex >= len(tm.configs) {
+			continue
+		}
+
+		currentKey := tm.configOrder[configIndex]
+		cached, exists := tm.cache.tokens[currentKey]
+		if !exists {
+			continue
+		}
+
+		// 检查是否需要刷新（快要过期或已过期）
+		timeUntilExpiry := time.Until(cached.Token.ExpiresAt)
+		if timeUntilExpiry < threshold {
+			cfg := tm.configs[configIndex]
+			if cfg.Disabled {
+				continue
+			}
+
+			logger.Debug("定时刷新即将过期的token",
+				logger.Int("config_index", configIndex),
+				logger.Duration("time_until_expiry", timeUntilExpiry))
+
+			// 刷新 token
+			if token, err := tm.refreshSingleToken(cfg, configIndex); err == nil {
+				// 清除失效标记
+				delete(tm.invalidated, configIndex)
+
+				// 检查使用限制
+				checker := tm.getUsageCheckerForToken(configIndex)
+				if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+					available := CalculateAvailableCount(usage)
+					nextResetTime := GetNextResetTime(usage)
+
+					// 更新缓存
+					now := time.Now()
+					tm.cache.tokens[currentKey] = &CachedToken{
+						Token:         token,
+						UsageInfo:     usage,
+						CachedAt:      now,
+						LastCheckAt:   now,
+						Available:     available,
+						NextResetTime: nextResetTime,
+					}
+
+					refreshCount++
+					logger.Info("定时刷新成功",
+						logger.Int("config_index", configIndex),
+						logger.Float64("available", available))
+				} else {
+					logger.Warn("定时刷新后检查使用限制失败",
+						logger.Int("config_index", configIndex),
+						logger.Err(checkErr))
+				}
+			} else {
+				logger.Warn("定时刷新失败",
+					logger.Int("config_index", configIndex),
+					logger.Err(err))
+			}
+		}
+	}
+
+	if refreshCount > 0 {
+		logger.Info("活跃池定时刷新完成",
+			logger.Int("refreshed_count", refreshCount),
+			logger.Int("pool_size", len(tm.activePool)))
+	}
+}
+
+// Close 关闭 TokenManager，停止定时任务
+func (tm *TokenManager) Close() {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	// 停止定时刷新任务
+	if tm.refreshTicker != nil {
+		tm.refreshTicker.Stop()
+		close(tm.refreshStop)
+		tm.refreshTicker = nil
+		logger.Info("TokenManager已关闭")
+	}
+
+	// 停止代理池健康检查
+	if tm.proxyPool != nil {
+		tm.proxyPool.Stop()
+	}
 }

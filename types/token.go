@@ -41,7 +41,14 @@ func (t *Token) FromRefreshResponse(resp RefreshResponse, originalRefreshToken s
 	t.RefreshToken = originalRefreshToken // 保持原始refresh token
 	t.ExpiresIn = resp.ExpiresIn
 	t.ProfileArn = resp.ProfileArn
-	t.ExpiresAt = time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second)
+
+	// 确保合理的过期时间（至少1小时）
+	expiresIn := resp.ExpiresIn
+	if expiresIn <= 0 || expiresIn < 3600 {
+		// 如果过期时间太短或无效，默认设置为1小时
+		expiresIn = 3600
+	}
+	t.ExpiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
 }
 
 // IsExpired 检查token是否已过期

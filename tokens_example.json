@@ -1,0 +1,14 @@
+[
+  {
+    "auth": "Social",
+    "refreshToken": "您的Social类型的refresh_token_这里",
+    "disabled": false
+  },
+  {
+    "auth": "IdC",
+    "refreshToken": "您的IdC类型的refresh_token_这里",
+    "clientId": "您的IdC客户端ID",
+    "clientSecret": "您的IdC客户端密钥",
+    "disabled": false
+  }
+]
