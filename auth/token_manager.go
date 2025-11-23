@@ -662,10 +662,11 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 					reason = "账号已失效"
 				} else if cached, exists := tm.cache.tokens[currentKey]; exists {
 					// 不再检查过期时间，因为过期的 token 会在使用时刷新
-					if cached.Available < MinAvailableThreshold {
+					// 注意：先检查是否已耗尽（<=0），再检查是否快耗尽（< 阈值）
+					if cached.Available <= 0 {
+						reason = fmt.Sprintf("余额已耗尽 (当前: %.2f)", cached.Available)
+					} else if cached.Available < MinAvailableThreshold {
 						reason = fmt.Sprintf("余额不足 (当前: %.2f, 阈值: %.2f)", cached.Available, MinAvailableThreshold)
-					} else if cached.Available <= 0 {
-						reason = fmt.Sprintf("余额为0或负数 (当前: %.2f)", cached.Available)
 					}
 				} else {
 					reason = "缓存不存在"
