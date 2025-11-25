@@ -243,8 +243,30 @@ func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 
 	// 更新最后使用时间（在锁内，安全）
 	bestToken.LastUsed = time.Now()
+
+	// 扣减本地余额（API 不返回余额，必须手动计算）
+	// 使用 max 保证余额不为负，避免负值显示在 Dashboard
+	oldAvailable := bestToken.Available
 	if bestToken.Available > 0 {
-		bestToken.Available--
+		bestToken.Available = max(bestToken.Available-1.0, 0)
+	}
+
+	// 如果余额降到接近0（< 1.0），异步触发刷新来验证真实余额
+	// 避免死循环：刷新后如果真实余额 < 0.1（MinAvailableThreshold），账号将不再被选中
+	if bestToken.Available < 1.0 && oldAvailable >= 1.0 {
+		// 提取 token index 用于异步刷新
+		tokenIndex := -1
+		for i := range tm.configs {
+			cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
+			if tm.cache.tokens[cacheKey] == bestToken {
+				tokenIndex = i
+				break
+			}
+		}
+		if tokenIndex >= 0 {
+			// 异步刷新，不阻塞当前请求
+			go tm.verifyLowBalanceToken(tokenIndex)
+		}
 	}
 
 	return bestToken.Token, nil
@@ -266,16 +288,34 @@ func (tm *TokenManager) GetBestTokenWithUsage() (*types.TokenWithUsage, error) {
 
 	// 更新最后使用时间（在锁内，安全）
 	bestToken.LastUsed = time.Now()
-	available := bestToken.Available
+
+	// 扣减本地余额（API 不返回余额，必须手动计算）
+	oldAvailable := bestToken.Available
 	if bestToken.Available > 0 {
-		bestToken.Available--
+		bestToken.Available = max(bestToken.Available-1.0, 0)
+	}
+	available := bestToken.Available
+
+	// 如果余额降到接近0（< 1.0），异步触发刷新来验证真实余额
+	if bestToken.Available < 1.0 && oldAvailable >= 1.0 {
+		tokenIndex := -1
+		for i := range tm.configs {
+			cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
+			if tm.cache.tokens[cacheKey] == bestToken {
+				tokenIndex = i
+				break
+			}
+		}
+		if tokenIndex >= 0 {
+			go tm.verifyLowBalanceToken(tokenIndex)
+		}
 	}
 
 	// 构造 TokenWithUsage
 	tokenWithUsage := &types.TokenWithUsage{
 		TokenInfo:       bestToken.Token,
 		UsageLimits:     bestToken.UsageInfo,
-		AvailableCount:  available, // 使用精确计算的可用次数
+		AvailableCount:  available, // 使用扣减后的余额
 		LastUsageCheck:  bestToken.LastUsed,
 		IsUsageExceeded: available <= 0,
 	}
@@ -1036,8 +1076,8 @@ func (ct *CachedToken) IsUsable() bool {
 		return false
 	}
 
-	// 检查可用次数
-	return ct.Available > 0
+	// 检查可用次数是否大于阈值（避免使用即将耗尽的账号）
+	return ct.Available >= MinAvailableThreshold
 }
 
 // *** 已删除 set 和 updateLastUsed 方法 ***
@@ -1595,6 +1635,85 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 	}
 
 	return nil
+}
+
+// verifyLowBalanceToken 验证低余额账号的真实余额
+// 当本地计算的余额降到接近0时，异步调用此方法刷新获取真实余额
+func (tm *TokenManager) verifyLowBalanceToken(index int) {
+	logger.Info("触发低余额账号验证",
+		logger.Int("index", index))
+
+	tm.mutex.Lock()
+	if index < 0 || index >= len(tm.configs) {
+		tm.mutex.Unlock()
+		return
+	}
+	cfg := tm.configs[index]
+	if cfg.Disabled {
+		tm.mutex.Unlock()
+		return
+	}
+	tm.mutex.Unlock()
+
+	// 刷新 token 获取真实余额
+	token, err := tm.refreshSingleToken(cfg, index)
+	if err != nil {
+		logger.Warn("低余额验证：刷新token失败",
+			logger.Int("index", index),
+			logger.Err(err))
+		if types.IsTokenInvalidError(err) {
+			tm.mutex.Lock()
+			tm.invalidated[index] = time.Now()
+			tm.mutex.Unlock()
+		}
+		return
+	}
+
+	// 检查使用限制获取真实余额
+	checker := tm.getUsageCheckerForToken(index)
+	usage, checkErr := checker.CheckUsageLimits(token)
+	if checkErr != nil {
+		logger.Warn("低余额验证：检查使用限制失败",
+			logger.Int("index", index),
+			logger.Err(checkErr))
+		if types.IsTokenInvalidError(checkErr) {
+			tm.mutex.Lock()
+			tm.invalidated[index] = time.Now()
+			tm.mutex.Unlock()
+		}
+		return
+	}
+
+	available := CalculateAvailableCount(usage)
+	nextResetTime := GetNextResetTime(usage)
+
+	// 更新缓存
+	tm.mutex.Lock()
+	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+	now := time.Now()
+	tm.cache.tokens[cacheKey] = &CachedToken{
+		Token:         token,
+		UsageInfo:     usage,
+		CachedAt:      now,
+		LastCheckAt:   now,
+		Available:     available,
+		NextResetTime: nextResetTime,
+	}
+
+	// 清除失效标记
+	delete(tm.invalidated, index)
+	tm.mutex.Unlock()
+
+	if available < MinAvailableThreshold {
+		logger.Warn("低余额验证：账号余额已耗尽",
+			logger.Int("index", index),
+			logger.Float64("available", available),
+			logger.Float64("threshold", MinAvailableThreshold))
+	} else {
+		logger.Info("低余额验证：账号仍有余额",
+			logger.Int("index", index),
+			logger.Float64("available", available))
+	}
 }
 
 // RefreshResult 单个账号刷新结果

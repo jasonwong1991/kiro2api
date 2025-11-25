@@ -155,9 +155,10 @@ func (g *DeviceFingerprintGenerator) randomSDKVersion() string {
 }
 
 // randomIDEVersion 生成随机 IDE 版本号
+// 更新到最新版本范围：0.6.18 (2025-11)
 func (g *DeviceFingerprintGenerator) randomIDEVersion() string {
-	minor := 2 + g.rng.Intn(2)        // 0.2.x - 0.3.x
-	patch := 10 + g.rng.Intn(20)      // 10-29
+	minor := 4 + g.rng.Intn(3)        // 0.4.x - 0.6.x
+	patch := g.rng.Intn(19)            // 0-18
 	return fmt.Sprintf("KiroIDE-0.%d.%d", minor, patch)
 }
 
