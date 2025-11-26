@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -13,8 +14,9 @@ import (
 // ConvertOpenAIToAnthropic 将OpenAI请求转换为Anthropic请求
 func ConvertOpenAIToAnthropic(openaiReq types.OpenAIRequest) types.AnthropicRequest {
 	var anthropicMessages []types.AnthropicRequestMessage
+	var systemMessages []types.AnthropicSystemMessage
 
-	// 转换消息
+	// 转换消息，区分 system 消息和其他消息
 	for _, msg := range openaiReq.Messages {
 		// 转换消息内容格式
 		convertedContent, err := convertOpenAIContentToAnthropic(msg.Content)
@@ -23,11 +25,34 @@ func ConvertOpenAIToAnthropic(openaiReq types.OpenAIRequest) types.AnthropicRequ
 			convertedContent = msg.Content
 		}
 
-		anthropicMsg := types.AnthropicRequestMessage{
-			Role:    msg.Role,
-			Content: convertedContent,
+		// 如果是 system 角色，添加到 systemMessages
+		if msg.Role == "system" {
+			// 将 system 消息内容提取为字符串
+			var systemContent string
+			switch v := convertedContent.(type) {
+			case string:
+				systemContent = v
+			default:
+				// 如果不是字符串，使用 GetMessageContent 提取
+				systemContent, err = utils.GetMessageContent(v)
+				if err != nil {
+					// 如果提取失败，尝试简单的字符串转换
+					systemContent = fmt.Sprintf("%v", v)
+				}
+			}
+
+			systemMessages = append(systemMessages, types.AnthropicSystemMessage{
+				Type: "text",
+				Text: systemContent,
+			})
+		} else {
+			// 非 system 消息添加到普通消息列表
+			anthropicMsg := types.AnthropicRequestMessage{
+				Role:    msg.Role,
+				Content: convertedContent,
+			}
+			anthropicMessages = append(anthropicMessages, anthropicMsg)
 		}
-		anthropicMessages = append(anthropicMessages, anthropicMsg)
 	}
 
 	// 设置默认值
@@ -47,6 +72,7 @@ func ConvertOpenAIToAnthropic(openaiReq types.OpenAIRequest) types.AnthropicRequ
 		Model:     openaiReq.Model,
 		MaxTokens: maxTokens,
 		Messages:  anthropicMessages,
+		System:    systemMessages,
 		Stream:    stream,
 	}
 

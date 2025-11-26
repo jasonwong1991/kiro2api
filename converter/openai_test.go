@@ -53,10 +53,14 @@ func TestConvertOpenAIToAnthropic_SystemMessage(t *testing.T) {
 
 	anthropicReq := ConvertOpenAIToAnthropic(openaiReq)
 
-	// 当前实现保留system消息在messages中（不提取到System字段）
-	assert.Len(t, anthropicReq.Messages, 2)
-	assert.Equal(t, "system", anthropicReq.Messages[0].Role)
-	assert.Equal(t, "user", anthropicReq.Messages[1].Role)
+	// system 消息应该被提取到 System 字段中
+	assert.Len(t, anthropicReq.Messages, 1, "Messages数组应该只包含user消息")
+	assert.Equal(t, "user", anthropicReq.Messages[0].Role)
+
+	// 检查 System 字段
+	assert.Len(t, anthropicReq.System, 1, "System数组应该包含1条system消息")
+	assert.Equal(t, "text", anthropicReq.System[0].Type)
+	assert.Equal(t, "You are a helpful assistant.", anthropicReq.System[0].Text)
 }
 
 func TestConvertOpenAIToAnthropic_MultipleMessages(t *testing.T) {

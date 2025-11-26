@@ -113,6 +113,12 @@ func processMessageContent(content any) (string, []types.CodeWhispererImage, err
 
 	result := strings.Join(textParts, "")
 
+	// 关键修复：当只有图片没有文本时，提供默认占位符
+	// CodeWhisperer 不接受完全空的 content 字段
+	if result == "" && len(images) > 0 {
+		result = "[Image]"
+	}
+
 	// 保留关键调试信息用于问题定位
 	if result == "" && len(images) == 0 {
 		logger.Debug("消息内容处理结果为空",
