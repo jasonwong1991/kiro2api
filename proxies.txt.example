@@ -1,0 +1,19 @@
+# 代理池配置文件示例
+# 一行一个代理，支持 HTTP/HTTPS/SOCKS5 代理
+# 以 # 开头的行为注释，会被忽略
+# 空行也会被忽略
+
+# HTTP 代理格式
+# http://ip:port
+# http://username:password@ip:port
+
+# SOCKS5 代理格式
+# socks5://ip:port
+# socks5://username:password@ip:port
+
+# 示例代理（请替换为你的实际代理）
+# http://192.168.1.100:8080
+# http://user1:pass1@proxy1.example.com:8080
+# http://user2:pass2@proxy2.example.com:3128
+# socks5://192.168.1.101:1080
+# socks5://user3:pass3@proxy3.example.com:1080

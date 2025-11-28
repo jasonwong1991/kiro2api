@@ -27,14 +27,15 @@ type ProxyInfo struct {
 
 // ProxyPoolManager 代理池管理器
 type ProxyPoolManager struct {
-	proxies          []*ProxyInfo          // 代理池
-	tokenProxyMap    map[string]string     // token索引 -> 代理URL映射（会话保持）
-	proxyClients     map[string]*http.Client // 代理URL -> HTTP客户端缓存
-	mutex            sync.RWMutex
-	healthCheckURL   string                // 健康检查URL
-	healthCheckInterval time.Duration      // 健康检查间隔
-	maxFailures      int                   // 最大失败次数（超过则标记为不健康）
-	stopChan         chan struct{}         // 停止信号
+	proxies             []*ProxyInfo            // 代理池
+	tokenProxyMap       map[string]string       // token索引 -> 代理URL映射（会话保持）
+	proxyClients        map[string]*http.Client // 代理URL -> HTTP客户端缓存
+	mutex               sync.RWMutex
+	healthCheckURL      string        // 健康检查URL
+	healthCheckInterval time.Duration // 健康检查间隔
+	maxFailures         int           // 最大失败次数（超过则标记为不健康）
+	stopChan            chan struct{} // 停止信号
+	skipPreCheck        bool          // 跳过预检测（仅用于测试）
 }
 
 // NewProxyPoolManager 创建代理池管理器
@@ -96,50 +97,157 @@ func NewProxyPoolManager(proxyURLs []string) (*ProxyPoolManager, error) {
 	return manager, nil
 }
 
-// GetProxyForToken 为token获取代理（延迟分配 + 会话保持）
+// GetProxyForToken 为token获取代理（延迟分配 + 会话保持 + 预检测）
+// 返回值：proxyURL, client, error
+// 如果所有代理都不可用，返回 "", nil, nil（降级为不使用代理）
 func (pm *ProxyPoolManager) GetProxyForToken(tokenIndex string) (string, *http.Client, error) {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
+
+	// 记录已尝试的代理，避免重复尝试
+	triedProxies := make(map[string]bool)
 
 	// 检查是否已分配代理（会话保持）
 	if proxyURL, exists := pm.tokenProxyMap[tokenIndex]; exists {
 		// 检查代理是否仍然健康
 		if pm.isProxyHealthy(proxyURL) {
 			client := pm.proxyClients[proxyURL]
-			return proxyURL, client, nil
+			// 预检测代理可用性
+			if pm.testProxyConnectivity(client) {
+				return proxyURL, client, nil
+			}
+			// 预检测失败，标记并尝试其他代理
+			logger.Warn("代理预检测失败，尝试更换",
+				logger.String("token_index", tokenIndex),
+				logger.String("proxy_url", proxyURL))
+			pm.markProxyFailedByURL(proxyURL)
 		}
-		// 代理不健康，需要重新分配
-		logger.Warn("代理不健康，重新分配",
-			logger.String("token_index", tokenIndex),
-			logger.String("old_proxy", proxyURL))
+		// 代理不健康或预检测失败，需要重新分配
+		triedProxies[proxyURL] = true
 		delete(pm.tokenProxyMap, tokenIndex)
 	}
 
-	// 分配新代理（负载均衡）
-	proxyURL := pm.selectProxyForAssignment()
-	if proxyURL == "" {
-		return "", nil, fmt.Errorf("没有可用的代理")
+	// 尝试分配新代理，直到找到可用的或全部尝试完毕
+	for {
+		proxyURL := pm.selectProxyForAssignmentExcluding(triedProxies)
+		if proxyURL == "" {
+			// 没有更多代理可尝试，降级为不使用代理
+			logger.Warn("所有代理都不可用，降级为直连模式",
+				logger.String("token_index", tokenIndex),
+				logger.Int("tried_count", len(triedProxies)))
+			return "", nil, nil
+		}
+
+		triedProxies[proxyURL] = true
+		client := pm.proxyClients[proxyURL]
+
+		// 预检测代理可用性
+		if pm.testProxyConnectivity(client) {
+			// 绑定关系
+			pm.tokenProxyMap[tokenIndex] = proxyURL
+
+			// 更新分配计数
+			for _, proxy := range pm.proxies {
+				if proxy.URL == proxyURL {
+					proxy.AssignedCount++
+					break
+				}
+			}
+
+			logger.Debug("分配代理",
+				logger.String("token_index", tokenIndex),
+				logger.String("proxy_url", proxyURL),
+				logger.Int("assigned_count", pm.getAssignedCount(proxyURL)),
+				logger.Int("tried_count", len(triedProxies)))
+
+			return proxyURL, client, nil
+		}
+
+		// 预检测失败，标记并继续尝试下一个
+		logger.Warn("代理预检测失败，尝试下一个",
+			logger.String("proxy_url", proxyURL),
+			logger.Int("tried_count", len(triedProxies)))
+		pm.markProxyFailedByURL(proxyURL)
+	}
+}
+
+// testProxyConnectivity 测试代理连通性
+func (pm *ProxyPoolManager) testProxyConnectivity(client *http.Client) bool {
+	// 测试模式下跳过预检测
+	if pm.skipPreCheck {
+		return true
 	}
 
-	// 绑定关系
-	pm.tokenProxyMap[tokenIndex] = proxyURL
+	if client == nil {
+		return false
+	}
 
-	// 更新分配计数
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "HEAD", pm.healthCheckURL, nil)
+	if err != nil {
+		return false
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+
+	// 2xx-4xx 都认为代理是通的
+	return resp.StatusCode >= 200 && resp.StatusCode < 500
+}
+
+// markProxyFailedByURL 根据URL标记代理失败
+// 内部方法：调用者必须持有 pm.mutex
+func (pm *ProxyPoolManager) markProxyFailedByURL(proxyURL string) {
 	for _, proxy := range pm.proxies {
 		if proxy.URL == proxyURL {
-			proxy.AssignedCount++
-			break
+			pm.markProxyFailed(proxy)
+			return
+		}
+	}
+}
+
+// selectProxyForAssignmentExcluding 选择代理进行分配，排除已尝试的代理
+// 内部方法：调用者必须持有 pm.mutex
+func (pm *ProxyPoolManager) selectProxyForAssignmentExcluding(excludeProxies map[string]bool) string {
+	var healthyProxies []*ProxyInfo
+	for _, proxy := range pm.proxies {
+		if proxy.Healthy && !excludeProxies[proxy.URL] {
+			healthyProxies = append(healthyProxies, proxy)
 		}
 	}
 
-	client := pm.proxyClients[proxyURL]
+	if len(healthyProxies) == 0 {
+		// 所有健康代理都已尝试，尝试不健康但未尝试的代理
+		for _, proxy := range pm.proxies {
+			if !excludeProxies[proxy.URL] {
+				healthyProxies = append(healthyProxies, proxy)
+			}
+		}
+	}
 
-	logger.Debug("分配代理",
-		logger.String("token_index", tokenIndex),
-		logger.String("proxy_url", proxyURL),
-		logger.Int("assigned_count", pm.getAssignedCount(proxyURL)))
+	if len(healthyProxies) == 0 {
+		return ""
+	}
 
-	return proxyURL, client, nil
+	// 负载均衡：选择已分配数量最少的代理
+	minAssigned := -1
+	var selectedProxy *ProxyInfo
+	for _, proxy := range healthyProxies {
+		if minAssigned == -1 || proxy.AssignedCount < minAssigned {
+			minAssigned = proxy.AssignedCount
+			selectedProxy = proxy
+		}
+	}
+
+	if selectedProxy != nil {
+		return selectedProxy.URL
+	}
+	return ""
 }
 
 // selectProxyForAssignment 选择代理进行分配（负载均衡）
@@ -372,6 +480,11 @@ func (pm *ProxyPoolManager) Stop() {
 	close(pm.stopChan)
 }
 
+// SetSkipPreCheck 设置是否跳过预检测（仅用于测试）
+func (pm *ProxyPoolManager) SetSkipPreCheck(skip bool) {
+	pm.skipPreCheck = skip
+}
+
 // GetStats 获取代理池统计信息
 func (pm *ProxyPoolManager) GetStats() map[string]interface{} {
 	pm.mutex.RLock()
@@ -462,20 +575,42 @@ func getMaxProxyFailures() int {
 }
 
 // LoadProxyPoolFromEnv 从环境变量加载代理池配置
+// 支持两种方式：
+// 1. 直接配置代理列表（逗号或换行分隔）
+// 2. 配置文件路径（如 /path/to/proxies.txt），文件中一行一个代理
 func LoadProxyPoolFromEnv() []string {
 	proxyListStr := os.Getenv("KIRO_PROXY_POOL")
 	if proxyListStr == "" {
 		return nil
 	}
 
-	// 支持逗号分隔或换行分隔
+	proxyListStr = strings.TrimSpace(proxyListStr)
+
+	// 检查是否为文件路径
+	if isFilePath(proxyListStr) {
+		proxies, err := loadProxiesFromFile(proxyListStr)
+		if err != nil {
+			logger.Error("从文件加载代理池失败",
+				logger.String("file_path", proxyListStr),
+				logger.Err(err))
+			return nil
+		}
+		if len(proxies) > 0 {
+			logger.Info("从文件加载代理池",
+				logger.String("file_path", proxyListStr),
+				logger.Int("proxy_count", len(proxies)))
+		}
+		return proxies
+	}
+
+	// 直接解析代理列表（支持逗号分隔或换行分隔）
 	proxyListStr = strings.ReplaceAll(proxyListStr, "\n", ",")
 	proxies := strings.Split(proxyListStr, ",")
 
 	var validProxies []string
 	for _, proxy := range proxies {
 		proxy = strings.TrimSpace(proxy)
-		if proxy != "" {
+		if proxy != "" && !strings.HasPrefix(proxy, "#") {
 			validProxies = append(validProxies, proxy)
 		}
 	}
@@ -486,4 +621,42 @@ func LoadProxyPoolFromEnv() []string {
 	}
 
 	return validProxies
+}
+
+// isFilePath 判断字符串是否为文件路径
+func isFilePath(s string) bool {
+	// 以 / 或 ./ 或 ../ 开头，或者以 .txt 结尾
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") {
+		return true
+	}
+	if strings.HasSuffix(s, ".txt") || strings.HasSuffix(s, ".conf") || strings.HasSuffix(s, ".list") {
+		return true
+	}
+	// 检查文件是否存在
+	if _, err := os.Stat(s); err == nil {
+		return true
+	}
+	return false
+}
+
+// loadProxiesFromFile 从文件加载代理列表
+func loadProxiesFromFile(filePath string) ([]string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取代理文件失败: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var proxies []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// 跳过空行和注释行
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		proxies = append(proxies, line)
+	}
+
+	return proxies, nil
 }

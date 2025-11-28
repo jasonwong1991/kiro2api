@@ -43,6 +43,9 @@ func TestProxyPoolManager_LoadBalance(t *testing.T) {
 	}
 	defer pm.Stop()
 
+	// 跳过预检测（测试模式）
+	pm.SetSkipPreCheck(true)
+
 	// 模拟10个账号分配代理
 	// 期望分配：4、3、3
 	assignments := make(map[string]int) // proxyURL -> count
@@ -92,6 +95,9 @@ func TestProxyPoolManager_SessionPersistence(t *testing.T) {
 	}
 	defer pm.Stop()
 
+	// 跳过预检测（测试模式）
+	pm.SetSkipPreCheck(true)
+
 	tokenIndex := "0"
 
 	// 第一次获取
@@ -126,6 +132,9 @@ func TestProxyPoolManager_Stats(t *testing.T) {
 	}
 	defer pm.Stop()
 
+	// 跳过预检测（测试模式）
+	pm.SetSkipPreCheck(true)
+
 	// 分配一些代理
 	for i := 0; i < 5; i++ {
 		tokenIndex := string(rune('0' + i))
@@ -157,6 +166,9 @@ func TestProxyPoolManager_ResetTokenProxy(t *testing.T) {
 		t.Fatalf("创建代理池失败: %v", err)
 	}
 	defer pm.Stop()
+
+	// 跳过预检测（测试模式）
+	pm.SetSkipPreCheck(true)
 
 	tokenIndex := "0"
 
@@ -211,4 +223,76 @@ func TestProxyPoolManager_HealthCheck(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	t.Log("健康检查协程正常启动和停止")
+}
+
+func TestLoadProxiesFromFile(t *testing.T) {
+	// 测试从文件加载代理列表
+	proxies, err := loadProxiesFromFile("../proxies.txt.example")
+	if err != nil {
+		t.Logf("加载示例文件失败（可能不存在）: %v", err)
+		return
+	}
+
+	// 示例文件中的代理都是注释，所以应该为空
+	t.Logf("从文件加载了%d个代理", len(proxies))
+}
+
+func TestIsFilePath(t *testing.T) {
+	// 测试文件路径判断
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"/path/to/proxies.txt", true},
+		{"./proxies.txt", true},
+		{"../proxies.txt", true},
+		{"proxies.txt", true},
+		{"proxies.conf", true},
+		{"proxies.list", true},
+		{"http://proxy1.com:8080,http://proxy2.com:8080", false},
+		{"http://proxy1.com:8080", false},
+	}
+
+	for _, tt := range tests {
+		result := isFilePath(tt.input)
+		if result != tt.expected {
+			t.Errorf("isFilePath(%q) = %v, expected %v", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestProxyPoolManager_Fallback(t *testing.T) {
+	// 测试所有代理不可用时的降级处理
+	proxies := []string{
+		"http://user1:pass1@proxy1.com:8080",
+	}
+
+	pm, err := NewProxyPoolManager(proxies)
+	if err != nil {
+		t.Fatalf("创建代理池失败: %v", err)
+	}
+	defer pm.Stop()
+
+	// 不跳过预检测，让代理检测失败
+	// pm.SetSkipPreCheck(false) // 默认就是 false
+
+	// 获取代理，应该降级为直连模式（返回空字符串）
+	proxyURL, client, err := pm.GetProxyForToken("test")
+
+	// 不应该返回错误
+	if err != nil {
+		t.Errorf("不应该返回错误: %v", err)
+	}
+
+	// 应该返回空字符串（降级为直连）
+	if proxyURL != "" {
+		t.Errorf("期望降级为直连模式（空字符串），实际返回: %s", proxyURL)
+	}
+
+	// client 应该为 nil
+	if client != nil {
+		t.Errorf("期望 client 为 nil，实际不为 nil")
+	}
+
+	t.Log("降级处理测试通过：所有代理不可用时返回空字符串")
 }
