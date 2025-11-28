@@ -61,6 +61,23 @@ services:
       # 工具描述的最大长度（字符数，默认: 10000）
       - MAX_TOOL_DESCRIPTION_LENGTH=${MAX_TOOL_DESCRIPTION_LENGTH:-10000}
 
+      # ============================================================================
+      # 代理池配置
+      # ============================================================================
+      # 代理池配置（支持文件路径或逗号分隔的代理列表）
+      # 文件路径示例: /app/proxies.txt
+      # 直接配置示例: http://user:pass@proxy1:8080,http://user:pass@proxy2:8080
+      - KIRO_PROXY_POOL=${KIRO_PROXY_POOL:-}
+
+      # 健康检查URL（可选，默认 https://www.google.com）
+      - KIRO_PROXY_HEALTH_CHECK_URL=${KIRO_PROXY_HEALTH_CHECK_URL:-}
+
+      # 健康检查间隔（可选，默认 60s）
+      - KIRO_PROXY_HEALTH_CHECK_INTERVAL=${KIRO_PROXY_HEALTH_CHECK_INTERVAL:-}
+
+      # 最大失败次数（可选，默认 3 次）
+      - KIRO_PROXY_MAX_FAILURES=${KIRO_PROXY_MAX_FAILURES:-}
+
     volumes:
       # AWS SSO 缓存目录（持久化设备指纹）
       - aws_sso_cache:/home/appuser/.aws/sso/cache
@@ -68,6 +85,10 @@ services:
       # Token 配置文件（只读挂载）
       # 请确保 tokens.json 文件存在且格式正确
       - ./tokens.json:/app/tokens.json:ro
+
+      # 代理池配置文件（可选，只读挂载）
+      # 如果使用文件配置代理池，取消注释以下行
+      # - ./proxies.txt:/app/proxies.txt:ro
 
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/v1/models"]
