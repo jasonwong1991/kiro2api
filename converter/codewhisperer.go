@@ -142,6 +142,21 @@ func extractToolResultsFromMessage(content any) []types.ToolResult {
 							toolResult.IsError = true
 						}
 
+						// 处理无效的工具结果（例如用户取消的工具调用）
+						if toolResult.ToolUseId == "" {
+							continue // 没有 ID 的工具结果无法匹配，跳过
+						}
+						// 如果内容为空，生成占位内容表示工具调用出错
+						if len(toolResult.Content) == 0 {
+							toolResult.Content = []map[string]any{
+								{"text": "[Tool call failed: no response received]"},
+							}
+							toolResult.Status = "error"
+							toolResult.IsError = true
+							logger.Debug("为空响应的工具调用生成占位内容",
+								logger.String("tool_use_id", toolResult.ToolUseId))
+						}
+
 						toolResults = append(toolResults, toolResult)
 
 						// logger.Debug("提取到工具结果",
@@ -192,6 +207,21 @@ func extractToolResultsFromMessage(content any) []types.ToolResult {
 				if block.IsError != nil && *block.IsError {
 					toolResult.Status = "error"
 					toolResult.IsError = true
+				}
+
+				// 处理无效的工具结果（例如用户取消的工具调用）
+				if toolResult.ToolUseId == "" {
+					continue // 没有 ID 的工具结果无法匹配，跳过
+				}
+				// 如果内容为空，生成占位内容表示工具调用出错
+				if len(toolResult.Content) == 0 {
+					toolResult.Content = []map[string]any{
+						{"text": "[Tool call failed: no response received]"},
+					}
+					toolResult.Status = "error"
+					toolResult.IsError = true
+					logger.Debug("为空响应的工具调用生成占位内容",
+						logger.String("tool_use_id", toolResult.ToolUseId))
 				}
 
 				toolResults = append(toolResults, toolResult)

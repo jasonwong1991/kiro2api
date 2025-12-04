@@ -366,6 +366,42 @@ func TestExtractToolResultsFromMessage(t *testing.T) {
 		require.Len(t, toolResults, 1)
 		assert.Equal(t, "error", toolResults[0].Status)
 	})
+
+	t.Run("处理空内容的工具结果（用户取消）", func(t *testing.T) {
+		// 模拟用户取消工具调用时的情况：tool_result 有 ID 但没有 content
+		content := []any{
+			map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": "tooluse_cancelled_123",
+				// 没有 content 字段
+			},
+		}
+
+		toolResults := extractToolResultsFromMessage(content)
+
+		// 应该生成占位内容而不是跳过
+		require.Len(t, toolResults, 1)
+		assert.Equal(t, "tooluse_cancelled_123", toolResults[0].ToolUseId)
+		assert.Equal(t, "error", toolResults[0].Status)
+		assert.True(t, toolResults[0].IsError)
+		require.Len(t, toolResults[0].Content, 1)
+		assert.Equal(t, "[Tool call failed: no response received]", toolResults[0].Content[0]["text"])
+	})
+
+	t.Run("跳过没有ID的工具结果", func(t *testing.T) {
+		content := []any{
+			map[string]any{
+				"type":    "tool_result",
+				"content": "some content",
+				// 没有 tool_use_id
+			},
+		}
+
+		toolResults := extractToolResultsFromMessage(content)
+
+		// 没有 ID 的工具结果应该被跳过
+		assert.Len(t, toolResults, 0)
+	})
 }
 
 func TestValidateCodeWhispererRequest(t *testing.T) {
