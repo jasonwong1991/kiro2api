@@ -14,11 +14,11 @@
 
 ```bash
 # 一行配置，立即享受本地代理
-export ANTHROPIC_BASE_URL="http://localhost:8080/v1"
+export ANTHROPIC_BASE_URL="http://localhost:8080"
 export ANTHROPIC_API_KEY="your-kiro-token"
 
 # Claude Code 无感切换，所有功能完美支持
-claude-code --model claude-sonnet-4 "帮我重构这段代码"
+claude
 ```
 
 **支持功能**:
@@ -69,8 +69,9 @@ KIRO_AUTH_TOKEN='[
 ### 4. 图片输入支持（data URL）
 
 ```bash
-# Claude Code 中直接使用图片
-claude-code "分析这张图片的内容" --image screenshot.png
+# Claude Code 中直接读取图片文件
+claude
+> 分析这张图片 /path/to/screenshot.png
 
 # 支持的图片格式
 ✅ data URL 的 PNG/JPEG 等常见格式
@@ -78,7 +79,7 @@ claude-code "分析这张图片的内容" --image screenshot.png
 ```
 
 **说明**:
-- Claude Code 传入本地图片时会转为 `data:` URL，服务端按照 `Anthropic`/`OpenAI` 规范解析并转发。
+- Claude Code 读取本地图片时会自动转为 `data:` URL，服务端按照 `Anthropic`/`OpenAI` 规范解析并转发。
 - 不做额外图片压缩或远程下载处理，避免引入不必要复杂度（KISS/YAGNI）。
 
 ## 系统架构
@@ -527,7 +528,7 @@ curl -N -H "Authorization: Bearer $KIRO_CLIENT_TOKEN" \
 - **包结构说明**: 分层架构设计，遵循 SOLID 原则
 - **性能优化**: 缓存策略、并发控制、内存管理
 - **核心开发任务**: 扩展功能、性能调优、高级特性
-- **Claude Code 官方文档**: [claude.ai/code](https://claude.ai/code)
+- **Claude Code 官方文档**: [github.com/anthropics/claude-code](https://github.com/anthropics/claude-code)
 - **Docker 最佳实践**: 容器化部署指南
 
 ## 贡献指南
