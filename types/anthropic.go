@@ -24,6 +24,7 @@ type AnthropicRequest struct {
 	Stream      bool                      `json:"stream"`
 	Temperature *float64                  `json:"temperature,omitempty"`
 	Metadata    map[string]any            `json:"metadata,omitempty"`
+	Thinking    any                       `json:"thinking,omitempty"` // 支持bool/string/dict格式的thinking配置
 }
 
 // AnthropicStreamResponse 表示 Anthropic 流式响应的结构
@@ -58,6 +59,7 @@ type AnthropicSystemMessage struct {
 type ContentBlock struct {
 	Type      string       `json:"type"`
 	Text      *string      `json:"text,omitempty"`
+	Thinking  *string      `json:"thinking,omitempty"` // thinking 块的内容
 	ToolUseId *string      `json:"tool_use_id,omitempty"`
 	Content   any          `json:"content,omitempty"`  // tool_result的内容，可以是string、[]any或map[string]any
 	Name      *string      `json:"name,omitempty"`     // tool_use的名称

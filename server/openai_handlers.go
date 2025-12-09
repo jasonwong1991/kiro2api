@@ -39,10 +39,23 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 		return
 	}
 
+	// 检查是否启用了 thinking 模式
+	thinkingEnabled := converter.IsThinkingModeEnabled(anthropicReq.Thinking)
+	var reasoningContent string
+	var reasoningTokens int
+
 	// 转换为Anthropic格式
 	contexts := []map[string]any{}
 	allContent := result.GetCompletionText()
 	sawToolUse := len(result.GetToolCalls()) > 0
+
+	// 如果启用了 thinking 模式，提取 thinking 内容
+	if thinkingEnabled && allContent != "" {
+		reasoningContent, allContent = converter.ExtractThinkingContent(allContent)
+		if reasoningContent != "" {
+			reasoningTokens = len(reasoningContent) / 4 // 简单估算
+		}
+	}
 
 	// 添加文本内容
 	if allContent != "" {
@@ -87,11 +100,22 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 	openaiMessageId := fmt.Sprintf("chatcmpl-%s", time.Now().Format(config.MessageIDTimeFormat))
 	openaiResp := converter.ConvertAnthropicToOpenAI(anthropicResp, anthropicReq.Model, openaiMessageId)
 
+	// 如果有 reasoning 内容，添加到响应中
+	if reasoningContent != "" && len(openaiResp.Choices) > 0 {
+		openaiResp.Choices[0].Message.ReasoningContent = reasoningContent
+
+		// 添加 reasoning_tokens 到 usage
+		openaiResp.Usage.CompletionTokensDetails = &types.CompletionTokensDetails{
+			ReasoningTokens: reasoningTokens,
+		}
+	}
+
 	// 下发OpenAI兼容非流式响应
 	logger.Debug("下发OpenAI非流式响应",
 		addReqFields(c,
 			logger.String("direction", "downstream_send"),
 			logger.Bool("saw_tool_use", sawToolUse),
+			logger.Bool("has_reasoning", reasoningContent != ""),
 		)...)
 	c.JSON(http.StatusOK, openaiResp)
 }
@@ -139,6 +163,14 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 	// 创建符合AWS规范的流式解析器
 	compliantParser := parser.NewCompliantEventStreamParser()
 
+	// 检查是否启用了 thinking 模式（用于 reasoning_content 支持）
+	thinkingEnabled := converter.IsThinkingModeEnabled(anthropicReq.Thinking)
+	var thinkingHandler *ThinkingStreamHandler
+	if thinkingEnabled {
+		thinkingHandler = NewThinkingStreamHandler(true) // OpenAI 格式
+	}
+	reasoningTokens := 0 // 跟踪推理 token 数
+
 	// OpenAI 工具调用增量状态
 	toolIndexByToolUseId := make(map[string]int)  // tool_use_id -> tool_calls 数组索引
 	toolUseIdByBlockIndex := make(map[int]string) // 内容块 index -> tool_use_id
@@ -177,23 +209,62 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 									switch deltaMap["type"] {
 									case "text_delta":
 										if text, ok := deltaMap["text"]; ok {
-											// 发送文本内容的增量
-											contentEvent := map[string]any{
-												"id":      messageId,
-												"object":  "chat.completion.chunk",
-												"created": time.Now().Unix(),
-												"model":   anthropicReq.Model,
-												"choices": []map[string]any{
-													{
-														"index": 0,
-														"delta": map[string]any{
-															"content": text.(string),
-														},
-														"finish_reason": nil,
-													},
-												},
+											textStr := text.(string)
+
+											// 如果启用了 thinking 模式，处理 <thinking> 标签
+											if thinkingEnabled && thinkingHandler != nil && textStr != "" {
+												events, normalText := thinkingHandler.ProcessContent(textStr)
+
+												// 发送 reasoning_content 事件（来自 thinking 内容）
+												for _, evt := range events {
+													if evtType, ok := evt["type"].(string); ok && evtType == "reasoning_delta" {
+														if reasoningContent, ok := evt["reasoning_content"].(string); ok && reasoningContent != "" {
+															// 统计推理 token（简单估算）
+															reasoningTokens += len(reasoningContent) / 4
+
+															reasoningEvent := map[string]any{
+																"id":      messageId,
+																"object":  "chat.completion.chunk",
+																"created": time.Now().Unix(),
+																"model":   anthropicReq.Model,
+																"choices": []map[string]any{
+																	{
+																		"index": 0,
+																		"delta": map[string]any{
+																			"reasoning_content": reasoningContent,
+																		},
+																		"finish_reason": nil,
+																	},
+																},
+															}
+															sender.SendEvent(c, reasoningEvent)
+														}
+													}
+												}
+
+												// 只有普通文本才作为 content 发送
+												textStr = normalText
 											}
-											sender.SendEvent(c, contentEvent)
+
+											// 发送普通文本内容的增量
+											if textStr != "" {
+												contentEvent := map[string]any{
+													"id":      messageId,
+													"object":  "chat.completion.chunk",
+													"created": time.Now().Unix(),
+													"model":   anthropicReq.Model,
+													"choices": []map[string]any{
+														{
+															"index": 0,
+															"delta": map[string]any{
+																"content": textStr,
+															},
+															"finish_reason": nil,
+														},
+													},
+												}
+												sender.SendEvent(c, contentEvent)
+											}
 										}
 									case "input_json_delta":
 										// 工具调用参数增量
@@ -379,6 +450,35 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 		}
 	}
 
+	// 刷新 thinking handler 缓冲区（处理流结束时的剩余内容）
+	if thinkingEnabled && thinkingHandler != nil {
+		flushEvents := thinkingHandler.Flush()
+		for _, evt := range flushEvents {
+			if evtType, ok := evt["type"].(string); ok && evtType == "reasoning_delta" {
+				if reasoningContent, ok := evt["reasoning_content"].(string); ok && reasoningContent != "" {
+					reasoningTokens += len(reasoningContent) / 4
+
+					reasoningEvent := map[string]any{
+						"id":      messageId,
+						"object":  "chat.completion.chunk",
+						"created": time.Now().Unix(),
+						"model":   anthropicReq.Model,
+						"choices": []map[string]any{
+							{
+								"index": 0,
+								"delta": map[string]any{
+									"reasoning_content": reasoningContent,
+								},
+								"finish_reason": nil,
+							},
+						},
+					}
+					sender.SendEvent(c, reasoningEvent)
+				}
+			}
+		}
+	}
+
 	// 确保发送了结束原因（如果还没有发送）
 	if !sentFinal && messageCount > 0 {
 		finishReason := "stop"
@@ -399,6 +499,16 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 				},
 			},
 		}
+
+		// 如果有 reasoning tokens，添加 usage 统计
+		if reasoningTokens > 0 {
+			finalEvent["usage"] = map[string]any{
+				"completion_tokens_details": map[string]any{
+					"reasoning_tokens": reasoningTokens,
+				},
+			}
+		}
+
 		sender.SendEvent(c, finalEvent)
 		c.Writer.Flush()
 	}

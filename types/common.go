@@ -12,6 +12,14 @@ type Usage struct {
 	// Anthropic格式的兼容字段
 	InputTokens  int `json:"input_tokens,omitempty"`
 	OutputTokens int `json:"output_tokens,omitempty"`
+	// OpenAI reasoning 模型的详细统计
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// CompletionTokensDetails 完成token的详细统计（用于reasoning模型）
+type CompletionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+	AudioTokens     int `json:"audio_tokens,omitempty"`
 }
 
 // ToAnthropicFormat 转换为Anthropic格式

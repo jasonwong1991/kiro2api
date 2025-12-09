@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"kiro2api/converter"
 	"kiro2api/logger"
 	"kiro2api/parser"
 	"kiro2api/types"
@@ -32,6 +33,10 @@ type StreamProcessorContext struct {
 	// 流解析器
 	compliantParser *parser.CompliantEventStreamParser
 
+	// Thinking 处理器
+	thinkingProcessor *ThinkingEventProcessor
+	thinkingEnabled   bool
+
 	// 统计信息
 	totalOutputTokens    int // 累计发送给客户端的输出 token 数
 	totalReadBytes       int
@@ -41,7 +46,7 @@ type StreamProcessorContext struct {
 	// 工具调用跟踪
 	toolUseIdByBlockIndex map[int]string
 	completedToolUseIds   map[string]bool // 已完成的工具ID集合（用于stop_reason判断）
-	
+
 	// *** 新增：JSON字节累加器（修复分段整除精度损失） ***
 	// 问题：每个 input_json_delta 单独计算 len(partialJSON)/4 会导致小于4字节的分段被舍弃
 	// 解决：累加每个块的JSON字节数，在 content_block_stop 时一次性计算 token
@@ -57,7 +62,10 @@ func NewStreamProcessorContext(
 	messageID string,
 	inputTokens int,
 ) *StreamProcessorContext {
-	return &StreamProcessorContext{
+	// 检查是否启用了 thinking 模式
+	thinkingEnabled := converter.IsThinkingModeEnabled(req.Thinking)
+
+	ctx := &StreamProcessorContext{
 		c:                     c,
 		req:                   req,
 		token:                 token,
@@ -68,10 +76,18 @@ func NewStreamProcessorContext(
 		stopReasonManager:     NewStopReasonManager(req),
 		tokenEstimator:        utils.NewTokenEstimator(),
 		compliantParser:       parser.NewCompliantEventStreamParser(),
+		thinkingEnabled:       thinkingEnabled,
 		toolUseIdByBlockIndex: make(map[int]string),
 		completedToolUseIds:   make(map[string]bool),
-		jsonBytesByBlockIndex: make(map[int]int), // *** 初始化JSON字节累加器 ***
+		jsonBytesByBlockIndex: make(map[int]int),
 	}
+
+	// 如果启用了 thinking 模式，创建 thinking 处理器
+	if thinkingEnabled {
+		ctx.thinkingProcessor = NewThinkingEventProcessor(false) // Anthropic 格式
+	}
+
+	return ctx
 }
 
 // Cleanup 清理资源
@@ -386,8 +402,42 @@ func (esp *EventStreamProcessor) processEvent(event parser.SSEEvent) error {
 		esp.ctx.processToolUseStart(dataMap)
 
 	case "content_block_delta":
-		// 直传：不做聚合
-		// 但需要统计输出字符数（在后面统一处理）
+		// 如果启用了 thinking 模式，通过 thinking 处理器处理文本增量
+		if esp.ctx.thinkingEnabled && esp.ctx.thinkingProcessor != nil {
+			if delta, ok := dataMap["delta"].(map[string]any); ok {
+				if deltaType, _ := delta["type"].(string); deltaType == "text_delta" {
+					if text, ok := delta["text"].(string); ok && text != "" {
+						// 通过 thinking 处理器处理，可能会生成额外的事件
+						thinkingEvents, normalText := esp.ctx.thinkingProcessor.ProcessTextDelta(text)
+
+						// 发送 thinking 相关事件
+						for _, evt := range thinkingEvents {
+							if evtData, ok := evt.Data.(map[string]any); ok {
+								if err := esp.ctx.sseStateManager.SendEvent(esp.ctx.c, esp.ctx.sender, evtData); err != nil {
+									logger.Error("发送 thinking 事件失败", logger.Err(err))
+								}
+								// 统计 thinking 内容的 token
+								if evtType, _ := evtData["type"].(string); evtType == "content_block_delta" {
+									if evtDelta, ok := evtData["delta"].(map[string]any); ok {
+										if thinkingText, ok := evtDelta["thinking"].(string); ok {
+											esp.ctx.totalOutputTokens += esp.ctx.tokenEstimator.EstimateTextTokens(thinkingText)
+										}
+									}
+								}
+							}
+						}
+
+						// 如果有普通文本，更新原始事件并继续处理
+						if normalText != "" {
+							delta["text"] = normalText
+						} else {
+							// 没有普通文本，跳过原始事件的发送
+							return nil
+						}
+					}
+				}
+			}
+		}
 
 	case "content_block_stop":
 		esp.ctx.processToolUseStop(dataMap)

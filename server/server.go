@@ -151,6 +151,14 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 			return
 		}
 
+		// 检测 -thinking 后缀模型，自动启用 thinking 模式
+		if strings.HasSuffix(anthropicReq.Model, "-thinking") && anthropicReq.Thinking == nil {
+			anthropicReq.Thinking = map[string]any{
+				"type":          "enabled",
+				"budget_tokens": converter.DefaultMaxThinkingLength,
+			}
+		}
+
 		// 验证请求的有效性
 		if len(anthropicReq.Messages) == 0 {
 			logger.Error("请求中没有消息")

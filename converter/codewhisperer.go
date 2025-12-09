@@ -238,6 +238,10 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 
 	cwReq := types.CodeWhispererRequest{}
 
+	// 解析 thinking 配置
+	thinkingConfig := ParseThinkingConfig(anthropicReq.Thinking)
+	thinkingHint := GetThinkingHint(thinkingConfig)
+
 	// 设置代理相关字段 (基于参考文档的标准配置)
 	// 使用稳定的代理延续ID生成器，保持会话连续性 (KISS + DRY原则)
 	cwReq.ConversationState.AgentContinuationId = utils.GenerateStableAgentContinuationID(ctx)
@@ -284,6 +288,11 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 	textContent, images, err := processMessageContent(lastMessage.Content)
 	if err != nil {
 		return cwReq, fmt.Errorf("处理消息内容失败: %v", err)
+	}
+
+	// 如果启用了 thinking 模式，在用户消息末尾附加 hint
+	if thinkingHint != "" && textContent != "" {
+		textContent = AppendThinkingHint(textContent, thinkingHint)
 	}
 
 	cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = textContent
@@ -453,7 +462,12 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 					}
 
 					// 设置合并后的内容
-					mergedUserMsg.UserInputMessage.Content = strings.Join(contentParts, "\n")
+					mergedContent := strings.Join(contentParts, "\n")
+					// 如果启用了 thinking 模式，在历史用户消息中也附加 hint
+					if thinkingHint != "" && mergedContent != "" {
+						mergedContent = AppendThinkingHint(mergedContent, thinkingHint)
+					}
+					mergedUserMsg.UserInputMessage.Content = mergedContent
 					if len(allImages) > 0 {
 						mergedUserMsg.UserInputMessage.Images = allImages
 					}
@@ -521,7 +535,12 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 				}
 			}
 
-			mergedOrphanUserMsg.UserInputMessage.Content = strings.Join(contentParts, "\n")
+			mergedOrphanContent := strings.Join(contentParts, "\n")
+			// 如果启用了 thinking 模式，在历史用户消息中也附加 hint
+			if thinkingHint != "" && mergedOrphanContent != "" {
+				mergedOrphanContent = AppendThinkingHint(mergedOrphanContent, thinkingHint)
+			}
+			mergedOrphanUserMsg.UserInputMessage.Content = mergedOrphanContent
 			if len(allImages) > 0 {
 				mergedOrphanUserMsg.UserInputMessage.Images = allImages
 			}

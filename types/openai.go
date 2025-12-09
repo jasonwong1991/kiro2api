@@ -2,9 +2,10 @@ package types
 
 // OpenAI兼容的数据结构
 type OpenAIMessage struct {
-	Role      string           `json:"role"`
-	Content   any              `json:"content"` // 可以是 string 或 []ContentBlock
-	ToolCalls []OpenAIToolCall `json:"tool_calls,omitempty"`
+	Role             string           `json:"role"`
+	Content          any              `json:"content"`                     // 可以是 string 或 []ContentBlock
+	ReasoningContent string           `json:"reasoning_content,omitempty"` // 推理内容（用于o1等推理模型）
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type OpenAIToolCall struct {
@@ -41,13 +42,14 @@ type OpenAIToolChoiceFunction struct {
 }
 
 type OpenAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	MaxTokens   *int            `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	Stream      *bool           `json:"stream,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
-	ToolChoice  any             `json:"tool_choice,omitempty"` // 可以是 "auto", "none", "required" 或 OpenAIToolChoice
+	Model           string          `json:"model"`
+	Messages        []OpenAIMessage `json:"messages"`
+	MaxTokens       *int            `json:"max_tokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	Stream          *bool           `json:"stream,omitempty"`
+	Tools           []OpenAITool    `json:"tools,omitempty"`
+	ToolChoice      any             `json:"tool_choice,omitempty"`      // 可以是 "auto", "none", "required" 或 OpenAIToolChoice
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"` // "low", "medium", "high" - 推理强度
 }
 
 type OpenAIChoice struct {

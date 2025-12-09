@@ -80,6 +80,19 @@ func ConvertOpenAIToAnthropic(openaiReq types.OpenAIRequest) types.AnthropicRequ
 		anthropicReq.Temperature = openaiReq.Temperature
 	}
 
+	// 转换 reasoning_effort 为 thinking 配置
+	if openaiReq.ReasoningEffort != "" {
+		anthropicReq.Thinking = ConvertReasoningEffortToThinking(openaiReq.ReasoningEffort)
+	}
+
+	// 检测 -thinking 后缀模型，自动启用 thinking 模式
+	if strings.HasSuffix(openaiReq.Model, "-thinking") && anthropicReq.Thinking == nil {
+		anthropicReq.Thinking = map[string]any{
+			"type":          "enabled",
+			"budget_tokens": DefaultMaxThinkingLength,
+		}
+	}
+
 	// 转换 tools
 	if len(openaiReq.Tools) > 0 {
 		anthropicTools, err := validateAndProcessTools(openaiReq.Tools)

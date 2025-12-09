@@ -11,7 +11,7 @@ import (
 // BlockState 内容块状态
 type BlockState struct {
 	Index     int    `json:"index"`
-	Type      string `json:"type"` // "text" | "tool_use"
+	Type      string `json:"type"` // "text" | "tool_use" | "thinking"
 	Started   bool   `json:"started"`
 	Stopped   bool   `json:"stopped"`
 	ToolUseID string `json:"tool_use_id,omitempty"` // 仅用于工具块
@@ -133,7 +133,7 @@ func (ssm *SSEStateManager) handleContentBlockStart(c *gin.Context, sender Strea
 		}
 	}
 
-	// *** 关键修复：在启动新工具块前，自动关闭文本块 ***
+	// *** 关键修复：在启动新工具块前，自动关闭文本块和thinking块 ***
 	// 问题场景：AWS上游在工具调用(index:1+)期间仍发送文本内容给index:0
 	// 如果不在此时关闭index:0，会导致事件序列混乱：
 	// - index:0 started
@@ -142,28 +142,29 @@ func (ssm *SSEStateManager) handleContentBlockStart(c *gin.Context, sender Strea
 	// - index:1 stop
 	// - index:0 stop (延迟关闭)
 	//
-	// 修复策略：当检测到新工具块启动时，自动关闭所有未关闭的文本块
+	// 修复策略：当检测到新工具块启动时，自动关闭所有未关闭的文本块和thinking块
 	if blockType == "tool_use" {
-		// 遍历所有活跃块，找到未关闭的文本块
+		// 遍历所有活跃块，找到未关闭的文本块或thinking块
 		for blockIndex, block := range ssm.activeBlocks {
-			if block.Type == "text" && block.Started && !block.Stopped {
-				// 自动发送content_block_stop来关闭文本块
+			if (block.Type == "text" || block.Type == "thinking") && block.Started && !block.Stopped {
+				// 自动发送content_block_stop来关闭块
 				stopEvent := map[string]any{
 					"type":  "content_block_stop",
 					"index": blockIndex,
 				}
-				logger.Debug("工具块启动前自动关闭文本块",
-					logger.Int("text_block_index", blockIndex),
+				logger.Debug("工具块启动前自动关闭内容块",
+					logger.Int("block_index", blockIndex),
+					logger.String("block_type", block.Type),
 					logger.Int("new_tool_block_index", index),
 					logger.String("reason", "prevent_event_interleaving"))
 
 				// 立即发送stop事件（在工具块start之前）
 				if err := sender.SendEvent(c, stopEvent); err != nil {
-					logger.Error("自动关闭文本块失败", logger.Err(err), logger.Int("index", blockIndex))
+					logger.Error("自动关闭内容块失败", logger.Err(err), logger.Int("index", blockIndex))
 				} else {
-					// 标记文本块已关闭
+					// 标记块已关闭
 					block.Stopped = true
-					logger.Debug("文本块已自动关闭", logger.Int("index", blockIndex))
+					logger.Debug("内容块已自动关闭", logger.Int("index", blockIndex), logger.String("type", block.Type))
 				}
 			}
 		}
@@ -225,8 +226,11 @@ func (ssm *SSEStateManager) handleContentBlockDelta(c *gin.Context, sender Strea
 		blockType := "text" // 默认为文本块
 		if delta, ok := eventData["delta"].(map[string]any); ok {
 			if deltaType, ok := delta["type"].(string); ok {
-				if deltaType == "input_json_delta" {
+				switch deltaType {
+				case "input_json_delta":
 					blockType = "tool_use"
+				case "thinking_delta":
+					blockType = "thinking"
 				}
 			}
 		}
@@ -243,6 +247,8 @@ func (ssm *SSEStateManager) handleContentBlockDelta(c *gin.Context, sender Strea
 		switch blockType {
 		case "text":
 			startEvent["content_block"].(map[string]any)["text"] = ""
+		case "thinking":
+			startEvent["content_block"].(map[string]any)["thinking"] = ""
 		case "tool_use":
 			// 为工具使用块添加必要字段
 			startEvent["content_block"].(map[string]any)["id"] = fmt.Sprintf("tooluse_auto_%d", index)

@@ -38,6 +38,11 @@ func processMessageContent(content any) (string, []types.CodeWhispererImage, err
 					} else {
 						logger.Warn("文本块的Text字段为nil")
 					}
+				case "thinking":
+					// 处理 thinking 内容块，转换为 XML 格式
+					if contentBlock.Thinking != nil {
+						textParts = append(textParts, WrapThinkingContent(*contentBlock.Thinking))
+					}
 				case "image":
 					// ... 图片处理保持不变
 					if contentBlock.Source != nil {
@@ -79,6 +84,11 @@ func processMessageContent(content any) (string, []types.CodeWhispererImage, err
 					textParts = append(textParts, *block.Text)
 				} else {
 					logger.Warn("结构化文本块的Text字段为nil")
+				}
+			case "thinking":
+				// 处理 thinking 内容块，转换为 XML 格式
+				if block.Thinking != nil {
+					textParts = append(textParts, WrapThinkingContent(*block.Thinking))
 				}
 			case "image":
 				if block.Source != nil {
@@ -153,6 +163,16 @@ func parseContentBlock(block map[string]any) (types.ContentBlock, error) {
 			logger.Warn("文本块缺少text字段或不是字符串",
 				logger.String("text_value", fmt.Sprintf("%v", block["text"])),
 				logger.String("text_type", fmt.Sprintf("%T", block["text"])))
+		}
+
+	case "thinking":
+		// 处理 thinking 内容块
+		if thinking, ok := block["thinking"].(string); ok {
+			contentBlock.Thinking = &thinking
+		} else {
+			logger.Warn("thinking块缺少thinking字段或不是字符串",
+				logger.String("thinking_value", fmt.Sprintf("%v", block["thinking"])),
+				logger.String("thinking_type", fmt.Sprintf("%T", block["thinking"])))
 		}
 
 	case "image":
