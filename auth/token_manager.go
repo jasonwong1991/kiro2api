@@ -2119,3 +2119,160 @@ func (tm *TokenManager) Close() {
 		tm.proxyPool.Stop()
 	}
 }
+
+// AddToken 添加新 token（自动保存）
+func (tm *TokenManager) AddToken(config AuthConfig) error {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	// 检查是否已存在相同的 refresh_token
+	for _, existing := range tm.configs {
+		if existing.RefreshToken == config.RefreshToken {
+			return fmt.Errorf("该 refresh_token 已存在")
+		}
+	}
+
+	// 添加到配置列表
+	tm.configs = append(tm.configs, config)
+
+	// 重新生成配置顺序
+	tm.configOrder = generateConfigOrder(tm.configs)
+
+	logger.Info("添加新 token",
+		logger.String("auth_type", config.AuthType),
+		logger.Int("total_count", len(tm.configs)))
+
+	// 同步配置文件
+	configPath := tm.configPath
+	if configPath == "" {
+		configPath = DefaultConfigPath
+	}
+	if err := SaveConfigToFile(tm.configs, configPath); err != nil {
+		logger.Warn("同步配置文件失败", logger.Err(err))
+	}
+
+	return nil
+}
+
+// AddTokenWithoutSave 添加新 token（不保存，用于批量导入）
+// 返回是否为重复 token
+func (tm *TokenManager) AddTokenWithoutSave(config AuthConfig) error {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	// 检查是否已存在相同的 refresh_token
+	for _, existing := range tm.configs {
+		if existing.RefreshToken == config.RefreshToken {
+			return fmt.Errorf("重复的 refresh_token")
+		}
+	}
+
+	// 添加到配置列表
+	tm.configs = append(tm.configs, config)
+
+	// 重新生成配置顺序
+	tm.configOrder = generateConfigOrder(tm.configs)
+
+	return nil
+}
+
+// SaveConfig 保存配置到文件
+func (tm *TokenManager) SaveConfig() error {
+	tm.mutex.RLock()
+	configs := make([]AuthConfig, len(tm.configs))
+	copy(configs, tm.configs)
+	configPath := tm.configPath
+	tm.mutex.RUnlock()
+
+	if configPath == "" {
+		configPath = DefaultConfigPath
+	}
+
+	return SaveConfigToFile(configs, configPath)
+}
+
+// UpdateToken 更新 token
+func (tm *TokenManager) UpdateToken(index int, authType, refreshToken, clientID, clientSecret string, disabled *bool) error {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	if index < 0 || index >= len(tm.configs) {
+		return fmt.Errorf("索引超出范围: %d", index)
+	}
+
+	// 更新字段（只更新非空值）
+	if authType != "" {
+		tm.configs[index].AuthType = authType
+	}
+	if refreshToken != "" {
+		tm.configs[index].RefreshToken = refreshToken
+	}
+	if clientID != "" {
+		tm.configs[index].ClientID = clientID
+	}
+	if clientSecret != "" {
+		tm.configs[index].ClientSecret = clientSecret
+	}
+	if disabled != nil {
+		tm.configs[index].Disabled = *disabled
+	}
+
+	logger.Info("更新 token",
+		logger.Int("index", index),
+		logger.String("auth_type", tm.configs[index].AuthType))
+
+	// 同步配置文件
+	configPath := tm.configPath
+	if configPath == "" {
+		configPath = DefaultConfigPath
+	}
+	if err := SaveConfigToFile(tm.configs, configPath); err != nil {
+		logger.Warn("同步配置文件失败", logger.Err(err))
+	}
+
+	return nil
+}
+
+// GetProxies 获取代理列表
+func (tm *TokenManager) GetProxies() []map[string]interface{} {
+	tm.mutex.RLock()
+	defer tm.mutex.RUnlock()
+
+	if tm.proxyPool == nil {
+		return []map[string]interface{}{}
+	}
+
+	return tm.proxyPool.GetProxyList()
+}
+
+// AddProxy 添加代理
+func (tm *TokenManager) AddProxy(proxyURL string) error {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	// 如果代理池不存在，创建一个
+	if tm.proxyPool == nil {
+		var err error
+		tm.proxyPool, err = NewProxyPoolManager([]string{proxyURL})
+		if err != nil {
+			return fmt.Errorf("创建代理池失败: %w", err)
+		}
+		logger.Info("创建代理池并添加代理", logger.String("proxy_url", proxyURL))
+		return nil
+	}
+
+	// 添加到现有代理池
+	return tm.proxyPool.AddProxy(proxyURL)
+}
+
+// RemoveProxy 删除代理
+func (tm *TokenManager) RemoveProxy(index int) error {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	if tm.proxyPool == nil {
+		return fmt.Errorf("代理池未初始化")
+	}
+
+	return tm.proxyPool.RemoveProxy(index)
+}

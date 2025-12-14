@@ -23,7 +23,11 @@ const (
 	AuthMethodIdC    = "IdC"
 )
 
+// DefaultConfigPath 默认配置文件路径
+const DefaultConfigPath = "tokens.json"
+
 // loadConfigs 从环境变量加载配置
+// 允许空配置，服务仍可启动（通过 WebUI 配置）
 func loadConfigs() ([]AuthConfig, error) {
 	// 检测并警告弃用的环境变量
 	deprecatedVars := []string{
@@ -46,11 +50,27 @@ func loadConfigs() ([]AuthConfig, error) {
 	// 只支持KIRO_AUTH_TOKEN的JSON格式（支持文件路径或JSON字符串）
 	jsonData := os.Getenv("KIRO_AUTH_TOKEN")
 	if jsonData == "" {
-		return nil, fmt.Errorf("未找到KIRO_AUTH_TOKEN环境变量\n" +
-			"请设置: KIRO_AUTH_TOKEN='[{\"auth\":\"Social\",\"refreshToken\":\"your_token\"}]'\n" +
-			"或设置为配置文件路径: KIRO_AUTH_TOKEN=/path/to/config.json\n" +
-			"支持的认证方式: Social, IdC\n" +
-			"详细配置请参考: .env.example")
+		// 尝试从默认配置文件加载
+		if fileInfo, err := os.Stat(DefaultConfigPath); err == nil && !fileInfo.IsDir() {
+			content, err := os.ReadFile(DefaultConfigPath)
+			if err != nil {
+				logger.Warn("读取默认配置文件失败", logger.Err(err))
+				return []AuthConfig{}, nil
+			}
+			configs, err := parseJSONConfig(string(content))
+			if err != nil {
+				logger.Warn("解析默认配置文件失败", logger.Err(err))
+				return []AuthConfig{}, nil
+			}
+			validConfigs := processConfigs(configs)
+			logger.Info("从默认配置文件加载认证配置",
+				logger.String("文件路径", DefaultConfigPath),
+				logger.Int("有效配置数", len(validConfigs)))
+			return validConfigs, nil
+		}
+		// 允许空配置启动，可通过 WebUI 配置
+		logger.Info("未配置 KIRO_AUTH_TOKEN，服务将以空配置启动，可通过 WebUI 添加 Token")
+		return []AuthConfig{}, nil
 	}
 
 	// 优先尝试从文件加载，失败后再作为JSON字符串处理
@@ -78,15 +98,14 @@ func loadConfigs() ([]AuthConfig, error) {
 	}
 
 	if len(configs) == 0 {
-		return nil, fmt.Errorf("KIRO_AUTH_TOKEN配置为空，请至少提供一个有效的认证配置")
+		logger.Info("KIRO_AUTH_TOKEN 配置为空，可通过 WebUI 添加 Token")
+		return []AuthConfig{}, nil
 	}
 
 	validConfigs := processConfigs(configs)
 	if len(validConfigs) == 0 {
-		return nil, fmt.Errorf("没有有效的认证配置\n" +
-			"请检查: \n" +
-			"1. Social认证需要refreshToken字段\n" +
-			"2. IdC认证需要refreshToken、clientId、clientSecret字段")
+		logger.Warn("没有有效的认证配置，可通过 WebUI 添加 Token")
+		return []AuthConfig{}, nil
 	}
 
 	logger.Info("成功加载认证配置",

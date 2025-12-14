@@ -10,6 +10,12 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// DefaultAdminToken 默认管理员 Token（首次使用时应修改）
+const DefaultAdminToken = "changeme"
+
+// DefaultClientToken 默认客户端 Token（首次使用时应修改）
+const DefaultClientToken = "changeme"
+
 func main() {
 	// 自动加载.env文件
 	if err := godotenv.Load(); err != nil {
@@ -26,6 +32,7 @@ func main() {
 		logger.String("config_file", os.Getenv("LOG_FILE")))
 
 	// 🚀 创建AuthService实例（使用依赖注入）
+	// 允许空配置启动，可通过 WebUI 添加 Token
 	logger.Info("正在创建AuthService...")
 	authService, err := auth.NewAuthService()
 	if err != nil {
@@ -43,14 +50,25 @@ func main() {
 		port = envPort
 	}
 
-	// 从环境变量获取客户端认证token（必需，无默认值）
+	// 从环境变量获取客户端认证token（提供默认值，但会警告）
 	clientToken := os.Getenv("KIRO_CLIENT_TOKEN")
 	if clientToken == "" {
-		logger.Error("致命错误: 未设置 KIRO_CLIENT_TOKEN 环境变量")
-		logger.Error("请在 .env 文件中设置强密码，例如: KIRO_CLIENT_TOKEN=your-secure-random-password")
-		logger.Error("安全提示: 请使用至少32字符的随机字符串")
-		os.Exit(1)
+		clientToken = DefaultClientToken
+		logger.Warn("⚠️  KIRO_CLIENT_TOKEN 未设置，使用默认值 'changeme'")
+		logger.Warn("⚠️  请尽快在 .env 文件中设置强密码: KIRO_CLIENT_TOKEN=your-secure-random-password")
 	}
 
-	server.StartServer(port, clientToken, authService)
+	// 从环境变量获取管理员token（提供默认值，但会警告）
+	adminToken := os.Getenv("KIRO_ADMIN_TOKEN")
+	if adminToken == "" {
+		adminToken = DefaultAdminToken
+		logger.Warn("⚠️  KIRO_ADMIN_TOKEN 未设置，使用默认值 'changeme'")
+		logger.Warn("⚠️  请尽快在 .env 文件中设置强密码: KIRO_ADMIN_TOKEN=your-secure-admin-password")
+	}
+
+	// 检查是否使用默认密码
+	isDefaultClientToken := clientToken == DefaultClientToken
+	isDefaultAdminToken := adminToken == DefaultAdminToken
+
+	server.StartServer(port, clientToken, adminToken, isDefaultClientToken, isDefaultAdminToken, authService)
 }

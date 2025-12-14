@@ -536,6 +536,114 @@ func (pm *ProxyPoolManager) ResetTokenProxy(tokenIndex string) {
 	}
 }
 
+// GetProxyList 获取代理列表（用于 API 展示）
+func (pm *ProxyPoolManager) GetProxyList() []map[string]interface{} {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	result := make([]map[string]interface{}, 0, len(pm.proxies))
+	for i, proxy := range pm.proxies {
+		result = append(result, map[string]interface{}{
+			"index":          i,
+			"url":            maskProxyURL(proxy.URL),
+			"healthy":        proxy.Healthy,
+			"failure_count":  proxy.FailureCount,
+			"assigned_count": proxy.AssignedCount,
+			"last_check":     proxy.LastCheck,
+		})
+	}
+	return result
+}
+
+// AddProxy 添加代理
+func (pm *ProxyPoolManager) AddProxy(proxyURL string) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	// 验证代理 URL 格式
+	if _, err := url.Parse(proxyURL); err != nil {
+		return fmt.Errorf("无效的代理 URL: %w", err)
+	}
+
+	// 检查是否已存在
+	for _, proxy := range pm.proxies {
+		if proxy.URL == proxyURL {
+			return fmt.Errorf("代理已存在")
+		}
+	}
+
+	// 创建代理客户端
+	client, err := pm.createProxyClient(proxyURL)
+	if err != nil {
+		return fmt.Errorf("创建代理客户端失败: %w", err)
+	}
+
+	// 添加代理
+	pm.proxies = append(pm.proxies, &ProxyInfo{
+		URL:          proxyURL,
+		Healthy:      true,
+		LastCheck:    time.Now(),
+		FailureCount: 0,
+	})
+	pm.proxyClients[proxyURL] = client
+
+	logger.Info("添加代理",
+		logger.String("proxy_url", proxyURL),
+		logger.Int("total_count", len(pm.proxies)))
+
+	return nil
+}
+
+// RemoveProxy 删除代理
+func (pm *ProxyPoolManager) RemoveProxy(index int) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	if index < 0 || index >= len(pm.proxies) {
+		return fmt.Errorf("索引超出范围: %d", index)
+	}
+
+	proxyURL := pm.proxies[index].URL
+
+	// 删除代理客户端
+	delete(pm.proxyClients, proxyURL)
+
+	// 删除代理
+	pm.proxies = append(pm.proxies[:index], pm.proxies[index+1:]...)
+
+	// 清理使用该代理的 token 绑定
+	for tokenIndex, url := range pm.tokenProxyMap {
+		if url == proxyURL {
+			delete(pm.tokenProxyMap, tokenIndex)
+		}
+	}
+
+	logger.Info("删除代理",
+		logger.Int("index", index),
+		logger.Int("remaining_count", len(pm.proxies)))
+
+	return nil
+}
+
+// maskProxyURL 遮蔽代理 URL 中的敏感信息
+func maskProxyURL(proxyURL string) string {
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return "****"
+	}
+
+	// 遮蔽用户名和密码
+	if parsed.User != nil {
+		username := parsed.User.Username()
+		if len(username) > 2 {
+			username = username[:2] + "****"
+		}
+		parsed.User = url.User(username)
+	}
+
+	return parsed.String()
+}
+
 // 辅助函数：从环境变量获取配置
 
 func getHealthCheckURL() string {

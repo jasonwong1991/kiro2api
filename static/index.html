@@ -7,87 +7,353 @@
     <link rel="stylesheet" href="/static/css/dashboard.css">
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🔐 KIRO Token Dashboard</h1>
-            <p>实时监控Token池状态和使用情况</p>
-        </div>
-
-        <!-- 管理员认证区域 -->
-        <div class="admin-auth-section">
-            <div class="auth-input-group">
-                <input type="password" id="adminToken" placeholder="输入管理员 Token 以启用管理功能" class="admin-token-input">
-                <button class="auth-btn" id="authBtn">🔓 启用管理</button>
-                <button class="auth-btn logout-btn" id="logoutBtn" style="display: none;">🔒 退出管理</button>
+    <!-- 登录页面 -->
+    <div id="loginPage" class="login-page">
+        <div class="login-container">
+            <div class="login-header">
+                <h1>🔐 KIRO Token Dashboard</h1>
+                <p>请输入管理员密码登录</p>
             </div>
-            <div class="auth-status" id="authStatus"></div>
-        </div>
-
-        <div class="controls">
-            <button class="refresh-btn">
-                🔄 手动刷新
-            </button>
-            <div class="auto-refresh">
-                <span>自动刷新</span>
-                <div class="switch"></div>
-            </div>
-        </div>
-
-        <!-- 管理操作区域 -->
-        <div class="admin-actions" id="adminActions" style="display: none;">
-            <button class="action-btn export-btn" id="exportAllBtn">
-                📥 导出全部配置
-            </button>
-            <button class="action-btn refresh-btn" id="refreshAllBtn">
-                🔄 刷新全部账号状态
-            </button>
-            <button class="action-btn delete-invalid-btn" id="deleteInvalidBtn">
-                🗑️ 批量删除失效Token
-            </button>
-        </div>
-        
-        <div class="status-bar">
-            <div class="status-item">
-                <span class="status-label">总Token数</span>
-                <span class="status-value" id="totalTokens">-</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">可用Token</span>
-                <span class="status-value" id="activeTokens">-</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">最后更新</span>
-                <span class="status-value" id="lastUpdate">-</span>
-            </div>
-        </div>
-        
-        <div class="main-card">
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>用户邮箱</th>
-                            <th>Token预览</th>
-                            <th>认证方式</th>
-                            <th>剩余次数</th>
-                            <th>重置时间</th>
-                            <th>最后使用</th>
-                            <th>状态</th>
-                            <th class="admin-only" style="display: none;">操作</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tokenTableBody">
-                        <tr>
-                            <td colspan="8" class="loading">
-                                <div class="spinner"></div>
-                                正在加载Token数据...
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
+            <div class="login-form">
+                <input type="password" id="loginToken" placeholder="管理员密码" class="login-input" autofocus>
+                <button class="login-btn" id="loginBtn">🔓 登录</button>
+                <div class="login-status" id="loginStatus"></div>
             </div>
         </div>
     </div>
+
+    <!-- 主页面（登录后显示） -->
+    <div id="mainPage" class="container" style="display: none;">
+        <div class="header">
+            <h1>🔐 KIRO Token Dashboard</h1>
+            <p>实时监控Token池状态和使用情况</p>
+            <button class="logout-btn-header" id="headerLogoutBtn">🔒 退出登录</button>
+        </div>
+
+        <!-- 安全警告区域 -->
+        <div class="security-warning" id="securityWarning" style="display: none;">
+            <div class="warning-icon">⚠️</div>
+            <div class="warning-content">
+                <strong>安全警告</strong>
+                <p id="warningMessage">您正在使用默认密码，请尽快修改以确保安全。</p>
+            </div>
+        </div>
+
+        <!-- 导航标签 -->
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-tab="tokens">📊 Token 管理</button>
+            <button class="nav-tab" data-tab="proxies">🌐 代理管理</button>
+            <button class="nav-tab" data-tab="settings">⚙️ 系统设置</button>
+        </div>
+
+        <!-- Token 管理页面 -->
+        <div id="tokensTab" class="tab-content active">
+            <div class="controls">
+                <button class="refresh-btn" id="refreshTokensBtn">
+                    🔄 刷新数据
+                </button>
+                <button class="action-btn add-btn" id="addTokenBtn">
+                    ➕ 添加 Token
+                </button>
+                <div class="auto-refresh">
+                    <span>自动刷新</span>
+                    <div class="switch" id="autoRefreshSwitch"></div>
+                </div>
+            </div>
+
+            <div class="admin-actions">
+                <button class="action-btn export-btn" id="exportAllBtn">
+                    📥 导出全部配置
+                </button>
+                <button class="action-btn refresh-btn" id="refreshAllBtn">
+                    🔄 刷新全部账号状态
+                </button>
+                <button class="action-btn delete-invalid-btn" id="deleteInvalidBtn">
+                    🗑️ 批量删除失效Token
+                </button>
+            </div>
+
+            <div class="status-bar">
+                <div class="status-item">
+                    <span class="status-label">总Token数</span>
+                    <span class="status-value" id="totalTokens">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">可用Token</span>
+                    <span class="status-value" id="activeTokens">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">最后更新</span>
+                    <span class="status-value" id="lastUpdate">-</span>
+                </div>
+            </div>
+
+            <div class="main-card">
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>索引</th>
+                                <th>Token预览</th>
+                                <th>认证方式</th>
+                                <th>剩余次数</th>
+                                <th>重置时间</th>
+                                <th>最后使用</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tokenTableBody">
+                            <tr>
+                                <td colspan="8" class="loading">
+                                    <div class="spinner"></div>
+                                    正在加载Token数据...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 代理管理页面 -->
+        <div id="proxiesTab" class="tab-content">
+            <div class="controls">
+                <button class="refresh-btn" id="refreshProxiesBtn">
+                    🔄 刷新数据
+                </button>
+                <button class="action-btn add-btn" id="addProxyBtn">
+                    ➕ 添加代理
+                </button>
+            </div>
+
+            <div class="main-card">
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>索引</th>
+                                <th>代理地址</th>
+                                <th>健康状态</th>
+                                <th>失败次数</th>
+                                <th>分配账号数</th>
+                                <th>最后检查</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="proxyTableBody">
+                            <tr>
+                                <td colspan="7" class="loading">
+                                    <div class="spinner"></div>
+                                    正在加载代理数据...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 系统设置页面 -->
+        <div id="settingsTab" class="tab-content">
+            <div class="main-card kiro-settings-card">
+                <h3 class="settings-title">🔒 安全设置</h3>
+                <p class="settings-desc">修改管理员密码和客户端密码以确保系统安全。</p>
+
+                <!-- 当前状态 -->
+                <div class="settings-section">
+                    <h4 class="section-title">当前状态</h4>
+                    <div class="setting-item">
+                        <span class="setting-label">管理员密码</span>
+                        <span id="adminTokenStatus" class="status-badge status-active">已配置</span>
+                    </div>
+                    <div class="setting-item">
+                        <span class="setting-label">客户端密码</span>
+                        <span id="clientTokenStatus" class="status-badge status-active">已配置</span>
+                    </div>
+                </div>
+
+                <!-- 修改管理员密码 -->
+                <div class="settings-section">
+                    <h4 class="section-title">修改管理员密码</h4>
+                    <p class="section-desc">管理员密码用于登录 Dashboard</p>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">新密码</label>
+                            <input type="password" id="newAdminPassword" class="form-input" placeholder="输入新的管理员密码">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">确认密码</label>
+                            <input type="password" id="confirmAdminPassword" class="form-input" placeholder="再次输入新密码">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="dashboard.changeAdminPassword()">保存管理员密码</button>
+                </div>
+
+                <!-- 修改客户端密码 -->
+                <div class="settings-section">
+                    <h4 class="section-title">修改客户端密码</h4>
+                    <p class="section-desc">客户端密码用于 API 调用认证</p>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">新密码</label>
+                            <input type="password" id="newClientPassword" class="form-input" placeholder="输入新的客户端密码">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">确认密码</label>
+                            <input type="password" id="confirmClientPassword" class="form-input" placeholder="再次输入新密码">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="dashboard.changeClientPassword()">保存客户端密码</button>
+                </div>
+
+                <!-- 提示信息 -->
+                <div class="settings-info">
+                    <p class="info-title">💡 提示</p>
+                    <ul class="info-list">
+                        <li>密码修改后会同步到 <code>.env</code> 文件</li>
+                        <li>修改管理员密码后需要重新登录</li>
+                        <li>建议使用至少 16 位的强密码</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加 Token 弹窗 -->
+    <div id="addTokenModal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3>➕ 添加 Token</h3>
+                <button class="modal-close" onclick="dashboard.closeModal('addTokenModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- 添加方式切换 -->
+                <div class="add-mode-tabs">
+                    <button class="add-mode-tab active" data-mode="single" onclick="dashboard.switchAddMode('single')">单个添加</button>
+                    <button class="add-mode-tab" data-mode="import" onclick="dashboard.switchAddMode('import')">批量导入</button>
+                </div>
+
+                <!-- 单个添加模式 -->
+                <div id="singleAddMode" class="add-mode-content active">
+                    <div class="form-group">
+                        <label>认证方式</label>
+                        <select id="newTokenAuthType" class="form-input">
+                            <option value="Social">Social (AWS Builder ID)</option>
+                            <option value="IdC">IdC (IAM Identity Center)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Refresh Token <span class="required">*</span></label>
+                        <textarea id="newTokenRefreshToken" class="form-input form-textarea" placeholder="粘贴 Refresh Token"></textarea>
+                    </div>
+                    <div id="idcFields" style="display: none;">
+                        <div class="form-group">
+                            <label>Client ID <span class="required">*</span></label>
+                            <input type="text" id="newTokenClientId" class="form-input" placeholder="IdC Client ID">
+                        </div>
+                        <div class="form-group">
+                            <label>Client Secret <span class="required">*</span></label>
+                            <input type="password" id="newTokenClientSecret" class="form-input" placeholder="IdC Client Secret">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 批量导入模式 -->
+                <div id="importMode" class="add-mode-content">
+                    <div class="form-group">
+                        <label>导入方式</label>
+                        <div class="import-options">
+                            <label class="radio-label">
+                                <input type="radio" name="importType" value="text" checked onchange="dashboard.switchImportType('text')">
+                                <span>粘贴 JSON</span>
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="importType" value="file" onchange="dashboard.switchImportType('file')">
+                                <span>上传文件</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- JSON 文本输入 -->
+                    <div id="importTextArea" class="form-group">
+                        <label>JSON 内容 <span class="required">*</span></label>
+                        <textarea id="importJsonText" class="form-input form-textarea-large" placeholder='粘贴 JSON 数组，格式如：
+[
+  {"auth": "Social", "refreshToken": "xxx"},
+  {"auth": "IdC", "refreshToken": "xxx", "clientId": "xxx", "clientSecret": "xxx"}
+]'></textarea>
+                    </div>
+
+                    <!-- 文件上传 -->
+                    <div id="importFileArea" class="form-group" style="display: none;">
+                        <label>选择 JSON 文件 <span class="required">*</span></label>
+                        <div class="file-upload-area" id="fileDropZone">
+                            <input type="file" id="importFile" accept=".json" style="display: none;" onchange="dashboard.handleFileSelect(event)">
+                            <div class="file-upload-content">
+                                <span class="file-upload-icon">📁</span>
+                                <p>点击选择文件或拖拽文件到此处</p>
+                                <p class="file-upload-hint">支持 .json 文件，最大 100MB</p>
+                            </div>
+                            <div class="file-selected" id="fileSelected" style="display: none;">
+                                <span class="file-name" id="selectedFileName"></span>
+                                <button class="file-remove" onclick="dashboard.clearSelectedFile()">✕</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 导入进度 -->
+                    <div id="importProgress" class="import-progress" style="display: none;">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progressFill"></div>
+                        </div>
+                        <p class="progress-text" id="progressText">准备导入...</p>
+                    </div>
+
+                    <!-- 导入结果 -->
+                    <div id="importResult" class="import-result" style="display: none;">
+                        <div class="result-summary">
+                            <span class="result-success">✓ 成功: <span id="resultSuccess">0</span></span>
+                            <span class="result-skipped">⊘ 跳过: <span id="resultSkipped">0</span></span>
+                            <span class="result-failed">✗ 失败: <span id="resultFailed">0</span></span>
+                        </div>
+                        <div class="result-errors" id="resultErrors" style="display: none;">
+                            <p>错误详情：</p>
+                            <ul id="errorList"></ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="dashboard.closeModal('addTokenModal')">取消</button>
+                <button class="btn btn-primary" id="addTokenSubmitBtn" onclick="dashboard.submitAddToken()">添加</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加代理弹窗 -->
+    <div id="addProxyModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>➕ 添加代理</h3>
+                <button class="modal-close" onclick="dashboard.closeModal('addProxyModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>代理地址 <span class="required">*</span></label>
+                    <input type="text" id="newProxyUrl" class="form-input" placeholder="http://user:pass@ip:port">
+                    <p class="form-hint">支持 HTTP/HTTPS 代理，格式：http://[用户名:密码@]IP:端口</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="dashboard.closeModal('addProxyModal')">取消</button>
+                <button class="btn btn-primary" onclick="dashboard.submitAddProxy()">添加</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通知提示 -->
+    <div id="notification" class="notification"></div>
 
     <script src="/static/js/dashboard.js"></script>
 </body>

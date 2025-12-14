@@ -18,8 +18,34 @@ import (
 
 // 移除全局httpClient，使用utils包中的共享客户端
 
+// ServerConfig 服务器配置
+type ServerConfig struct {
+	Port                 string
+	ClientToken          string
+	AdminToken           string
+	IsDefaultClientToken bool
+	IsDefaultAdminToken  bool
+}
+
+// serverConfig 全局服务器配置（供 API 查询）
+var serverConfig *ServerConfig
+
+// GetServerConfig 获取服务器配置
+func GetServerConfig() *ServerConfig {
+	return serverConfig
+}
+
 // StartServer 启动HTTP代理服务器
-func StartServer(port string, authToken string, authService *auth.AuthService) {
+func StartServer(port string, clientToken string, adminToken string, isDefaultClientToken bool, isDefaultAdminToken bool, authService *auth.AuthService) {
+	// 保存服务器配置
+	serverConfig = &ServerConfig{
+		Port:                 port,
+		ClientToken:          clientToken,
+		AdminToken:           adminToken,
+		IsDefaultClientToken: isDefaultClientToken,
+		IsDefaultAdminToken:  isDefaultAdminToken,
+	}
+
 	// 设置 gin 模式
 	ginMode := os.Getenv("GIN_MODE")
 	if ginMode == "" {
@@ -41,7 +67,7 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 		c.Next()
 	})
 	// 只对 /v1 开头的端点进行认证（排除管理 API）
-	r.Use(PathBasedAuthMiddleware(authToken, []string{"/v1/messages", "/v1/chat", "/v1/models"}))
+	r.Use(PathBasedAuthMiddleware(clientToken, []string{"/v1/messages", "/v1/chat", "/v1/models"}))
 
 	// 静态资源服务 - 前后端完全分离
 	r.Static("/static", "./static")
@@ -52,14 +78,9 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 	// API端点 - 纯数据服务
 	r.GET("/api/tokens", handleTokenPoolAPI)
 
-	// 注册管理 API 路由
-	adminToken := os.Getenv("KIRO_ADMIN_TOKEN")
-	if adminToken != "" {
-		RegisterAdminRoutes(r, authService, adminToken)
-		logger.Info("管理 API 已启用", logger.String("admin_token", "***"))
-	} else {
-		logger.Warn("管理 API 未启用：未设置 KIRO_ADMIN_TOKEN 环境变量")
-	}
+	// 注册管理 API 路由（始终启用，使用默认或配置的 adminToken）
+	RegisterAdminRoutes(r, authService, adminToken, isDefaultAdminToken)
+	logger.Info("管理 API 已启用", logger.String("admin_token", "***"))
 
 	// GET /v1/models 端点
 	r.GET("/v1/models", func(c *gin.Context) {

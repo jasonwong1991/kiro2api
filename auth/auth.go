@@ -13,17 +13,23 @@ type AuthService struct {
 }
 
 // NewAuthService 创建新的认证服务（推荐使用此方法而不是全局函数）
+// 允许空配置启动，可通过 WebUI 添加 Token
 func NewAuthService() (*AuthService, error) {
 	logger.Info("创建AuthService实例")
 
-	// 加载配置
+	// 加载配置（允许空配置）
 	configs, err := loadConfigs()
 	if err != nil {
 		return nil, fmt.Errorf("加载配置失败: %w", err)
 	}
 
+	// 允许空配置启动
 	if len(configs) == 0 {
-		return nil, fmt.Errorf("未找到有效的token配置")
+		logger.Info("AuthService 以空配置启动，可通过 WebUI 添加 Token")
+		return &AuthService{
+			tokenManager: NewTokenManager(configs),
+			configs:      configs,
+		}, nil
 	}
 
 	// 创建token管理器
