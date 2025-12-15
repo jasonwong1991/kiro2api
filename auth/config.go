@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"kiro2api/logger"
 )
@@ -73,18 +74,34 @@ func loadConfigs() ([]AuthConfig, error) {
 		return []AuthConfig{}, nil
 	}
 
-	// 优先尝试从文件加载，失败后再作为JSON字符串处理
+	// 判断是文件路径还是 JSON 字符串
 	var configData string
-	if fileInfo, err := os.Stat(jsonData); err == nil && !fileInfo.IsDir() {
-		// 是文件，读取文件内容
+	trimmed := strings.TrimSpace(jsonData)
+	isFilePath := len(trimmed) > 0 && trimmed[0] != '[' && trimmed[0] != '{'
+
+	if isFilePath {
+		fileInfo, err := os.Stat(jsonData)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// 文件不存在，返回空配置（WebUI 导入时会自动创建）
+				logger.Info("配置文件不存在，服务将以空配置启动，可通过 WebUI 添加 Token",
+					logger.String("file_path", jsonData))
+				return []AuthConfig{}, nil
+			}
+			return nil, fmt.Errorf("检查配置文件失败: %w\n文件路径: %s", err, jsonData)
+		}
+		if fileInfo.IsDir() {
+			return nil, fmt.Errorf("KIRO_AUTH_TOKEN 指向目录而非文件: %s", jsonData)
+		}
+		// 读取文件内容
 		content, err := os.ReadFile(jsonData)
 		if err != nil {
-			return nil, fmt.Errorf("读取配置文件失败: %w\n配置文件路径: %s", err, jsonData)
+			return nil, fmt.Errorf("读取配置文件失败: %w\n文件路径: %s", err, jsonData)
 		}
 		configData = string(content)
-		logger.Info("从文件加载认证配置", logger.String("文件路径", jsonData))
+		logger.Info("从文件加载认证配置", logger.String("file_path", jsonData))
 	} else {
-		// 不是文件或文件不存在，作为JSON字符串处理
+		// JSON 字符串
 		configData = jsonData
 		logger.Debug("从环境变量加载JSON配置")
 	}

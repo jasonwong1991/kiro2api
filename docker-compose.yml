@@ -82,9 +82,9 @@ services:
       # AWS SSO 缓存目录（持久化设备指纹）
       - aws_sso_cache:/home/appuser/.aws/sso/cache
 
-      # Token 配置文件（只读挂载）
-      # 请确保 tokens.json 文件存在且格式正确
-      - ./tokens.json:/app/tokens.json:ro
+      # Token 配置文件（可写，支持 WebUI 导入持久化）
+      # 文件不存在时服务会以空配置启动，通过 WebUI 导入后自动创建
+      - ./tokens.json:/app/tokens.json
 
       # 代理池配置文件（可选，只读挂载）
       # 如果使用文件配置代理池，取消注释以下行
