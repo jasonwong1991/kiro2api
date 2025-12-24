@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -129,7 +130,11 @@ func (h *AdminHandlers) HandleDeleteToken(c *gin.Context) {
 	}
 
 	if err := tm.RemoveToken(index); err != nil {
-		respondError(c, http.StatusBadRequest, "%v", err)
+		if errors.Is(err, auth.ErrConfigPersistence) {
+			respondError(c, http.StatusInternalServerError, "%v", err)
+		} else {
+			respondError(c, http.StatusBadRequest, "%v", err)
+		}
 		return
 	}
 
@@ -506,6 +511,12 @@ func (h *AdminHandlers) HandleImportTokens(c *gin.Context) {
 	if result.Success > 0 {
 		if err := tm.SaveConfig(); err != nil {
 			logger.Warn("保存配置文件失败", logger.Err(err))
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("保存配置文件失败: %v", err),
+				"data":    result,
+			})
+			return
 		}
 	}
 
@@ -571,7 +582,11 @@ func (h *AdminHandlers) HandleAddToken(c *gin.Context) {
 
 	// 添加到 TokenManager
 	if err := tm.AddToken(config); err != nil {
-		respondError(c, http.StatusInternalServerError, "添加 token 失败: %v", err)
+		if errors.Is(err, auth.ErrConfigPersistence) {
+			respondError(c, http.StatusInternalServerError, "添加 token 失败: %v", err)
+		} else {
+			respondError(c, http.StatusBadRequest, "添加 token 失败: %v", err)
+		}
 		return
 	}
 
@@ -618,7 +633,11 @@ func (h *AdminHandlers) HandleUpdateToken(c *gin.Context) {
 
 	// 更新 token
 	if err := tm.UpdateToken(index, req.AuthType, req.RefreshToken, req.ClientID, req.ClientSecret, req.Disabled); err != nil {
-		respondError(c, http.StatusBadRequest, "%v", err)
+		if errors.Is(err, auth.ErrConfigPersistence) {
+			respondError(c, http.StatusInternalServerError, "%v", err)
+		} else {
+			respondError(c, http.StatusBadRequest, "%v", err)
+		}
 		return
 	}
 

@@ -15,8 +15,8 @@ import (
 type SelectionStrategy string
 
 const (
-	StrategySequential SelectionStrategy = "sequential"   // 顺序选择
-	StrategyRandom     SelectionStrategy = "random"       // 随机选择
+	StrategySequential SelectionStrategy = "sequential"  // 顺序选择
+	StrategyRandom     SelectionStrategy = "random"      // 随机选择
 	StrategyRoundRobin SelectionStrategy = "round_robin" // 轮询选择
 )
 
@@ -48,8 +48,8 @@ type TokenManager struct {
 	proxyPool *ProxyPoolManager // 代理池（可选）
 
 	// 定时刷新相关字段
-	refreshTicker *time.Ticker    // 定时器
-	refreshStop   chan bool        // 停止信号
+	refreshTicker *time.Ticker // 定时器
+	refreshStop   chan bool    // 停止信号
 }
 
 // SimpleTokenCache 简化的token缓存（纯数据结构，无锁）
@@ -155,8 +155,8 @@ func getConfigPath() string {
 		return ""
 	}
 
-	// 如果以 [ 开头，说明是 JSON 字符串，不是文件路径
-	if len(authToken) > 0 && authToken[0] == '[' {
+	// 如果是 JSON 字符串，不是文件路径
+	if isLikelyJSONConfigValue(authToken) {
 		return ""
 	}
 
@@ -1383,12 +1383,14 @@ func (tm *TokenManager) RemoveToken(index int) error {
 		logger.Int("index", index),
 		logger.Int("remaining_count", len(tm.configs)))
 
-	// 同步配置文件（如果使用文件配置）
-	if tm.configPath != "" {
-		if err := SaveConfigToFile(tm.configs, tm.configPath); err != nil {
-			logger.Warn("同步配置文件失败", logger.Err(err))
-			// 不返回错误，因为内存中的删除已经成功
-		}
+	// 同步配置文件（即使未显式指定文件路径，也尽量落到默认 tokens.json）
+	configPath := tm.configPath
+	if configPath == "" {
+		configPath = DefaultConfigPath
+	}
+	if err := SaveConfigToFile(tm.configs, configPath); err != nil {
+		logger.Warn("同步配置文件失败", logger.Err(err))
+		return fmt.Errorf("%w: %v", ErrConfigPersistence, err)
 	}
 
 	return nil
@@ -1438,12 +1440,14 @@ func (tm *TokenManager) removeInvalidTokensUnlocked() (int, error) {
 		logger.Int("removed_count", removedCount),
 		logger.Int("remaining_count", len(tm.configs)))
 
-	// 同步配置文件（如果使用文件配置）
-	if tm.configPath != "" {
-		if err := SaveConfigToFile(tm.configs, tm.configPath); err != nil {
-			logger.Warn("同步配置文件失败", logger.Err(err))
-			// 不返回错误，因为内存中的删除已经成功
-		}
+	// 同步配置文件（即使未显式指定文件路径，也尽量落到默认 tokens.json）
+	configPath := tm.configPath
+	if configPath == "" {
+		configPath = DefaultConfigPath
+	}
+	if err := SaveConfigToFile(tm.configs, configPath); err != nil {
+		logger.Warn("同步配置文件失败", logger.Err(err))
+		return removedCount, fmt.Errorf("%w: %v", ErrConfigPersistence, err)
 	}
 
 	return removedCount, nil
@@ -1456,7 +1460,6 @@ func (tm *TokenManager) RemoveInvalidTokens() (int, error) {
 
 	return tm.removeInvalidTokensUnlocked()
 }
-
 
 // ExportTokens 导出 token 配置（支持单个或全部）
 func (tm *TokenManager) ExportTokens(indices []int) ([]AuthConfig, error) {
@@ -1718,9 +1721,9 @@ func (tm *TokenManager) verifyLowBalanceToken(index int) {
 
 // RefreshResult 单个账号刷新结果
 type RefreshResult struct {
-	Index   int    `json:"index"`
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
+	Index   int          `json:"index"`
+	Success bool         `json:"success"`
+	Error   string       `json:"error,omitempty"`
 	Status  *TokenStatus `json:"status,omitempty"`
 }
 
@@ -2007,6 +2010,7 @@ func (tm *TokenManager) getTokenStatusUnlocked(index int) (*TokenStatus, error) 
 
 	return status, nil
 }
+
 // startPeriodicRefresh 定时刷新活跃池中的 token
 func (tm *TokenManager) startPeriodicRefresh() {
 	for {
@@ -2149,6 +2153,7 @@ func (tm *TokenManager) AddToken(config AuthConfig) error {
 	}
 	if err := SaveConfigToFile(tm.configs, configPath); err != nil {
 		logger.Warn("同步配置文件失败", logger.Err(err))
+		return fmt.Errorf("%w: %v", ErrConfigPersistence, err)
 	}
 
 	return nil
@@ -2228,6 +2233,7 @@ func (tm *TokenManager) UpdateToken(index int, authType, refreshToken, clientID,
 	}
 	if err := SaveConfigToFile(tm.configs, configPath); err != nil {
 		logger.Warn("同步配置文件失败", logger.Err(err))
+		return fmt.Errorf("%w: %v", ErrConfigPersistence, err)
 	}
 
 	return nil

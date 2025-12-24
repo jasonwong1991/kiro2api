@@ -65,6 +65,9 @@ LOG_FORMAT=json
 
 **方式2: Docker**
 ```bash
+# 可选：首次运行先创建空文件，避免 Docker 将 tokens.json 误创建为目录
+test -f tokens.json || echo '[]' > tokens.json
+
 docker run -d \
   --name kiro2api \
   -p 8080:8080 \
@@ -74,6 +77,10 @@ docker run -d \
   -e KIRO_ADMIN_TOKEN=your_admin_token \
   your-registry/kiro2api:latest
 ```
+
+> 说明：如果你 bind mount 了一个不存在的 `tokens.json`，Docker 会在宿主机创建同名目录；
+> 本项目会自动将真实配置写入到该目录下的 `tokens.json`（即 `tokens.json/tokens.json`）。
+> 若希望文件固定为 `./tokens.json`（而不是目录），仍建议按上面先创建空文件。
 
 **方式3: Docker Compose**
 ```bash

@@ -56,6 +56,7 @@ WORKDIR /app
 # 从构建阶段复制二进制文件和静态资源
 COPY --from=builder /app/kiro2api .
 COPY --from=builder /app/static ./static
+COPY --from=builder /app/docker-entrypoint.sh /docker-entrypoint.sh
 
 # 创建必要的目录并设置权限
 RUN mkdir -p /home/appuser/.aws/sso/cache && \
@@ -67,5 +68,5 @@ USER appuser
 # 暴露默认端口
 EXPOSE 8080
 
-# 设置默认命令
-CMD ["./kiro2api"]
+# 通过 entrypoint 做启动自愈（处理 tokens.json 目录挂载问题）
+ENTRYPOINT ["/bin/sh", "/docker-entrypoint.sh"]

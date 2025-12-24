@@ -39,5 +39,5 @@ auth.json
 .go*
 *.out
 tokens.json
-
+proxies.txt
 CLAUDE.md

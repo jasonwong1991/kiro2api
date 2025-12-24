@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"kiro2api/logger"
@@ -51,23 +52,28 @@ func loadConfigs() ([]AuthConfig, error) {
 	// 只支持KIRO_AUTH_TOKEN的JSON格式（支持文件路径或JSON字符串）
 	jsonData := os.Getenv("KIRO_AUTH_TOKEN")
 	if jsonData == "" {
-		// 尝试从默认配置文件加载
-		if fileInfo, err := os.Stat(DefaultConfigPath); err == nil && !fileInfo.IsDir() {
-			content, err := os.ReadFile(DefaultConfigPath)
-			if err != nil {
-				logger.Warn("读取默认配置文件失败", logger.Err(err))
+		// 尝试从默认配置文件加载（兼容 tokens.json 被挂载成目录的场景）
+		defaultPath, err := resolveConfigFilePath(DefaultConfigPath)
+		if err != nil {
+			logger.Warn("解析默认配置路径失败", logger.Err(err))
+		} else {
+			content, readErr := os.ReadFile(defaultPath)
+			if readErr == nil {
+				configs, err := parseJSONConfig(string(content))
+				if err != nil {
+					logger.Warn("解析默认配置文件失败", logger.Err(err))
+					return []AuthConfig{}, nil
+				}
+				validConfigs := processConfigs(configs)
+				logger.Info("从默认配置文件加载认证配置",
+					logger.String("file_path", defaultPath),
+					logger.Int("valid_config_count", len(validConfigs)))
+				return validConfigs, nil
+			}
+			if !os.IsNotExist(readErr) {
+				logger.Warn("读取默认配置文件失败", logger.Err(readErr))
 				return []AuthConfig{}, nil
 			}
-			configs, err := parseJSONConfig(string(content))
-			if err != nil {
-				logger.Warn("解析默认配置文件失败", logger.Err(err))
-				return []AuthConfig{}, nil
-			}
-			validConfigs := processConfigs(configs)
-			logger.Info("从默认配置文件加载认证配置",
-				logger.String("文件路径", DefaultConfigPath),
-				logger.Int("有效配置数", len(validConfigs)))
-			return validConfigs, nil
 		}
 		// 允许空配置启动，可通过 WebUI 配置
 		logger.Info("未配置 KIRO_AUTH_TOKEN，服务将以空配置启动，可通过 WebUI 添加 Token")
@@ -76,30 +82,30 @@ func loadConfigs() ([]AuthConfig, error) {
 
 	// 判断是文件路径还是 JSON 字符串
 	var configData string
-	trimmed := strings.TrimSpace(jsonData)
-	isFilePath := len(trimmed) > 0 && trimmed[0] != '[' && trimmed[0] != '{'
+	isFilePath := !isLikelyJSONConfigValue(jsonData)
 
 	if isFilePath {
-		fileInfo, err := os.Stat(jsonData)
+		resolvedPath, err := resolveConfigFilePath(jsonData)
+		if err != nil {
+			return nil, fmt.Errorf("解析配置路径失败: %w\n配置路径: %s", err, jsonData)
+		}
+
+		// 读取文件内容（文件不存在则允许空配置启动）
+		content, err := os.ReadFile(resolvedPath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				// 文件不存在，返回空配置（WebUI 导入时会自动创建）
 				logger.Info("配置文件不存在，服务将以空配置启动，可通过 WebUI 添加 Token",
-					logger.String("file_path", jsonData))
+					logger.String("file_path", resolvedPath),
+					logger.String("config_path", strings.TrimSpace(jsonData)))
 				return []AuthConfig{}, nil
 			}
-			return nil, fmt.Errorf("检查配置文件失败: %w\n文件路径: %s", err, jsonData)
-		}
-		if fileInfo.IsDir() {
-			return nil, fmt.Errorf("KIRO_AUTH_TOKEN 指向目录而非文件: %s", jsonData)
-		}
-		// 读取文件内容
-		content, err := os.ReadFile(jsonData)
-		if err != nil {
-			return nil, fmt.Errorf("读取配置文件失败: %w\n文件路径: %s", err, jsonData)
+			return nil, fmt.Errorf("读取配置文件失败: %w\n文件路径: %s", err, resolvedPath)
 		}
 		configData = string(content)
-		logger.Info("从文件加载认证配置", logger.String("file_path", jsonData))
+		logger.Info("从文件加载认证配置",
+			logger.String("file_path", resolvedPath),
+			logger.String("config_path", strings.TrimSpace(jsonData)))
 	} else {
 		// JSON 字符串
 		configData = jsonData
@@ -194,19 +200,31 @@ func SaveConfigToFile(configs []AuthConfig, filePath string) error {
 		return fmt.Errorf("配置文件路径为空")
 	}
 
+	resolvedPath, err := resolveConfigFilePath(filePath)
+	if err != nil {
+		return fmt.Errorf("解析配置路径失败: %w\n配置路径: %s", err, filePath)
+	}
+
 	// 序列化配置
 	data, err := json.MarshalIndent(configs, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
 
+	// 确保父目录存在（支持目录挂载）
+	parentDir := filepath.Dir(resolvedPath)
+	if err := os.MkdirAll(parentDir, 0700); err != nil {
+		return fmt.Errorf("创建配置目录失败: %w\n目录: %s", err, parentDir)
+	}
+
 	// 写入文件
-	if err := os.WriteFile(filePath, data, 0600); err != nil {
-		return fmt.Errorf("写入配置文件失败: %w", err)
+	if err := os.WriteFile(resolvedPath, data, 0600); err != nil {
+		return fmt.Errorf("写入配置文件失败: %w\n文件路径: %s", err, resolvedPath)
 	}
 
 	logger.Info("配置文件已更新",
-		logger.String("file_path", filePath),
+		logger.String("file_path", resolvedPath),
+		logger.String("config_path", strings.TrimSpace(filePath)),
 		logger.Int("config_count", len(configs)))
 
 	return nil
