@@ -43,9 +43,6 @@ func TestProxyPoolManager_LoadBalance(t *testing.T) {
 	}
 	defer pm.Stop()
 
-	// 跳过预检测（测试模式）
-	pm.SetSkipPreCheck(true)
-
 	// 模拟10个账号分配代理
 	// 期望分配：4、3、3
 	assignments := make(map[string]int) // proxyURL -> count
@@ -95,9 +92,6 @@ func TestProxyPoolManager_SessionPersistence(t *testing.T) {
 	}
 	defer pm.Stop()
 
-	// 跳过预检测（测试模式）
-	pm.SetSkipPreCheck(true)
-
 	tokenIndex := "0"
 
 	// 第一次获取
@@ -132,9 +126,6 @@ func TestProxyPoolManager_Stats(t *testing.T) {
 	}
 	defer pm.Stop()
 
-	// 跳过预检测（测试模式）
-	pm.SetSkipPreCheck(true)
-
 	// 分配一些代理
 	for i := 0; i < 5; i++ {
 		tokenIndex := string(rune('0' + i))
@@ -166,9 +157,6 @@ func TestProxyPoolManager_ResetTokenProxy(t *testing.T) {
 		t.Fatalf("创建代理池失败: %v", err)
 	}
 	defer pm.Stop()
-
-	// 跳过预检测（测试模式）
-	pm.SetSkipPreCheck(true)
 
 	tokenIndex := "0"
 
@@ -262,7 +250,8 @@ func TestIsFilePath(t *testing.T) {
 }
 
 func TestProxyPoolManager_Fallback(t *testing.T) {
-	// 测试所有代理不可用时的降级处理
+	// 测试所有代理都不健康时的回退处理
+	// 当所有代理都不健康时，系统会选择失败次数最少的代理进行尝试
 	proxies := []string{
 		"http://user1:pass1@proxy1.com:8080",
 	}
@@ -273,10 +262,14 @@ func TestProxyPoolManager_Fallback(t *testing.T) {
 	}
 	defer pm.Stop()
 
-	// 不跳过预检测，让代理检测失败
-	// pm.SetSkipPreCheck(false) // 默认就是 false
+	// 手动标记所有代理为不健康
+	pm.mutex.Lock()
+	for _, proxy := range pm.proxies {
+		proxy.Healthy = false
+	}
+	pm.mutex.Unlock()
 
-	// 获取代理，应该降级为直连模式（返回空字符串）
+	// 获取代理，即使不健康也会选择失败次数最少的代理（容错降级）
 	proxyURL, client, err := pm.GetProxyForToken("test")
 
 	// 不应该返回错误
@@ -284,15 +277,15 @@ func TestProxyPoolManager_Fallback(t *testing.T) {
 		t.Errorf("不应该返回错误: %v", err)
 	}
 
-	// 应该返回空字符串（降级为直连）
-	if proxyURL != "" {
-		t.Errorf("期望降级为直连模式（空字符串），实际返回: %s", proxyURL)
+	// 当所有代理都不健康时，会选择失败次数最少的代理
+	if proxyURL == "" {
+		t.Errorf("期望选择失败次数最少的代理，实际返回空字符串")
 	}
 
-	// client 应该为 nil
-	if client != nil {
-		t.Errorf("期望 client 为 nil，实际不为 nil")
+	// client 应该不为 nil
+	if client == nil {
+		t.Errorf("期望 client 不为 nil")
 	}
 
-	t.Log("降级处理测试通过：所有代理不可用时返回空字符串")
+	t.Logf("回退处理测试通过：选择了代理 %s", proxyURL)
 }

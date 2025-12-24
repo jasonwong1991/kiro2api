@@ -35,7 +35,6 @@ type ProxyPoolManager struct {
 	healthCheckInterval time.Duration // 健康检查间隔
 	maxFailures         int           // 最大失败次数（超过则标记为不健康）
 	stopChan            chan struct{} // 停止信号
-	skipPreCheck        bool          // 跳过预检测（仅用于测试）
 }
 
 // NewProxyPoolManager 创建代理池管理器
@@ -97,157 +96,52 @@ func NewProxyPoolManager(proxyURLs []string) (*ProxyPoolManager, error) {
 	return manager, nil
 }
 
-// GetProxyForToken 为token获取代理（延迟分配 + 会话保持 + 预检测）
+// GetProxyForToken 为token获取代理（延迟分配 + 会话保持）
 // 返回值：proxyURL, client, error
 // 如果所有代理都不可用，返回 "", nil, nil（降级为不使用代理）
+// 注意：不在此处做预检测，完全信任后台健康检查结果，避免阻塞主线程
 func (pm *ProxyPoolManager) GetProxyForToken(tokenIndex string) (string, *http.Client, error) {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
-
-	// 记录已尝试的代理，避免重复尝试
-	triedProxies := make(map[string]bool)
 
 	// 检查是否已分配代理（会话保持）
 	if proxyURL, exists := pm.tokenProxyMap[tokenIndex]; exists {
 		// 检查代理是否仍然健康
 		if pm.isProxyHealthy(proxyURL) {
 			client := pm.proxyClients[proxyURL]
-			// 预检测代理可用性
-			if pm.testProxyConnectivity(client) {
-				return proxyURL, client, nil
-			}
-			// 预检测失败，标记并尝试其他代理
-			logger.Warn("代理预检测失败，尝试更换",
-				logger.String("token_index", tokenIndex),
-				logger.String("proxy_url", proxyURL))
-			pm.markProxyFailedByURL(proxyURL)
+			return proxyURL, client, nil
 		}
-		// 代理不健康或预检测失败，需要重新分配
-		triedProxies[proxyURL] = true
+		// 代理不健康，需要重新分配
 		delete(pm.tokenProxyMap, tokenIndex)
 	}
 
-	// 尝试分配新代理，直到找到可用的或全部尝试完毕
-	for {
-		proxyURL := pm.selectProxyForAssignmentExcluding(triedProxies)
-		if proxyURL == "" {
-			// 没有更多代理可尝试，降级为不使用代理
-			logger.Warn("所有代理都不可用，降级为直连模式",
-				logger.String("token_index", tokenIndex),
-				logger.Int("tried_count", len(triedProxies)))
-			return "", nil, nil
-		}
-
-		triedProxies[proxyURL] = true
-		client := pm.proxyClients[proxyURL]
-
-		// 预检测代理可用性
-		if pm.testProxyConnectivity(client) {
-			// 绑定关系
-			pm.tokenProxyMap[tokenIndex] = proxyURL
-
-			// 更新分配计数
-			for _, proxy := range pm.proxies {
-				if proxy.URL == proxyURL {
-					proxy.AssignedCount++
-					break
-				}
-			}
-
-			logger.Debug("分配代理",
-				logger.String("token_index", tokenIndex),
-				logger.String("proxy_url", proxyURL),
-				logger.Int("assigned_count", pm.getAssignedCount(proxyURL)),
-				logger.Int("tried_count", len(triedProxies)))
-
-			return proxyURL, client, nil
-		}
-
-		// 预检测失败，标记并继续尝试下一个
-		logger.Warn("代理预检测失败，尝试下一个",
-			logger.String("proxy_url", proxyURL),
-			logger.Int("tried_count", len(triedProxies)))
-		pm.markProxyFailedByURL(proxyURL)
-	}
-}
-
-// testProxyConnectivity 测试代理连通性
-func (pm *ProxyPoolManager) testProxyConnectivity(client *http.Client) bool {
-	// 测试模式下跳过预检测
-	if pm.skipPreCheck {
-		return true
+	// 选择健康代理
+	proxyURL := pm.selectProxyForAssignment()
+	if proxyURL == "" {
+		logger.Warn("所有代理都不可用，降级为直连模式",
+			logger.String("token_index", tokenIndex))
+		return "", nil, nil
 	}
 
-	if client == nil {
-		return false
-	}
+	client := pm.proxyClients[proxyURL]
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// 绑定关系
+	pm.tokenProxyMap[tokenIndex] = proxyURL
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", pm.healthCheckURL, nil)
-	if err != nil {
-		return false
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-
-	// 2xx-4xx 都认为代理是通的
-	return resp.StatusCode >= 200 && resp.StatusCode < 500
-}
-
-// markProxyFailedByURL 根据URL标记代理失败
-// 内部方法：调用者必须持有 pm.mutex
-func (pm *ProxyPoolManager) markProxyFailedByURL(proxyURL string) {
+	// 更新分配计数
 	for _, proxy := range pm.proxies {
 		if proxy.URL == proxyURL {
-			pm.markProxyFailed(proxy)
-			return
-		}
-	}
-}
-
-// selectProxyForAssignmentExcluding 选择代理进行分配，排除已尝试的代理
-// 内部方法：调用者必须持有 pm.mutex
-func (pm *ProxyPoolManager) selectProxyForAssignmentExcluding(excludeProxies map[string]bool) string {
-	var healthyProxies []*ProxyInfo
-	for _, proxy := range pm.proxies {
-		if proxy.Healthy && !excludeProxies[proxy.URL] {
-			healthyProxies = append(healthyProxies, proxy)
+			proxy.AssignedCount++
+			break
 		}
 	}
 
-	if len(healthyProxies) == 0 {
-		// 所有健康代理都已尝试，尝试不健康但未尝试的代理
-		for _, proxy := range pm.proxies {
-			if !excludeProxies[proxy.URL] {
-				healthyProxies = append(healthyProxies, proxy)
-			}
-		}
-	}
+	logger.Debug("分配代理",
+		logger.String("token_index", tokenIndex),
+		logger.String("proxy_url", proxyURL),
+		logger.Int("assigned_count", pm.getAssignedCount(proxyURL)))
 
-	if len(healthyProxies) == 0 {
-		return ""
-	}
-
-	// 负载均衡：选择已分配数量最少的代理
-	minAssigned := -1
-	var selectedProxy *ProxyInfo
-	for _, proxy := range healthyProxies {
-		if minAssigned == -1 || proxy.AssignedCount < minAssigned {
-			minAssigned = proxy.AssignedCount
-			selectedProxy = proxy
-		}
-	}
-
-	if selectedProxy != nil {
-		return selectedProxy.URL
-	}
-	return ""
+	return proxyURL, client, nil
 }
 
 // selectProxyForAssignment 选择代理进行分配（负载均衡）
@@ -369,55 +263,105 @@ func (pm *ProxyPoolManager) startHealthCheck() {
 	}
 }
 
-// performHealthCheck 执行健康检查
+// healthCheckResult 健康检查结果
+type healthCheckResult struct {
+	proxyURL   string
+	success    bool
+	statusCode int
+	err        error
+}
+
+// performHealthCheck 执行健康检查（并发，不阻塞主线程）
 func (pm *ProxyPoolManager) performHealthCheck() {
-	pm.mutex.Lock()
-	defer pm.mutex.Unlock()
-
-	logger.Debug("开始代理健康检查", logger.Int("proxy_count", len(pm.proxies)))
-
+	// 先获取代理列表快照（短暂持锁）
+	pm.mutex.RLock()
+	proxyCount := len(pm.proxies)
+	type proxySnapshot struct {
+		url    string
+		client *http.Client
+	}
+	snapshots := make([]proxySnapshot, 0, proxyCount)
 	for _, proxy := range pm.proxies {
 		client := pm.proxyClients[proxy.URL]
-		if client == nil {
-			logger.Warn("代理客户端不存在，跳过检查", logger.String("proxy_url", proxy.URL))
-			continue
+		if client != nil {
+			snapshots = append(snapshots, proxySnapshot{url: proxy.URL, client: client})
 		}
+	}
+	healthCheckURL := pm.healthCheckURL
+	pm.mutex.RUnlock()
 
-		// 执行健康检查请求
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		req, err := http.NewRequestWithContext(ctx, "GET", pm.healthCheckURL, nil)
-		if err != nil {
-			cancel()
-			logger.Warn("创建健康检查请求失败",
-				logger.String("proxy_url", proxy.URL),
-				logger.Err(err))
-			pm.markProxyFailed(proxy)
-			continue
-		}
+	if len(snapshots) == 0 {
+		return
+	}
 
-		resp, err := client.Do(req)
-		cancel()
+	logger.Debug("开始代理健康检查", logger.Int("proxy_count", len(snapshots)))
 
-		if err != nil {
-			logger.Warn("代理健康检查失败",
-				logger.String("proxy_url", proxy.URL),
-				logger.Err(err),
-				logger.Int("failure_count", proxy.FailureCount+1))
-			pm.markProxyFailed(proxy)
-		} else {
-			resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 500 {
-				// 2xx-4xx都认为是成功（代理本身是通的）
-				pm.markProxyHealthy(proxy)
-			} else {
-				logger.Warn("代理返回异常状态码",
-					logger.String("proxy_url", proxy.URL),
-					logger.Int("status_code", resp.StatusCode))
-				pm.markProxyFailed(proxy)
+	// 并发执行健康检查（不持锁）
+	results := make(chan healthCheckResult, len(snapshots))
+	var wg sync.WaitGroup
+
+	for _, snap := range snapshots {
+		wg.Add(1)
+		go func(proxyURL string, client *http.Client) {
+			defer wg.Done()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, "GET", healthCheckURL, nil)
+			if err != nil {
+				results <- healthCheckResult{proxyURL: proxyURL, success: false, err: err}
+				return
 			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				results <- healthCheckResult{proxyURL: proxyURL, success: false, err: err}
+				return
+			}
+			resp.Body.Close()
+
+			success := resp.StatusCode >= 200 && resp.StatusCode < 500
+			results <- healthCheckResult{proxyURL: proxyURL, success: success, statusCode: resp.StatusCode}
+		}(snap.url, snap.client)
+	}
+
+	// 等待所有检查完成
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// 收集结果并更新状态（短暂持锁）
+	resultMap := make(map[string]healthCheckResult)
+	for result := range results {
+		resultMap[result.proxyURL] = result
+	}
+
+	pm.mutex.Lock()
+	for _, proxy := range pm.proxies {
+		result, exists := resultMap[proxy.URL]
+		if !exists {
+			continue
 		}
 
 		proxy.LastCheck = time.Now()
+
+		if result.success {
+			pm.markProxyHealthy(proxy)
+		} else {
+			if result.err != nil {
+				logger.Warn("代理健康检查失败",
+					logger.String("proxy_url", proxy.URL),
+					logger.Err(result.err),
+					logger.Int("failure_count", proxy.FailureCount+1))
+			} else {
+				logger.Warn("代理返回异常状态码",
+					logger.String("proxy_url", proxy.URL),
+					logger.Int("status_code", result.statusCode))
+			}
+			pm.markProxyFailed(proxy)
+		}
 	}
 
 	// 统计健康代理数量
@@ -427,10 +371,11 @@ func (pm *ProxyPoolManager) performHealthCheck() {
 			healthyCount++
 		}
 	}
+	pm.mutex.Unlock()
 
 	logger.Debug("代理健康检查完成",
 		logger.Int("healthy_count", healthyCount),
-		logger.Int("total_count", len(pm.proxies)))
+		logger.Int("total_count", proxyCount))
 }
 
 // markProxyFailed 标记代理失败
@@ -478,11 +423,6 @@ func (pm *ProxyPoolManager) ReportProxyFailure(proxyURL string) {
 // Stop 停止代理池管理器
 func (pm *ProxyPoolManager) Stop() {
 	close(pm.stopChan)
-}
-
-// SetSkipPreCheck 设置是否跳过预检测（仅用于测试）
-func (pm *ProxyPoolManager) SetSkipPreCheck(skip bool) {
-	pm.skipPreCheck = skip
 }
 
 // GetStats 获取代理池统计信息
