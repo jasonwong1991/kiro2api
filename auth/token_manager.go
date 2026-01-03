@@ -1110,72 +1110,31 @@ func CalculateAvailableCount(usage *types.UsageLimits) float64 {
 	return 0.0
 }
 
-// GetNextResetTime 获取下次重置时间 (基于freeTrialExpiry注册日期)
-// AWS免费账号每月在注册日期重置额度，而不是固定的每月1号
+// GetNextResetTime 获取下次重置时间
+// Kiro 额度固定在每月1日 08:00 (UTC+8) 重置
 func GetNextResetTime(usage *types.UsageLimits) time.Time {
-	// 尝试从 freeTrialExpiry 获取注册日期
-	var registrationDay int
-	var hasRegistrationDay bool
+	now := time.Now()
+	currentYear := now.Year()
+	currentMonth := now.Month()
+	currentDay := now.Day()
 
-	for _, breakdown := range usage.UsageBreakdownList {
-		if breakdown.ResourceType == "CREDIT" && breakdown.FreeTrialInfo != nil {
-			if breakdown.FreeTrialInfo.FreeTrialExpiry > 0 {
-				// FreeTrialExpiry 是账号注册时间戳
-				registrationTime := time.Unix(int64(breakdown.FreeTrialInfo.FreeTrialExpiry), 0)
-				registrationDay = registrationTime.Day()
-				hasRegistrationDay = true
-				break
-			}
+	// 计算下次重置时间（每月1日 08:00）
+	var resetTime time.Time
+	if currentDay == 1 && now.Hour() < 8 {
+		// 如果是1号且还没到8点，重置时间是今天8点
+		resetTime = time.Date(currentYear, currentMonth, 1, 8, 0, 0, 0, time.Local)
+	} else {
+		// 否则重置时间是下个月1日8点
+		nextMonth := currentMonth + 1
+		nextYear := currentYear
+		if nextMonth > 12 {
+			nextMonth = 1
+			nextYear++
 		}
+		resetTime = time.Date(nextYear, nextMonth, 1, 8, 0, 0, 0, time.Local)
 	}
 
-	// 如果找到了注册日期，计算下次重置时间
-	if hasRegistrationDay {
-		now := time.Now()
-		currentYear := now.Year()
-		currentMonth := now.Month()
-		currentDay := now.Day()
-
-		// 计算本月的重置日期
-		var resetTime time.Time
-		if currentDay < registrationDay {
-			// 如果当前日期小于注册日，下次重置是本月的注册日
-			resetTime = time.Date(currentYear, currentMonth, registrationDay, 8, 0, 0, 0, time.Local)
-		} else {
-			// 如果当前日期已经过了注册日，下次重置是下个月的注册日
-			nextMonth := currentMonth + 1
-			nextYear := currentYear
-			if nextMonth > 12 {
-				nextMonth = 1
-				nextYear++
-			}
-
-			// 处理月份天数不足的情况（例如注册日是31号，但2月只有28天）
-			resetTime = time.Date(nextYear, nextMonth, registrationDay, 8, 0, 0, 0, time.Local)
-
-			// 如果设置的日期被自动调整了（说明该月没有这么多天），使用该月的最后一天
-			if resetTime.Day() != registrationDay {
-				// 回退到上个月的最后一天，然后加一天得到下个月1号，再减一秒得到上个月最后一天最后一秒
-				resetTime = time.Date(nextYear, nextMonth+1, 0, 8, 0, 0, 0, time.Local)
-			}
-		}
-
-		return resetTime
-	}
-
-	// 回退方案：如果没有 freeTrialExpiry，使用 NextDateReset
-	for _, breakdown := range usage.UsageBreakdownList {
-		if breakdown.ResourceType == "CREDIT" && breakdown.NextDateReset > 0 {
-			return time.Unix(int64(breakdown.NextDateReset), 0)
-		}
-	}
-
-	// 最后回退到根级别的 NextDateReset
-	if usage.NextDateReset > 0 {
-		return time.Unix(int64(usage.NextDateReset), 0)
-	}
-
-	return time.Time{}
+	return resetTime
 }
 
 // getUsageCheckerForToken 获取指定token索引的usage checker（带代理支持）

@@ -67,6 +67,22 @@ func processMessageContent(content any) (string, []types.CodeWhispererImage, err
 						}
 						textParts = append(textParts, parsedContent)
 					}
+				case "document":
+					// 处理文档内容块 (PDF/Word/纯文本)
+					if contentBlock.Document != nil {
+						docContent, err := utils.ProcessDocument(contentBlock.Document)
+						if err != nil {
+							logger.Warn("文档处理失败", logger.Err(err))
+							textParts = append(textParts, "[Document processing failed]")
+						} else {
+							if docContent.Text != "" {
+								textParts = append(textParts, docContent.Text)
+							}
+							if len(docContent.Images) > 0 {
+								images = append(images, docContent.Images...)
+							}
+						}
+					}
 				}
 			} else {
 				logger.Warn("内容块不是map[string]any类型",
@@ -112,6 +128,22 @@ func processMessageContent(content any) (string, []types.CodeWhispererImage, err
 						parsedContent = "Tool executed successfully"
 					}
 					textParts = append(textParts, parsedContent)
+				}
+			case "document":
+				// 处理文档内容块 (PDF/Word/纯文本)
+				if block.Document != nil {
+					docContent, err := utils.ProcessDocument(block.Document)
+					if err != nil {
+						logger.Warn("文档处理失败", logger.Err(err))
+						textParts = append(textParts, "[Document processing failed]")
+					} else {
+						if docContent.Text != "" {
+							textParts = append(textParts, docContent.Text)
+						}
+						if len(docContent.Images) > 0 {
+							images = append(images, docContent.Images...)
+						}
+					}
 				}
 			}
 		}
@@ -224,6 +256,28 @@ func parseContentBlock(block map[string]any) (types.ContentBlock, error) {
 		}
 		if input, ok := block["input"]; ok {
 			contentBlock.Input = &input
+		}
+
+	case "document":
+		// 处理文档内容块 (Anthropic API document content block)
+		// 注意：Anthropic API 中文档的 source 字段与图片的 source 字段结构不同
+		if source, ok := block["source"].(map[string]any); ok {
+			docSource := &types.DocumentSource{}
+
+			if sourceType, ok := source["type"].(string); ok {
+				docSource.Type = sourceType
+			}
+			if mediaType, ok := source["media_type"].(string); ok {
+				docSource.MediaType = mediaType
+			}
+			if data, ok := source["data"].(string); ok {
+				docSource.Data = data
+			}
+			if url, ok := source["url"].(string); ok {
+				docSource.URL = url
+			}
+
+			contentBlock.Document = docSource
 		}
 	}
 
