@@ -377,7 +377,12 @@ func (rc *RequestContext) GetTokenAndBody() (types.TokenInfo, []byte, error) {
 	// 读取请求体
 	body, err := rc.GinContext.GetRawData()
 	if err != nil {
-		logger.Error("读取请求体失败", logger.Err(err))
+		// 区分客户端断开连接和其他错误
+		if err == io.EOF || err.Error() == "unexpected EOF" || strings.Contains(err.Error(), "connection reset") {
+			logger.Warn("客户端连接中断", logger.Err(err), logger.String("client_ip", rc.GinContext.ClientIP()))
+		} else {
+			logger.Error("读取请求体失败", logger.Err(err))
+		}
 		respondError(rc.GinContext, http.StatusBadRequest, "读取请求体失败: %v", err)
 		return types.TokenInfo{}, nil, err
 	}
@@ -409,7 +414,12 @@ func (rc *RequestContext) GetTokenWithUsageAndBody() (*types.TokenWithUsage, []b
 	// 读取请求体
 	body, err := rc.GinContext.GetRawData()
 	if err != nil {
-		logger.Error("读取请求体失败", logger.Err(err))
+		// 区分客户端断开连接和其他错误
+		if err == io.EOF || err.Error() == "unexpected EOF" || strings.Contains(err.Error(), "connection reset") {
+			logger.Warn("客户端连接中断", logger.Err(err), logger.String("client_ip", rc.GinContext.ClientIP()))
+		} else {
+			logger.Error("读取请求体失败", logger.Err(err))
+		}
 		respondError(rc.GinContext, http.StatusBadRequest, "读取请求体失败: %v", err)
 		return nil, nil, err
 	}
