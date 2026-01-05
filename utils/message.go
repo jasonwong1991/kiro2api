@@ -109,6 +109,7 @@ func GetMessageContent(content any) (string, error) {
 	case []any:
 		var texts []string
 		hasImage := false
+		hasDocument := false
 		for _, block := range v {
 			if m, ok := block.(map[string]any); ok {
 				var cb types.ContentBlock
@@ -142,13 +143,34 @@ func GetMessageContent(content any) (string, error) {
 							} else {
 								texts = append(texts, "[图片]")
 							}
+						case "document":
+							hasDocument = true
+							texts = append(texts, "[文档]")
+						default:
+							// 未知类型，尝试提取文本内容
+							if cb.Text != nil {
+								texts = append(texts, *cb.Text)
+							}
+						}
+					} else {
+						// JSON 解析失败，尝试直接提取 text 字段
+						if text, ok := m["text"].(string); ok && text != "" {
+							texts = append(texts, text)
 						}
 					}
+				}
+			} else if str, ok := block.(string); ok {
+				// 直接是字符串的情况
+				if str != "" {
+					texts = append(texts, str)
 				}
 			}
 		}
 		if len(texts) == 0 && hasImage {
 			return "请描述这张图片的内容", nil
+		}
+		if len(texts) == 0 && hasDocument {
+			return "请分析这个文档的内容", nil
 		}
 		if len(texts) == 0 {
 			return "answer for user question", nil
@@ -157,6 +179,7 @@ func GetMessageContent(content any) (string, error) {
 	case []types.ContentBlock:
 		var texts []string
 		hasImage := false
+		hasDocument := false
 		for _, cb := range v {
 			switch cb.Type {
 			case "tool_result":
@@ -186,10 +209,21 @@ func GetMessageContent(content any) (string, error) {
 				} else {
 					texts = append(texts, "[图片]")
 				}
+			case "document":
+				hasDocument = true
+				texts = append(texts, "[文档]")
+			default:
+				// 未知类型，尝试提取文本内容
+				if cb.Text != nil {
+					texts = append(texts, *cb.Text)
+				}
 			}
 		}
 		if len(texts) == 0 && hasImage {
 			return "请描述这张图片的内容", nil
+		}
+		if len(texts) == 0 && hasDocument {
+			return "请分析这个文档的内容", nil
 		}
 		if len(texts) == 0 {
 			return "answer for user question", nil
