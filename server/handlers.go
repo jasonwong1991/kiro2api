@@ -51,13 +51,13 @@ func extractRelevantHeaders(c *gin.Context) map[string]string {
 
 // handleStreamRequest 处理流式请求
 // handleStreamRequest 处理流式请求
-func handleStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, tokenWithUsage *types.TokenWithUsage) {
+func handleStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, authService *auth.AuthService) {
 	sender := &AnthropicStreamSender{}
-	handleGenericStreamRequest(c, anthropicReq, tokenWithUsage, sender, createAnthropicStreamEvents)
+	handleGenericStreamRequest(c, anthropicReq, authService, sender, createAnthropicStreamEvents)
 }
 
 // handleGenericStreamRequest 通用流式请求处理
-func handleGenericStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, token *types.TokenWithUsage, sender StreamEventSender, eventCreator func(string, int, string) []map[string]any) {
+func handleGenericStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, authService *auth.AuthService, sender StreamEventSender, eventCreator func(string, int, string) []map[string]any) {
 	// 计算输入tokens（基于实际发送给上游的数据）
 	estimator := utils.NewTokenEstimator()
 	countReq := &types.CountTokensRequest{
@@ -68,30 +68,36 @@ func handleGenericStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequ
 	}
 	inputTokens := estimator.EstimateTokens(countReq)
 
-	// 初始化SSE响应
-	if err := initializeSSEResponse(c); err != nil {
-		_ = sender.SendError(c, "连接不支持SSE刷新", err)
-		return
-	}
-
 	// 生成消息ID并注入上下文
 	messageID := fmt.Sprintf(config.MessageIDFormat, time.Now().Format(config.MessageIDTimeFormat))
 	c.Set("message_id", messageID)
 
-	// 执行CodeWhisperer请求
-	resp, err := execCWRequest(c, anthropicReq, token.TokenInfo, true)
+	// 执行CodeWhisperer请求（带重试，在 SSE 初始化之前）
+	resp, tokenInfo, err := execCWRequestWithRetry(c, anthropicReq, authService, true)
 	if err != nil {
 		var modelNotFoundErrorType *types.ModelNotFoundErrorType
 		if errors.As(err, &modelNotFoundErrorType) {
 			return
 		}
-		_ = sender.SendError(c, "构建请求失败", err)
+		// 错误已在 execCWRequestWithRetry 中处理
 		return
 	}
 	defer resp.Body.Close()
 
+	// 初始化SSE响应（在成功获取上游响应后）
+	if err := initializeSSEResponse(c); err != nil {
+		_ = sender.SendError(c, "连接不支持SSE刷新", err)
+		return
+	}
+
+	// 获取 token 使用信息（用于流处理上下文）
+	tokenWithUsage := &types.TokenWithUsage{
+		TokenInfo:      tokenInfo,
+		AvailableCount: 0, // 重试后无法准确获取，设为 0
+	}
+
 	// 创建流处理上下文
-	ctx := NewStreamProcessorContext(c, anthropicReq, token, sender, messageID, inputTokens)
+	ctx := NewStreamProcessorContext(c, anthropicReq, tokenWithUsage, sender, messageID, inputTokens)
 	defer ctx.Cleanup()
 
 	// 发送初始事件
@@ -182,7 +188,7 @@ func createAnthropicFinalEvents(outputTokens, inputTokens int, stopReason string
 }
 
 // handleNonStreamRequest 处理非流式请求
-func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, token types.TokenInfo) {
+func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, authService *auth.AuthService) {
 	// 计算输入tokens（基于实际发送给上游的数据）
 	estimator := utils.NewTokenEstimator()
 	countReq := &types.CountTokensRequest{
@@ -193,7 +199,8 @@ func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest,
 	}
 	inputTokens := estimator.EstimateTokens(countReq)
 
-	resp, err := executeCodeWhispererRequest(c, anthropicReq, token, false)
+	// 执行CodeWhisperer请求（带重试）
+	resp, _, err := execCWRequestWithRetry(c, anthropicReq, authService, false)
 	if err != nil {
 		return
 	}

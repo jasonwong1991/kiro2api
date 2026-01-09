@@ -108,17 +108,23 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 	})
 
 	r.POST("/v1/messages", func(c *gin.Context) {
-		// 使用RequestContext统一处理token获取和请求体读取
-		reqCtx := &RequestContext{
-			GinContext:  c,
-			AuthService: authService,
-			RequestType: "Anthropic",
+		// 读取请求体
+		body, err := c.GetRawData()
+		if err != nil {
+			logger.Error("读取请求体失败", logger.Err(err))
+			respondError(c, http.StatusBadRequest, "读取请求体失败: %v", err)
+			return
 		}
 
-		tokenWithUsage, body, err := reqCtx.GetTokenWithUsageAndBody()
-		if err != nil {
-			return // 错误已在GetTokenWithUsageAndBody中处理
-		}
+		// 记录请求日志
+		logger.Debug("收到Anthropic请求",
+			addReqFields(c,
+				logger.String("direction", "client_request"),
+				logger.String("body", string(body)),
+				logger.Int("body_size", len(body)),
+				logger.String("remote_addr", c.ClientIP()),
+				logger.String("user_agent", c.GetHeader("User-Agent")),
+			)...)
 
 		// 先解析为通用map以便处理工具格式
 		var rawReq map[string]any
@@ -208,11 +214,11 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 		}
 
 		if anthropicReq.Stream {
-			handleStreamRequest(c, anthropicReq, tokenWithUsage)
+			handleStreamRequest(c, anthropicReq, authService)
 			return
 		}
 
-		handleNonStreamRequest(c, anthropicReq, tokenWithUsage.TokenInfo)
+		handleNonStreamRequest(c, anthropicReq, authService)
 	})
 
 	// Token计数端点

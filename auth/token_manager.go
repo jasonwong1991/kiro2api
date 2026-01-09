@@ -20,7 +20,8 @@ const (
 	StrategyRoundRobin SelectionStrategy = "round_robin" // 轮询选择
 )
 
-// MinAvailableThreshold 最小可用余额阈值，低于此值视为无效
+// MinAvailableThreshold 最小可用余额阈值
+// 余额 <= 此值视为耗尽（即只有 > 0.1 才可用）
 const MinAvailableThreshold = 0.1
 
 // TokenManager 简化的token管理器
@@ -477,8 +478,8 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
 	if cached, exists := tm.cache.tokens[cacheKey]; exists {
 		// 注意：不检查 token 是否过期，因为过期的 token 可以刷新
-		// 只检查余额是否足够
-		return cached.Available >= MinAvailableThreshold
+		// 只检查余额是否足够（> 阈值才可用，<= 阈值视为耗尽）
+		return cached.Available > MinAvailableThreshold
 	}
 
 	// 如果没有缓存且需要强制刷新
@@ -521,8 +522,8 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 				logger.Int("index", index),
 				logger.Float64("available", available))
 
-			// 返回健康状态
-			return available >= MinAvailableThreshold
+			// 返回健康状态（> 阈值才可用）
+			return available > MinAvailableThreshold
 		} else {
 			logger.Debug("检查使用限制失败", logger.Int("index", index), logger.Err(checkErr))
 			// 如果是 token 失效错误，标记为失效
@@ -777,8 +778,8 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 				}
 			}
 
-			// 检查 token 是否可用（余额足够）
-			if cached.Available >= MinAvailableThreshold {
+			// 检查 token 是否可用（余额 > 阈值才可用）
+			if cached.Available > MinAvailableThreshold {
 				// 移动到下一个位置
 				tm.poolRoundRobin = (relativeIndex + 1) % poolSize
 
@@ -1076,8 +1077,8 @@ func (ct *CachedToken) IsUsable() bool {
 		return false
 	}
 
-	// 检查可用次数是否大于阈值（避免使用即将耗尽的账号）
-	return ct.Available >= MinAvailableThreshold
+	// 检查可用次数是否大于阈值（> 阈值才可用，<= 阈值视为耗尽）
+	return ct.Available > MinAvailableThreshold
 }
 
 // *** 已删除 set 和 updateLastUsed 方法 ***
@@ -1561,8 +1562,8 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 			NextResetTime: nextResetTime,
 		}
 
-		// 只有健康账号（available >= 阈值）才计入成功数并加入活跃池
-		if available >= MinAvailableThreshold {
+		// 只有健康账号（available > 阈值）才计入成功数并加入活跃池
+		if available > MinAvailableThreshold {
 			successCount++
 			// 活跃池模式：将健康账号加入活跃池
 			if tm.batchSize > 0 {

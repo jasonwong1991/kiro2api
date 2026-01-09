@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"kiro2api/auth"
 	"kiro2api/config"
 	"kiro2api/converter"
 	"kiro2api/logger"
@@ -121,6 +123,116 @@ func executeCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReq
 
 // execCWRequest 供测试覆盖的请求执行入口（可在测试中替换）
 var execCWRequest = executeCodeWhispererRequest
+
+// isRetryableStatusCode 检查状态码是否可重试
+func isRetryableStatusCode(statusCode int) bool {
+	for _, code := range config.RetryableStatusCodes {
+		if statusCode == code {
+			return true
+		}
+	}
+	return false
+}
+
+// executeCodeWhispererRequestWithRetry 带重试的请求执行（换 token 重试）
+// 返回: response, 使用的tokenInfo, error
+func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.AnthropicRequest, authService *auth.AuthService, isStream bool) (*http.Response, types.TokenInfo, error) {
+	var lastErr error
+	var tokenInfo types.TokenInfo
+
+	for attempt := 0; attempt <= config.RetryMaxAttempts; attempt++ {
+		// 每次尝试都获取新 token（首次或重试）
+		var err error
+		tokenInfo, err = authService.GetToken()
+		if err != nil {
+			logger.Warn("获取token失败",
+				addReqFields(c,
+					logger.Int("attempt", attempt),
+					logger.Err(err),
+				)...)
+			lastErr = err
+			if attempt < config.RetryMaxAttempts {
+				time.Sleep(config.UpstreamRetryDelay)
+				continue
+			}
+			respondError(c, http.StatusInternalServerError, "获取token失败: %v", err)
+			return nil, tokenInfo, err
+		}
+
+		if attempt > 0 {
+			logger.Info("重试请求",
+				addReqFields(c,
+					logger.Int("attempt", attempt),
+					logger.Int("max_attempts", config.RetryMaxAttempts),
+				)...)
+		}
+
+		// 构建请求
+		req, err := buildCodeWhispererRequest(c, anthropicReq, tokenInfo, isStream)
+		if err != nil {
+			if _, ok := err.(*types.ModelNotFoundErrorType); ok {
+				return nil, tokenInfo, err
+			}
+			// 构建错误不重试
+			handleRequestBuildError(c, err)
+			return nil, tokenInfo, err
+		}
+
+		// 发送请求
+		resp, err := utils.DoRequest(req)
+		if err != nil {
+			logger.Warn("请求发送失败",
+				addReqFields(c,
+					logger.Int("attempt", attempt),
+					logger.Err(err),
+				)...)
+			lastErr = err
+			if attempt < config.RetryMaxAttempts {
+				time.Sleep(config.UpstreamRetryDelay)
+				continue
+			}
+			handleRequestSendError(c, err)
+			return nil, tokenInfo, err
+		}
+
+		// 检查是否可重试的错误状态码
+		if isRetryableStatusCode(resp.StatusCode) && attempt < config.RetryMaxAttempts {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			logger.Warn("收到可重试错误，换token重试",
+				addReqFields(c,
+					logger.Int("attempt", attempt),
+					logger.Int("status_code", resp.StatusCode),
+					logger.String("response_body", string(body)),
+				)...)
+			time.Sleep(config.RetryDelay)
+			continue
+		}
+
+		// 不可重试或已达最大重试次数，检查错误
+		if handleCodeWhispererError(c, resp) {
+			resp.Body.Close()
+			return nil, tokenInfo, fmt.Errorf("CodeWhisperer API error")
+		}
+
+		// 成功
+		logger.Debug("上游响应成功",
+			addReqFields(c,
+				logger.String("direction", "upstream_response"),
+				logger.Int("status_code", resp.StatusCode),
+				logger.Int("attempts", attempt+1),
+			)...)
+
+		return resp, tokenInfo, nil
+	}
+
+	// 理论上不会到达这里
+	respondError(c, http.StatusInternalServerError, "请求失败: %v", lastErr)
+	return nil, tokenInfo, lastErr
+}
+
+// execCWRequestWithRetry 供测试覆盖的带重试请求执行入口
+var execCWRequestWithRetry = executeCodeWhispererRequestWithRetry
 
 // buildCodeWhispererRequest 构建通用的CodeWhisperer请求
 func buildCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicRequest, tokenInfo types.TokenInfo, isStream bool) (*http.Request, error) {

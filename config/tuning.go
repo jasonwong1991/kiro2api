@@ -22,4 +22,21 @@ const (
 
 	// HTTPClientTLSHandshakeTimeout HTTP客户端TLS握手超时
 	HTTPClientTLSHandshakeTimeout = 15 * time.Second
+
+	// ========== 重试配置 ==========
+
+	// RetryMaxAttempts 最大重试次数（不含首次请求）
+	RetryMaxAttempts = 2
+
+	// UpstreamRetryDelay 上游请求重试间隔
+	UpstreamRetryDelay = 500 * time.Millisecond
+
+	// RetryableStatusCodes 可重试的 HTTP 状态码
+	// 500: Internal Server Error
+	// 502: Bad Gateway
+	// 503: Service Unavailable
+	// 504: Gateway Timeout
 )
+
+// RetryableStatusCodes 可重试的状态码列表
+var RetryableStatusCodes = []int{500, 502, 503, 504}
