@@ -35,7 +35,7 @@ func TestRealAccountUsageLimits(t *testing.T) {
 
 	// 第二步：获取使用限制
 	t.Log("\n=== 第二步：获取使用限制 ===")
-	checker := NewUsageLimitsChecker()
+	checker := NewUsageLimitsChecker(0) // 测试用索引0
 	usageLimits, err := checker.CheckUsageLimits(tokenInfo)
 	if err != nil {
 		t.Fatalf("获取使用限制失败: %v", err)

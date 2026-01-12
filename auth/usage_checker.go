@@ -14,11 +14,12 @@ import (
 // UsageLimitsChecker 使用限制检查器 (遵循SRP原则)
 type UsageLimitsChecker struct {
 	httpClient *http.Client
+	tokenIndex int // 用于日志追踪
 }
 
 // NewUsageLimitsChecker 创建使用限制检查器
 // client 参数可选：如果为 nil，使用 utils.SharedHTTPClient
-func NewUsageLimitsChecker(client ...*http.Client) *UsageLimitsChecker {
+func NewUsageLimitsChecker(tokenIndex int, client ...*http.Client) *UsageLimitsChecker {
 	var httpClient *http.Client
 	if len(client) > 0 && client[0] != nil {
 		httpClient = client[0]
@@ -28,6 +29,7 @@ func NewUsageLimitsChecker(client ...*http.Client) *UsageLimitsChecker {
 
 	return &UsageLimitsChecker{
 		httpClient: httpClient,
+		tokenIndex: tokenIndex,
 	}
 }
 
@@ -139,6 +141,7 @@ func (c *UsageLimitsChecker) logUsageLimits(limits *types.UsageLimits) {
 			available := totalLimit - totalUsed
 
 			logger.Info("CREDIT使用状态",
+				logger.Int("token_index", c.tokenIndex),
 				logger.String("resource_type", breakdown.ResourceType),
 				logger.Float64("total_limit", totalLimit),
 				logger.Float64("total_used", totalUsed),

@@ -456,6 +456,20 @@ func (pm *ProxyPoolManager) GetStats() map[string]interface{} {
 	return stats
 }
 
+// GetHealthyProxyCount 获取健康代理数量
+func (pm *ProxyPoolManager) GetHealthyProxyCount() int {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	count := 0
+	for _, proxy := range pm.proxies {
+		if proxy.Healthy {
+			count++
+		}
+	}
+	return count
+}
+
 // ResetTokenProxy 重置token的代理绑定（用于强制重新分配）
 func (pm *ProxyPoolManager) ResetTokenProxy(tokenIndex string) {
 	pm.mutex.Lock()

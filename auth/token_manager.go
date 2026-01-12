@@ -146,6 +146,9 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		logger.Info("启动活跃池定时刷新任务", logger.Duration("interval", 5*time.Minute))
 	}
 
+	// 启动缓存快照定时保存
+	tm.startCacheSnapshotSaver()
+
 	return tm
 }
 
@@ -1143,7 +1146,7 @@ func GetNextResetTime(usage *types.UsageLimits) time.Time {
 func (tm *TokenManager) getUsageCheckerForToken(tokenIndex int) *UsageLimitsChecker {
 	// 如果没有代理池，使用默认客户端
 	if tm.proxyPool == nil {
-		return NewUsageLimitsChecker()
+		return NewUsageLimitsChecker(tokenIndex)
 	}
 
 	// 获取代理客户端
@@ -1153,10 +1156,10 @@ func (tm *TokenManager) getUsageCheckerForToken(tokenIndex int) *UsageLimitsChec
 		logger.Warn("获取代理失败，usage checker使用默认客户端",
 			logger.String("token_index", tokenIndexStr),
 			logger.Err(err))
-		return NewUsageLimitsChecker()
+		return NewUsageLimitsChecker(tokenIndex)
 	}
 
-	return NewUsageLimitsChecker(client)
+	return NewUsageLimitsChecker(tokenIndex, client)
 }
 
 // generateConfigOrder 生成token配置的顺序
@@ -1470,7 +1473,30 @@ func (tm *TokenManager) SyncConfigFile() error {
 // InitializeBatchTokens 在启动时初始化首批 token
 // 如果设置了 batchSize，初始化 batchSize 数量的账号
 // 否则只初始化第一个账号
+// 优先尝试从缓存快照恢复，如果配置变更则从头刷新
 func (tm *TokenManager) InitializeBatchTokens() error {
+	// 尝试从缓存快照恢复（不持锁，TryRestoreCache 内部会加锁）
+	if tm.TryRestoreCache() {
+		// 恢复成功，检查活跃池是否满足要求
+		tm.mutex.Lock()
+		activePoolSize := len(tm.activePool)
+		requiredSize := tm.batchSize
+		if requiredSize == 0 {
+			requiredSize = 1
+		}
+		tm.mutex.Unlock()
+
+		if activePoolSize >= requiredSize {
+			logger.Info("从缓存快照恢复成功，跳过初始化刷新",
+				logger.Int("active_pool_size", activePoolSize),
+				logger.Int("required_size", requiredSize))
+			return nil
+		}
+		logger.Info("缓存快照恢复但活跃池不足，继续刷新补充",
+			logger.Int("active_pool_size", activePoolSize),
+			logger.Int("required_size", requiredSize))
+	}
+
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
 
@@ -1787,11 +1813,23 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 
 // RefreshTokens 批量刷新账号状态（公开方法）
 // POST /v1/admin/tokens/refresh
+// 如果配置了代理池，将根据健康代理数量并发刷新
 func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
-	tm.mutex.Lock()
-	defer tm.mutex.Unlock()
+	// 1. 获取并发度
+	concurrency := 1
+	if tm.proxyPool != nil {
+		if healthyCount := tm.proxyPool.GetHealthyProxyCount(); healthyCount > 0 {
+			concurrency = healthyCount
+		}
+	}
 
-	// 如果 indices 为空，刷新所有非禁用的账号
+	// 2. 短暂持锁获取任务列表
+	type refreshTask struct {
+		index int
+		cfg   AuthConfig
+	}
+
+	tm.mutex.Lock()
 	if len(indices) == 0 {
 		indices = make([]int, 0, len(tm.configs))
 		for i, cfg := range tm.configs {
@@ -1801,11 +1839,13 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 		}
 	}
 
-	results := make([]RefreshResult, 0, len(indices))
+	// 预处理：过滤无效索引和禁用账号
+	tasks := make([]refreshTask, 0, len(indices))
+	invalidResults := make([]RefreshResult, 0)
 
 	for _, index := range indices {
 		if index < 0 || index >= len(tm.configs) {
-			results = append(results, RefreshResult{
+			invalidResults = append(invalidResults, RefreshResult{
 				Index:   index,
 				Success: false,
 				Error:   fmt.Sprintf("索引超出范围: %d", index),
@@ -1815,7 +1855,7 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 
 		cfg := tm.configs[index]
 		if cfg.Disabled {
-			results = append(results, RefreshResult{
+			invalidResults = append(invalidResults, RefreshResult{
 				Index:   index,
 				Success: false,
 				Error:   "账号已禁用",
@@ -1823,86 +1863,136 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 			continue
 		}
 
-		// 刷新 token
-		token, err := tm.refreshSingleToken(cfg, index)
-		if err != nil {
-			// 检查是否是 token 失效错误
-			if types.IsTokenInvalidError(err) {
+		tasks = append(tasks, refreshTask{index: index, cfg: cfg})
+	}
+	tm.mutex.Unlock()
+
+	if len(tasks) == 0 {
+		return invalidResults, nil
+	}
+
+	logger.Info("开始并发刷新token",
+		logger.Int("task_count", len(tasks)),
+		logger.Int("concurrency", concurrency))
+
+	// 3. 并发刷新（不持锁）
+	type taskResult struct {
+		index         int
+		token         types.TokenInfo
+		usageInfo     *types.UsageLimits
+		available     float64
+		nextResetTime time.Time
+		err           error
+		isInvalid     bool // token 是否失效
+	}
+
+	taskChan := make(chan refreshTask, len(tasks))
+	resultChan := make(chan taskResult, len(tasks))
+
+	// 启动 workers
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				result := taskResult{index: task.index}
+
+				// 刷新 token
+				token, err := tm.refreshSingleToken(task.cfg, task.index)
+				if err != nil {
+					result.err = err
+					result.isInvalid = types.IsTokenInvalidError(err)
+					resultChan <- result
+					continue
+				}
+
+				result.token = token
+
+				// 检查使用限制
+				checker := tm.getUsageCheckerForToken(task.index)
+				if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+					result.usageInfo = usage
+					result.available = CalculateAvailableCount(usage)
+					result.nextResetTime = GetNextResetTime(usage)
+				} else if types.IsTokenInvalidError(checkErr) {
+					result.err = checkErr
+					result.isInvalid = true
+					resultChan <- result
+					continue
+				}
+
+				resultChan <- result
+			}
+		}()
+	}
+
+	// 发送任务
+	for _, task := range tasks {
+		taskChan <- task
+	}
+	close(taskChan)
+
+	// 等待完成
+	wg.Wait()
+	close(resultChan)
+
+	// 4. 收集结果并持锁更新缓存
+	taskResults := make([]taskResult, 0, len(tasks))
+	for result := range resultChan {
+		taskResults = append(taskResults, result)
+	}
+
+	results := make([]RefreshResult, 0, len(invalidResults)+len(taskResults))
+	results = append(results, invalidResults...)
+
+	tm.mutex.Lock()
+	for _, tr := range taskResults {
+		if tr.err != nil {
+			if tr.isInvalid {
 				logger.Warn("刷新时检测到token失效",
-					logger.Int("index", index),
-					logger.String("auth_type", cfg.AuthType),
-					logger.Err(err))
-				// 记录失效时间
-				tm.invalidated[index] = time.Now()
+					logger.Int("index", tr.index),
+					logger.Err(tr.err))
+				tm.invalidated[tr.index] = time.Now()
 			}
 
 			results = append(results, RefreshResult{
-				Index:   index,
+				Index:   tr.index,
 				Success: false,
-				Error:   err.Error(),
+				Error:   tr.err.Error(),
 			})
 			continue
 		}
 
-		// 如果刷新成功，清除失效标记
-		delete(tm.invalidated, index)
-
-		// 检查使用限制
-		var usageInfo *types.UsageLimits
-		var available float64
-		var nextResetTime time.Time
-
-		checker := tm.getUsageCheckerForToken(index)
-		if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
-			usageInfo = usage
-			available = CalculateAvailableCount(usage)
-			nextResetTime = GetNextResetTime(usage)
-		} else {
-			// 检查是否是 token 失效错误
-			if types.IsTokenInvalidError(checkErr) {
-				logger.Warn("使用限制检查检测到token失效",
-					logger.Int("index", index),
-					logger.String("auth_type", cfg.AuthType),
-					logger.Err(checkErr))
-				// 记录失效时间
-				tm.invalidated[index] = time.Now()
-
-				results = append(results, RefreshResult{
-					Index:   index,
-					Success: false,
-					Error:   checkErr.Error(),
-				})
-				continue
-			}
-			logger.Warn("检查使用限制失败", logger.Err(checkErr))
-		}
+		// 清除失效标记
+		delete(tm.invalidated, tr.index)
 
 		// 更新缓存
-		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, tr.index)
 		now := time.Now()
 		tm.cache.tokens[cacheKey] = &CachedToken{
-			Token:         token,
-			UsageInfo:     usageInfo,
+			Token:         tr.token,
+			UsageInfo:     tr.usageInfo,
 			CachedAt:      now,
 			LastCheckAt:   now,
-			Available:     available,
-			NextResetTime: nextResetTime,
+			Available:     tr.available,
+			NextResetTime: tr.nextResetTime,
 		}
 
 		logger.Info("成功刷新账号",
-			logger.Int("index", index),
-			logger.String("auth_type", cfg.AuthType),
-			logger.Float64("available", available))
+			logger.Int("index", tr.index),
+			logger.Float64("available", tr.available))
 
 		// 获取更新后的状态
-		status, _ := tm.getTokenStatusUnlocked(index)
+		status, _ := tm.getTokenStatusUnlocked(tr.index)
 
 		results = append(results, RefreshResult{
-			Index:   index,
+			Index:   tr.index,
 			Success: true,
 			Status:  status,
 		})
 	}
+	tm.mutex.Unlock()
 
 	successCount := 0
 	for _, r := range results {
@@ -1914,7 +2004,8 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 	logger.Info("批量刷新完成",
 		logger.Int("total", len(results)),
 		logger.Int("success", successCount),
-		logger.Int("failed", len(results)-successCount))
+		logger.Int("failed", len(results)-successCount),
+		logger.Int("concurrency", concurrency))
 
 	return results, nil
 }
