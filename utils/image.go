@@ -1,12 +1,22 @@
 package utils
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
+	"os"
+	"strconv"
 	"regexp"
 	"strings"
 
+	"kiro2api/logger"
 	"kiro2api/types"
+
+	"golang.org/x/image/draw"
 )
 
 // SupportedImageFormats 支持的图片格式
@@ -21,6 +31,25 @@ var SupportedImageFormats = map[string]string{
 
 // MaxImageSize 最大图片大小 (20MB)
 const MaxImageSize = 20 * 1024 * 1024
+
+// DefaultCodeWhispererMaxImageBytes CodeWhisperer 单张图片建议上限（原始字节数）。
+// 可通过环境变量 CODEWHISPERER_MAX_IMAGE_BYTES 覆盖；设置为 0 可禁用压缩。
+const DefaultCodeWhispererMaxImageBytes = 32 * 1024
+
+func getCodeWhispererMaxImageBytes() int {
+	v := strings.TrimSpace(os.Getenv("CODEWHISPERER_MAX_IMAGE_BYTES"))
+	if v == "" {
+		return DefaultCodeWhispererMaxImageBytes
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return DefaultCodeWhispererMaxImageBytes
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
 
 // DetectImageFormat 检测图片格式
 func DetectImageFormat(data []byte) (string, error) {
@@ -108,9 +137,177 @@ func CreateCodeWhispererImage(imageSource *types.ImageSource) *types.CodeWhisper
 	}
 }
 
+func resizeToMaxDimension(src image.Image, maxDim int) image.Image {
+	if maxDim <= 0 {
+		return src
+	}
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 {
+		return src
+	}
+	if w <= maxDim && h <= maxDim {
+		return src
+	}
+
+	var nw, nh int
+	if w >= h {
+		nw = maxDim
+		nh = int(float64(h) * (float64(maxDim) / float64(w)))
+	} else {
+		nh = maxDim
+		nw = int(float64(w) * (float64(maxDim) / float64(h)))
+	}
+	if nw < 1 {
+		nw = 1
+	}
+	if nh < 1 {
+		nh = 1
+	}
+
+	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
+	draw.CatmullRom.Scale(dst, dst.Bounds(), src, b, draw.Over, nil)
+	return dst
+}
+
+// CompressImageForCodeWhisperer 将图片压缩到指定上限（优先转换为 JPEG + 缩放）。
+// 失败时返回原始数据（KISS：不阻断请求，交由上游兜底）。
+func CompressImageForCodeWhisperer(mediaType string, data []byte, maxBytes int) (outMediaType string, out []byte, _ error) {
+	if maxBytes <= 0 || len(data) <= maxBytes {
+		return mediaType, data, nil
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		logger.Warn("图片解码失败，跳过压缩",
+			logger.String("media_type", mediaType),
+			logger.Int("size", len(data)),
+			logger.Err(err))
+		return mediaType, data, nil
+	}
+
+	// 逐步缩放 + 降低质量，直到满足 maxBytes
+	maxDims := []int{1024, 768, 512, 384, 256, 192, 160, 128}
+	qualities := []int{85, 75, 65, 55, 45, 35, 25}
+
+	var best []byte
+	for _, maxDim := range maxDims {
+		resized := resizeToMaxDimension(img, maxDim)
+		for _, q := range qualities {
+			var buf bytes.Buffer
+			encErr := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: q})
+			if encErr != nil {
+				continue
+			}
+			b := buf.Bytes()
+			if best == nil || len(b) < len(best) {
+				best = b
+			}
+			if len(b) <= maxBytes {
+				logger.Debug("图片已压缩以满足CodeWhisperer限制",
+					logger.String("from_media_type", mediaType),
+					logger.String("to_media_type", "image/jpeg"),
+					logger.Int("original_size", len(data)),
+					logger.Int("compressed_size", len(b)),
+					logger.Int("max_bytes", maxBytes),
+					logger.Int("max_dim", maxDim),
+					logger.Int("jpeg_quality", q))
+				return "image/jpeg", b, nil
+			}
+		}
+	}
+
+	// 无法满足上限：返回最小版本（如果确实变小），否则返回原始
+	if best != nil && len(best) < len(data) {
+		logger.Warn("图片未能压缩到目标上限，使用最小版本",
+			logger.String("from_media_type", mediaType),
+			logger.String("to_media_type", "image/jpeg"),
+			logger.Int("original_size", len(data)),
+			logger.Int("compressed_size", len(best)),
+			logger.Int("max_bytes", maxBytes))
+		return "image/jpeg", best, nil
+	}
+
+	return mediaType, data, nil
+}
+
+// NormalizeImageData 通用图片规范化：解码后重新编码，清除非标准数据
+// 使用 Go 标准库解码验证图片有效性，然后重新编码为干净的格式
+// 这可以自动处理：JPEG 尾随字节、损坏的元数据、非标准编码等问题
+func NormalizeImageData(mediaType string, data []byte) ([]byte, error) {
+	if len(data) > MaxImageSize {
+		return nil, fmt.Errorf("图片数据过大: %d 字节，最大支持 %d 字节", len(data), MaxImageSize)
+	}
+
+	// 检测实际格式
+	detectedType, err := DetectImageFormat(data)
+	if err != nil {
+		return nil, fmt.Errorf("无法识别图片格式: %v", err)
+	}
+	if detectedType != mediaType {
+		return nil, fmt.Errorf("图片格式不匹配: 声明为 %s，实际为 %s", mediaType, detectedType)
+	}
+
+	// 使用 Go 标准库解码图片（验证有效性）
+	reader := bytes.NewReader(data)
+	img, format, err := image.Decode(reader)
+	if err != nil {
+		// 解码失败，记录警告但返回原始数据（兼容不支持的子格式）
+		logger.Warn("图片解码失败，使用原始数据",
+			logger.String("media_type", mediaType),
+			logger.Err(err))
+		return data, nil
+	}
+
+	// 重新编码为干净的格式
+	var buf bytes.Buffer
+	switch format {
+	case "jpeg":
+		err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95})
+	case "png":
+		err = png.Encode(&buf, img)
+	case "gif":
+		err = gif.Encode(&buf, img, nil)
+	default:
+		// 不支持重新编码的格式（webp/bmp），返回原始数据
+		logger.Debug("图片格式不支持重新编码，使用原始数据",
+			logger.String("format", format))
+		return data, nil
+	}
+
+	if err != nil {
+		logger.Warn("图片重新编码失败，使用原始数据",
+			logger.String("format", format),
+			logger.Err(err))
+		return data, nil
+	}
+
+	normalized := buf.Bytes()
+
+	// 关键修复：如果规范化后图片变大，使用原始数据
+	// CodeWhisperer API 对图片大小有限制，避免不必要的膨胀
+	if len(normalized) > len(data) {
+		logger.Debug("规范化后图片变大，使用原始数据",
+			logger.String("format", format),
+			logger.Int("original_size", len(data)),
+			logger.Int("normalized_size", len(normalized)))
+		return data, nil
+	}
+
+	if len(normalized) != len(data) {
+		logger.Debug("图片已规范化",
+			logger.String("format", format),
+			logger.Int("original_size", len(data)),
+			logger.Int("normalized_size", len(normalized)))
+	}
+
+	return normalized, nil
+}
+
 // ParseImageFromContentBlock 从 ContentBlock 解析图片信息
 
-// ValidateImageContent 验证图片内容的完整性
+// ValidateImageContent 验证图片内容的完整性并规范化
+// 注意：此函数会修改 imageSource.Data 为规范化后的数据
 func ValidateImageContent(imageSource *types.ImageSource) error {
 	if imageSource == nil {
 		return fmt.Errorf("图片数据为空")
@@ -128,7 +325,7 @@ func ValidateImageContent(imageSource *types.ImageSource) error {
 		return fmt.Errorf("图片数据为空")
 	}
 
-	// 验证 base64 编码并检查大小
+	// 验证 base64 编码
 	decodedData, err := base64.StdEncoding.DecodeString(imageSource.Data)
 	if err != nil {
 		return fmt.Errorf("无效的 base64 编码: %v", err)
@@ -138,16 +335,23 @@ func ValidateImageContent(imageSource *types.ImageSource) error {
 		return fmt.Errorf("图片数据过大: %d 字节，最大支持 %d 字节", len(decodedData), MaxImageSize)
 	}
 
-	// 验证图片格式与数据是否匹配
-	detectedType, err := DetectImageFormat(decodedData)
-	if err == nil && detectedType != imageSource.MediaType {
-		return fmt.Errorf("图片格式不匹配: 声明为 %s，实际为 %s", imageSource.MediaType, detectedType)
+	// 规范化图片数据（解码后重新编码，清除非标准数据）
+	normalized, err := NormalizeImageData(imageSource.MediaType, decodedData)
+	if err != nil {
+		return err
 	}
+
+	// 如果超过 CodeWhisperer 的图片上限，尝试进一步压缩/缩放（对齐 Kiro App 行为）
+	maxBytes := getCodeWhispererMaxImageBytes()
+	outMediaType, outBytes, _ := CompressImageForCodeWhisperer(imageSource.MediaType, normalized, maxBytes)
+	imageSource.MediaType = outMediaType
+	imageSource.Data = base64.StdEncoding.EncodeToString(outBytes)
 
 	return nil
 }
 
 // ParseDataURL 解析data URL，提取媒体类型和base64数据
+// 返回的 base64Data 已经过规范化处理
 func ParseDataURL(dataURL string) (mediaType, base64Data string, err error) {
 	// data URL格式：data:[<mediatype>][;base64],<data>
 	dataURLPattern := regexp.MustCompile(`^data:([^;,]+)(;base64)?,(.+)$`)
@@ -176,18 +380,17 @@ func ParseDataURL(dataURL string) (mediaType, base64Data string, err error) {
 		return "", "", fmt.Errorf("无效的base64编码: %v", err)
 	}
 
-	// 检查文件大小
-	if len(decodedData) > MaxImageSize {
-		return "", "", fmt.Errorf("图片数据过大: %d 字节，最大支持 %d 字节", len(decodedData), MaxImageSize)
+	// 规范化图片数据
+	normalized, err := NormalizeImageData(mediaType, decodedData)
+	if err != nil {
+		return "", "", err
 	}
 
-	// 验证图片格式与声明是否匹配
-	detectedType, err := DetectImageFormat(decodedData)
-	if err == nil && detectedType != mediaType {
-		return "", "", fmt.Errorf("图片格式不匹配: 声明为 %s，实际为 %s", mediaType, detectedType)
-	}
+	// 对超大图片执行压缩/缩放（与 ValidateImageContent 一致）
+	maxBytes := getCodeWhispererMaxImageBytes()
+	outMediaType, outBytes, _ := CompressImageForCodeWhisperer(mediaType, normalized, maxBytes)
 
-	return mediaType, data, nil
+	return outMediaType, base64.StdEncoding.EncodeToString(outBytes), nil
 }
 
 // ConvertImageURLToImageSource 将OpenAI的image_url格式转换为Anthropic的ImageSource格式

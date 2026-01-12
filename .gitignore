@@ -26,7 +26,9 @@ test/raw_data_replay/
 
 # 敏感配置文件（不要提交到版本控制）
 tokens.json
+tokens*.json
 auth_config.json
+generateAssistantResponse.json
 
 # 旧文件清理标记
 1.json

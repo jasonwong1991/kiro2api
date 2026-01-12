@@ -8,6 +8,9 @@ import (
 
 // CodeWhispererRequest 表示 CodeWhisperer API 的请求结构
 type CodeWhispererRequest struct {
+	// Kiro App 请求体中存在的顶级字段；部分场景（如图片请求）上游会校验
+	ProfileArn string `json:"profileArn,omitempty"`
+
 	ConversationState struct {
 		AgentContinuationId string `json:"agentContinuationId"` // 代理延续ID，用于追踪代理会话
 		AgentTaskType       string `json:"agentTaskType"`       // 代理任务类型，通常为"vibe"

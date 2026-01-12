@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -214,6 +215,37 @@ func TestHandleResponseReadError(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "internal_error", errorObj["code"])
 	assert.Contains(t, errorObj["message"], "读取响应体失败")
+}
+
+func TestBuildCodeWhispererRequest_IncludesProfileArn(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/test", bytes.NewBufferString(`{}`))
+
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 16,
+		Messages: []types.AnthropicRequestMessage{
+			{Role: "user", Content: "hi"},
+		},
+	}
+
+	tokenInfo := types.TokenInfo{
+		AccessToken:  "test-access-token",
+		RefreshToken: "test-refresh-token",
+		ProfileArn:   "arn:aws:codewhisperer:us-east-1:123456789012:profile/TEST",
+	}
+
+	req, err := buildCodeWhispererRequest(c, anthropicReq, tokenInfo, false)
+	assert.NoError(t, err)
+
+	bodyBytes, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+
+	var payload map[string]any
+	err = json.Unmarshal(bodyBytes, &payload)
+	assert.NoError(t, err)
+	assert.Equal(t, tokenInfo.ProfileArn, payload["profileArn"])
 }
 
 // 测试SSE事件发送

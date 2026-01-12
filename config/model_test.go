@@ -9,19 +9,19 @@ import (
 func TestModelMap_ClaudeSonnet45(t *testing.T) {
 	model, exists := ModelMap["claude-sonnet-4-5-20250929"]
 	assert.True(t, exists)
-	assert.Equal(t, "CLAUDE_SONNET_4_5_20250929_V1_0", model)
+	assert.Equal(t, "claude-sonnet-4.5", model)
 }
 
 func TestModelMap_ClaudeSonnet4(t *testing.T) {
 	model, exists := ModelMap["claude-sonnet-4-20250514"]
 	assert.True(t, exists)
-	assert.Equal(t, "CLAUDE_SONNET_4_20250514_V1_0", model)
+	assert.Equal(t, "claude-sonnet-4", model)
 }
 
 func TestModelMap_Claude37Sonnet(t *testing.T) {
 	model, exists := ModelMap["claude-3-7-sonnet-20250219"]
 	assert.True(t, exists)
-	assert.Equal(t, "CLAUDE_3_7_SONNET_20250219_V1_0", model)
+	assert.Equal(t, "claude-3.7-sonnet", model)
 }
 
 func TestModelMap_Claude35Haiku(t *testing.T) {
@@ -52,12 +52,10 @@ func TestModelMap_AllModelsHaveMapping(t *testing.T) {
 
 func TestModelMap_MappingsAreCorrectFormat(t *testing.T) {
 	for inputModel, outputModel := range ModelMap {
-		// 输出模型应该是大写格式或"auto"
+		// 输出模型应该是 claude-xxx 格式或 "auto"
 		if outputModel != "auto" {
-			assert.Contains(t, outputModel, "CLAUDE",
-				"Model mapping for %s should contain 'CLAUDE'", inputModel)
-			assert.Contains(t, outputModel, "_V1_0",
-				"Model mapping for %s should contain '_V1_0'", inputModel)
+			assert.Contains(t, outputModel, "claude",
+				"Model mapping for %s should contain 'claude'", inputModel)
 		}
 	}
 }

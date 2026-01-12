@@ -34,7 +34,7 @@ func TestBuildCodeWhispererRequest_BasicMessage(t *testing.T) {
 	assert.NotEmpty(t, cwReq.ConversationState.AgentContinuationId)
 	assert.Equal(t, "vibe", cwReq.ConversationState.AgentTaskType)
 	assert.Equal(t, "Hello, how are you?", cwReq.ConversationState.CurrentMessage.UserInputMessage.Content)
-	assert.Equal(t, "CLAUDE_SONNET_4_20250514_V1_0", cwReq.ConversationState.CurrentMessage.UserInputMessage.ModelId)
+	assert.Equal(t, "claude-sonnet-4", cwReq.ConversationState.CurrentMessage.UserInputMessage.ModelId)
 	assert.Equal(t, "AI_EDITOR", cwReq.ConversationState.CurrentMessage.UserInputMessage.Origin)
 }
 
