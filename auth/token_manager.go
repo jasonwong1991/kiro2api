@@ -1791,12 +1791,14 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
 
-	requestedAll := len(indices) == 0
-	indices = tm.resolveRefreshIndicesUnlocked(indices)
-	if requestedAll && tm.proxyPool != nil && tm.batchSize > 0 {
-		logger.Info("批量刷新已按轮询size限制（代理启用）",
-			logger.Int("selected", len(indices)),
-			logger.Int("batch_size", tm.batchSize))
+	// 如果 indices 为空，刷新所有非禁用的账号
+	if len(indices) == 0 {
+		indices = make([]int, 0, len(tm.configs))
+		for i, cfg := range tm.configs {
+			if !cfg.Disabled {
+				indices = append(indices, i)
+			}
+		}
 	}
 
 	results := make([]RefreshResult, 0, len(indices))
@@ -1915,73 +1917,6 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 		logger.Int("failed", len(results)-successCount))
 
 	return results, nil
-}
-
-// resolveRefreshIndicesUnlocked 统一批量刷新索引选择逻辑
-// - 当用户显式传 indices 时：尊重用户输入（不做裁剪）
-// - 当用户请求“刷新全部”（indices 为空）且启用代理池 + 配置了轮询 size（KIRO_BATCH_SIZE）时：
-//   仅刷新 batchSize 个账号（优先使用 activePool），避免代理模式下全量刷新过慢
-// - 其他情况：刷新所有非禁用账号（保持原行为）
-//
-// 约束：调用者必须持有 tm.mutex
-func (tm *TokenManager) resolveRefreshIndicesUnlocked(indices []int) []int {
-	if len(indices) > 0 {
-		return indices
-	}
-
-	// 代理启用时，按用户设置的轮询 size 限制“刷新全部”的范围
-	if tm.proxyPool != nil && tm.batchSize > 0 {
-		target := tm.batchSize
-		if target > len(tm.configs) {
-			target = len(tm.configs)
-		}
-		selected := make([]int, 0, target)
-
-		// 优先使用 activePool（如果已经构建）
-		seen := make(map[int]struct{}, target)
-		for _, idx := range tm.activePool {
-			if len(selected) >= target {
-				break
-			}
-			if idx < 0 || idx >= len(tm.configs) {
-				continue
-			}
-			if tm.configs[idx].Disabled {
-				continue
-			}
-			if _, ok := seen[idx]; ok {
-				continue
-			}
-			seen[idx] = struct{}{}
-			selected = append(selected, idx)
-		}
-
-		// activePool 不足时，从配置头部补齐（与 InitializeBatchTokens 的选择方式一致）
-		for i, cfg := range tm.configs {
-			if len(selected) >= target {
-				break
-			}
-			if cfg.Disabled {
-				continue
-			}
-			if _, ok := seen[i]; ok {
-				continue
-			}
-			seen[i] = struct{}{}
-			selected = append(selected, i)
-		}
-
-		return selected
-	}
-
-	// 默认：刷新所有非禁用账号
-	all := make([]int, 0, len(tm.configs))
-	for i, cfg := range tm.configs {
-		if !cfg.Disabled {
-			all = append(all, i)
-		}
-	}
-	return all
 }
 
 // getTokenStatusUnlocked 获取单个 token 的状态（内部方法，调用者必须持有锁）
