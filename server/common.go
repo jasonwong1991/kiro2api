@@ -2,9 +2,11 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -283,6 +285,11 @@ func buildCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReque
 		logger.Int("tools_count", len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools)),
 		logger.String("tools_names", toolNamesPreview))
 
+	// 存储请求体到 Context，用于错误调试
+	if c != nil {
+		c.Set("cw_request_body", cwReqBody)
+	}
+
 	req, err := http.NewRequest("POST", config.CodeWhispererURL, bytes.NewReader(cwReqBody))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %v", err)
@@ -339,6 +346,11 @@ func handleCodeWhispererError(c *gin.Context, resp *http.Response) bool {
 			logger.Int("response_len", len(body)),
 			logger.String("response_body", string(body)),
 		)...)
+
+	// 检测 "Improperly formed request" 错误并保存调试信息
+	if strings.Contains(string(body), "Improperly formed request") {
+		saveImproperlyFormedRequestDebug(c, body)
+	}
 
 	// 特殊处理：403错误表示token失效 (保持向后兼容)
 	if resp.StatusCode == http.StatusForbidden {
@@ -559,4 +571,49 @@ func (rc *RequestContext) GetTokenWithUsageAndBody() (*types.TokenWithUsage, []b
 		)...)
 
 	return tokenWithUsage, body, nil
+}
+
+// saveImproperlyFormedRequestDebug 保存 "Improperly formed request" 错误的调试信息
+// 需设置环境变量 DEBUG_LOG_DIR 指定保存目录，未设置则跳过保存
+func saveImproperlyFormedRequestDebug(c *gin.Context, errorBody []byte) {
+	debugDir := os.Getenv("DEBUG_LOG_DIR")
+	if debugDir == "" {
+		logger.Warn("DEBUG_LOG_DIR 未设置，跳过保存调试文件")
+		return
+	}
+
+	// 确保目录存在
+	if err := os.MkdirAll(debugDir, 0755); err != nil {
+		logger.Error("创建调试目录失败", logger.Err(err), logger.String("dir", debugDir))
+		return
+	}
+
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("%s/debug_improperly_formed_%s.json", debugDir, timestamp)
+
+	var requestBody []byte
+	if val, exists := c.Get("cw_request_body"); exists {
+		requestBody, _ = val.([]byte)
+	}
+
+	debugData := map[string]any{
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"error":         string(errorBody),
+		"request_body":  string(requestBody),
+		"request_path":  c.Request.URL.Path,
+		"request_model": c.GetString("model"),
+	}
+
+	data, err := json.MarshalIndent(debugData, "", "  ")
+	if err != nil {
+		logger.Error("序列化调试数据失败", logger.Err(err))
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		logger.Error("保存调试文件失败", logger.Err(err), logger.String("filename", filename))
+		return
+	}
+
+	logger.Warn("已保存 Improperly formed request 调试信息", logger.String("filename", filename))
 }
