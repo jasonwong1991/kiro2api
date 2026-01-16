@@ -82,6 +82,12 @@ func NewStreamProcessorContext(
 		jsonBytesByBlockIndex: make(map[int]int),
 	}
 
+	// *** 关键修复：设置 token 计数回调 ***
+	// 确保 SSEStateManager 自动生成的事件也被计入 totalOutputTokens
+	ctx.sseStateManager.SetTokenCountCallback(func(tokens int) {
+		ctx.totalOutputTokens += tokens
+	})
+
 	// 如果启用了 thinking 模式，创建 thinking 处理器
 	if thinkingEnabled {
 		ctx.thinkingProcessor = NewThinkingEventProcessor(false) // Anthropic 格式
@@ -411,18 +417,11 @@ func (esp *EventStreamProcessor) processEvent(event parser.SSEEvent) error {
 						thinkingEvents, normalText := esp.ctx.thinkingProcessor.ProcessTextDelta(text)
 
 						// 发送 thinking 相关事件
+						// 注意：token 计数由 SSEStateManager 回调统一处理
 						for _, evt := range thinkingEvents {
 							if evtData, ok := evt.Data.(map[string]any); ok {
 								if err := esp.ctx.sseStateManager.SendEvent(esp.ctx.c, esp.ctx.sender, evtData); err != nil {
 									logger.Error("发送 thinking 事件失败", logger.Err(err))
-								}
-								// 统计 thinking 内容的 token
-								if evtType, _ := evtData["type"].(string); evtType == "content_block_delta" {
-									if evtDelta, ok := evtData["delta"].(map[string]any); ok {
-										if thinkingText, ok := evtDelta["thinking"].(string); ok {
-											esp.ctx.totalOutputTokens += esp.ctx.tokenEstimator.EstimateTextTokens(thinkingText)
-										}
-									}
 								}
 							}
 						}
@@ -457,58 +456,23 @@ func (esp *EventStreamProcessor) processEvent(event parser.SSEEvent) error {
 		// 非严格模式下，违规事件被跳过但不中断流
 	}
 
-	// *** 关键修复：基于实际发送的 SSE 事件内容累计 token ***
-	// 设计原则：只统计包含实际内容的事件，忽略结构性事件
-	// 原因：
-	// 1. 计费准确性：客户端消费的是实际内容，而不是事件结构
-	// 2. 一致性：与非流式响应的 token 计算逻辑保持一致
-	// 3. 符合 Claude 官方计费规则：只计算内容 token，不计算结构开销
-	switch eventType {
-	case "content_block_delta":
-		// 内容增量事件：累计实际文本或 JSON 内容的 token
+	// *** 注意：token 计数已移至 SSEStateManager 回调中统一处理 ***
+	// 原因：确保只统计实际发送的事件，避免重复计数
+	// 参见：NewStreamProcessorContext 中的 SetTokenCountCallback
+
+	// 特殊处理：input_json_delta 需要累加字节数，在 content_block_stop 时统一计算
+	// 这部分逻辑保留在这里，因为 SSEStateManager 不负责 JSON 累加
+	if eventType == "content_block_delta" {
 		if delta, ok := dataMap["delta"].(map[string]any); ok {
-			deltaType, _ := delta["type"].(string)
-			
-			switch deltaType {
-			case "text_delta":
-				// 文本内容增量
-				if text, ok := delta["text"].(string); ok {
-					esp.ctx.totalOutputTokens += esp.ctx.tokenEstimator.EstimateTextTokens(text)
-				}
-			
-			case "input_json_delta":
-				// *** 修复：累加JSON字节数，延迟到content_block_stop时统一计算 ***
-				// 问题：分段整除导致精度损失（例如 3字节/4=0, 2字节/4=0）
-				// 解决：累加所有分段的字节数，在块结束时一次性计算 token
+			if deltaType, _ := delta["type"].(string); deltaType == "input_json_delta" {
 				if partialJSON, ok := delta["partial_json"].(string); ok {
 					index := extractIndex(dataMap)
-					esp.ctx.jsonBytesByBlockIndex[index] += len(partialJSON)
+					if index >= 0 {
+						esp.ctx.jsonBytesByBlockIndex[index] += len(partialJSON)
+					}
 				}
 			}
 		}
-	
-	case "content_block_start":
-		// 内容块开始事件：累计结构性 token
-		// 根据 Claude 官方文档，tool_use 块的结构字段（type, id, name）也会消耗 token
-		if contentBlock, ok := dataMap["content_block"].(map[string]any); ok {
-			blockType, _ := contentBlock["type"].(string)
-			
-			if blockType == "tool_use" {
-				// 工具调用结构开销：
-				// - "type": "tool_use" ≈ 3 tokens
-				// - "id": "toolu_xxx" ≈ 8 tokens  
-				// - "name" 关键字 ≈ 1 token
-				// - 工具名称本身的 token（使用 estimateToolName 计算）
-				esp.ctx.totalOutputTokens += 12 // 结构字段固定开销
-				
-				if toolName, ok := contentBlock["name"].(string); ok {
-					esp.ctx.totalOutputTokens += esp.ctx.tokenEstimator.EstimateTextTokens(toolName)
-				}
-			}
-		}
-	
-	// 其他事件类型（message_start, content_block_stop, message_delta, message_stop 等）
-	// 不包含实际内容，不累计 token
 	}
 
 	esp.ctx.c.Writer.Flush()

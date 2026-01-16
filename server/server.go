@@ -213,6 +213,13 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 			return
 		}
 
+		// 检测是否为纯 WebSearch 请求
+		if IsWebSearchRequest(anthropicReq) {
+			logger.Info("检测到 WebSearch 工具，路由到 WebSearch 处理")
+			HandleWebSearchRequest(c, anthropicReq, authService)
+			return
+		}
+
 		if anthropicReq.Stream {
 			handleStreamRequest(c, anthropicReq, authService)
 			return

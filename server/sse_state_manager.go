@@ -17,14 +17,19 @@ type BlockState struct {
 	ToolUseID string `json:"tool_use_id,omitempty"` // 仅用于工具块
 }
 
+// TokenCountCallback token 计数回调函数类型
+// 用于在 SSEStateManager 发送事件时通知外部累计 token
+type TokenCountCallback func(tokens int)
+
 // SSEStateManager SSE事件状态管理器，确保事件序列符合Claude规范
 type SSEStateManager struct {
-	messageStarted   bool
-	messageDeltaSent bool // 新增：跟踪message_delta是否已发送
-	activeBlocks     map[int]*BlockState
-	messageEnded     bool
-	nextBlockIndex   int
-	strictMode       bool
+	messageStarted     bool
+	messageDeltaSent   bool // 新增：跟踪message_delta是否已发送
+	activeBlocks       map[int]*BlockState
+	messageEnded       bool
+	nextBlockIndex     int
+	strictMode         bool
+	tokenCountCallback TokenCountCallback // token 计数回调
 }
 
 // NewSSEStateManager 创建SSE状态管理器
@@ -42,6 +47,18 @@ func (ssm *SSEStateManager) Reset() {
 	ssm.messageEnded = false
 	ssm.activeBlocks = make(map[int]*BlockState)
 	ssm.nextBlockIndex = 0
+}
+
+// SetTokenCountCallback 设置 token 计数回调
+func (ssm *SSEStateManager) SetTokenCountCallback(callback TokenCountCallback) {
+	ssm.tokenCountCallback = callback
+}
+
+// addTokens 内部方法：通过回调累加 token
+func (ssm *SSEStateManager) addTokens(tokens int) {
+	if ssm.tokenCountCallback != nil && tokens > 0 {
+		ssm.tokenCountCallback(tokens)
+	}
 }
 
 // SendEvent 受控的事件发送，确保符合Claude规范
@@ -172,12 +189,24 @@ func (ssm *SSEStateManager) handleContentBlockStart(c *gin.Context, sender Strea
 
 	// 创建或更新块状态
 	toolUseID := ""
+	toolName := ""
 	if blockType == "tool_use" {
 		if contentBlock, ok := eventData["content_block"].(map[string]any); ok {
 			if id, ok := contentBlock["id"].(string); ok {
 				toolUseID = id
 			}
+			if name, ok := contentBlock["name"].(string); ok {
+				toolName = name
+			}
 		}
+		// *** 关键修复：累计 tool_use 结构性 token ***
+		// 结构开销：type + id + name 关键字 ≈ 12 tokens
+		// 工具名称本身的 token（按字符长度估算）
+		structTokens := 12
+		if toolName != "" {
+			structTokens += (len(toolName) + 3) / 4 // 工具名称 token
+		}
+		ssm.addTokens(structTokens)
 	}
 
 	ssm.activeBlocks[index] = &BlockState{
@@ -272,6 +301,28 @@ func (ssm *SSEStateManager) handleContentBlockDelta(c *gin.Context, sender Strea
 			return errors.New(errMsg)
 		}
 		return nil
+	}
+
+	// *** 关键修复：累计 delta 内容的 token ***
+	// 确保自动生成的事件也被计数
+	if delta, ok := eventData["delta"].(map[string]any); ok {
+		deltaType, _ := delta["type"].(string)
+		switch deltaType {
+		case "text_delta":
+			if text, ok := delta["text"].(string); ok && text != "" {
+				// 文本 token：约 4 字符/token
+				ssm.addTokens((len(text) + 3) / 4)
+			}
+		case "input_json_delta":
+			if partialJSON, ok := delta["partial_json"].(string); ok && partialJSON != "" {
+				// JSON token：约 4 字符/token
+				ssm.addTokens((len(partialJSON) + 3) / 4)
+			}
+		case "thinking_delta":
+			if thinking, ok := delta["thinking"].(string); ok && thinking != "" {
+				ssm.addTokens((len(thinking) + 3) / 4)
+			}
+		}
 	}
 
 	return sender.SendEvent(c, eventData)

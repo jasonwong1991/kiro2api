@@ -32,6 +32,13 @@ const IdcRefreshTokenURL = "https://oidc.us-east-1.amazonaws.com/token"
 // CodeWhispererURL CodeWhisperer API的URL
 const CodeWhispererURL = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
 
+// McpURLTemplate MCP API URL 模板 (用于 WebSearch 等工具调用)
+// 格式: https://q.{region}.amazonaws.com/mcp
+const McpURLTemplate = "https://q.%s.amazonaws.com/mcp"
+
+// DefaultMcpRegion 默认 MCP 区域
+const DefaultMcpRegion = "us-east-1"
+
 // MaxToolDescriptionLength 工具描述的最大长度（字符数）
 // 可通过环境变量 MAX_TOOL_DESCRIPTION_LENGTH 配置，默认 10000
 var MaxToolDescriptionLength = getEnvIntWithDefault("MAX_TOOL_DESCRIPTION_LENGTH", 10000)

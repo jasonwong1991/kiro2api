@@ -1,10 +1,20 @@
 package types
 
 // AnthropicTool 表示 Anthropic API 的工具结构
+// 支持两种格式：
+// 1. 普通工具：{ name, description, input_schema }
+// 2. WebSearch 工具：{ type: "web_search_20250305", name: "web_search", max_uses: 8 }
 type AnthropicTool struct {
+	Type        string         `json:"type,omitempty"`        // 工具类型，如 "web_search_20250305"（WebSearch 工具专用）
 	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"input_schema"`
+	Description string         `json:"description,omitempty"`
+	InputSchema map[string]any `json:"input_schema,omitempty"`
+	MaxUses     int            `json:"max_uses,omitempty"`    // 最大使用次数（WebSearch 工具专用）
+}
+
+// IsWebSearch 检查是否为 WebSearch 工具
+func (t *AnthropicTool) IsWebSearch() bool {
+	return t.Name == "web_search" || (t.Type != "" && len(t.Type) >= 10 && t.Type[:10] == "web_search")
 }
 
 // ToolChoice 表示工具选择策略
