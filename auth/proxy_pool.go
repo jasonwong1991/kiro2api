@@ -243,7 +243,8 @@ func (pm *ProxyPoolManager) createProxyClient(proxyURL string) (*http.Client, er
 
 	return &http.Client{
 		Transport: transport,
-		Timeout:   30 * time.Second, // 设置请求超时
+		// 不设置 client-level Timeout，因为流式请求（SSE）可能需要更长时间
+		// 超时应由请求级别的 context 控制
 	}, nil
 }
 

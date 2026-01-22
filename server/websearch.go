@@ -184,7 +184,13 @@ func executeMCPRequestWithRetry(c *gin.Context, mcpReq types.McpRequest, authSer
 			logger.String("url", url),
 			logger.String("request_id", mcpReq.ID))
 
-		resp, err := utils.DoRequest(req)
+		// 使用 token 关联的代理客户端（如果有）
+		client := tokenInfo.HTTPClient
+		if client == nil {
+			client = utils.SharedHTTPClient
+		}
+
+		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
 			time.Sleep(config.UpstreamRetryDelay)

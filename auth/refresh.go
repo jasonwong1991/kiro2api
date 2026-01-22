@@ -12,56 +12,80 @@ import (
 	"time"
 )
 
-// refreshSingleToken 刷新单个token
+// refreshSingleToken 刷新单个token（带代理切换重试）
 func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex int) (types.TokenInfo, error) {
-	// 获取代理（如果配置了代理池）
-	var client *http.Client
-	var proxyURL string
+	// 确定最大重试次数
+	maxRetries := 1
 	if tm.proxyPool != nil {
-		tokenIndex := fmt.Sprintf("%d", configIndex)
+		maxRetries = 3 // 如果有代理池，最多重试3次
+	}
+
+	tokenIndexStr := fmt.Sprintf("%d", configIndex)
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// 获取代理（如果配置了代理池）
+		var client *http.Client
+		var proxyURL string
+		if tm.proxyPool != nil {
+			var err error
+			proxyURL, client, err = tm.proxyPool.GetProxyForToken(tokenIndexStr)
+			if err != nil {
+				logger.Warn("获取代理失败，使用默认客户端",
+					logger.String("token_index", tokenIndexStr),
+					logger.Err(err))
+				client = nil
+			} else {
+				logger.Debug("使用代理刷新token",
+					logger.String("token_index", tokenIndexStr),
+					logger.String("proxy_url", proxyURL),
+					logger.Int("attempt", attempt+1))
+			}
+		}
+
+		// 确保 region 有值（仅 IdC 认证需要）
+		region := authConfig.Region
+		if region == "" {
+			region = DefaultRegion
+		}
+
+		var token types.TokenInfo
 		var err error
-		proxyURL, client, err = tm.proxyPool.GetProxyForToken(tokenIndex)
-		if err != nil {
-			logger.Warn("获取代理失败，使用默认客户端",
-				logger.String("token_index", tokenIndex),
+
+		switch authConfig.AuthType {
+		case AuthMethodSocial:
+			token, err = refreshSocialToken(authConfig.RefreshToken, client)
+		case AuthMethodIdC:
+			token, err = refreshIdCToken(authConfig, client)
+		default:
+			return types.TokenInfo{}, fmt.Errorf("不支持的认证类型: %s", authConfig.AuthType)
+		}
+
+		if err == nil {
+			token.Region = region
+			return token, nil
+		}
+
+		lastErr = err
+
+		// 如果是 Token 失效错误，不重试
+		if _, ok := err.(*types.TokenInvalidError); ok {
+			return types.TokenInfo{}, err
+		}
+
+		// 如果使用代理且刷新失败，报告代理失败并重置绑定以便下次获取新代理
+		if tm.proxyPool != nil && proxyURL != "" {
+			tm.proxyPool.ReportProxyFailure(proxyURL)
+			tm.proxyPool.ResetTokenProxy(tokenIndexStr)
+			logger.Warn("代理刷新失败，切换代理重试",
+				logger.String("token_index", tokenIndexStr),
+				logger.String("failed_proxy", proxyURL),
+				logger.Int("attempt", attempt+1),
 				logger.Err(err))
-			client = nil // 使用默认客户端
-		} else {
-			logger.Debug("使用代理刷新token",
-				logger.String("token_index", tokenIndex),
-				logger.String("proxy_url", proxyURL))
 		}
 	}
 
-	var token types.TokenInfo
-	var err error
-
-	// 确保 region 有值（仅 IdC 认证需要）
-	region := authConfig.Region
-	if region == "" {
-		region = DefaultRegion
-	}
-
-	switch authConfig.AuthType {
-	case AuthMethodSocial:
-		token, err = refreshSocialToken(authConfig.RefreshToken, client)
-	case AuthMethodIdC:
-		token, err = refreshIdCToken(authConfig, client)
-	default:
-		return types.TokenInfo{}, fmt.Errorf("不支持的认证类型: %s", authConfig.AuthType)
-	}
-
-	// 如果使用代理且刷新失败，报告代理失败
-	if err != nil && tm.proxyPool != nil && proxyURL != "" {
-		tm.proxyPool.ReportProxyFailure(proxyURL)
-	}
-
-	// 设置 token 的 region（用于记录）
-	if err == nil {
-		token.Region = region
-	}
-
-	return token, err
+	return types.TokenInfo{}, lastErr
 }
 
 // refreshSocialToken 刷新Social认证token (固定使用 us-east-1)

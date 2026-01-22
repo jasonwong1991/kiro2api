@@ -29,6 +29,7 @@ tokens.json
 tokens*.json
 auth_config.json
 generateAssistantResponse.json
+cache_snapshot.json
 
 # 旧文件清理标记
 1.json

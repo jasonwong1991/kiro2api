@@ -1,6 +1,7 @@
 package types
 
 import (
+	"net/http"
 	"time"
 )
 
@@ -36,6 +37,10 @@ type Token struct {
 
 	// 设备指纹信息（每个账号的固定设备标识）
 	Fingerprint *DeviceFingerprint `json:"fingerprint,omitempty"`
+
+	// 运行时字段（不序列化）
+	ConfigIndex int          `json:"-"` // 配置索引
+	HTTPClient  *http.Client `json:"-"` // 代理客户端
 }
 
 // FromRefreshResponse 从RefreshResponse创建Token

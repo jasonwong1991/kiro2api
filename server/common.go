@@ -102,7 +102,13 @@ func executeCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReq
 		return nil, err
 	}
 
-	resp, err := utils.DoRequest(req)
+	// 使用 token 关联的代理客户端（如果有）
+	client := tokenInfo.HTTPClient
+	if client == nil {
+		client = utils.SharedHTTPClient
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		handleRequestSendError(c, err)
 		return nil, err
@@ -191,8 +197,13 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 			return nil, tokenInfo, err
 		}
 
-		// 发送请求
-		resp, err := utils.DoRequest(req)
+		// 发送请求（使用 token 关联的代理客户端）
+		client := tokenInfo.HTTPClient
+		if client == nil {
+			client = utils.SharedHTTPClient
+		}
+
+		resp, err := client.Do(req)
 		if err != nil {
 			logger.Warn("请求发送失败",
 				addReqFields(c,

@@ -80,6 +80,7 @@ func (tm *TokenManager) SaveCacheSnapshot() error {
 	for k, v := range tm.cache.tokens {
 		snapshot.Tokens[k] = &CachedToken{
 			Token:         v.Token,
+			Index:         v.Index,
 			UsageInfo:     v.UsageInfo,
 			CachedAt:      v.CachedAt,
 			LastCheckAt:   v.LastCheckAt,

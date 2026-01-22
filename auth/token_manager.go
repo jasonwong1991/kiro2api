@@ -72,6 +72,7 @@ type SimpleTokenCache struct {
 // CachedToken 缓存的token信息
 type CachedToken struct {
 	Token         types.TokenInfo
+	Index         int // 配置索引
 	UsageInfo     *types.UsageLimits
 	CachedAt      time.Time // 上次成功刷新的时间
 	LastCheckAt   time.Time // 上次尝试刷新的时间（包括失败的尝试）
@@ -290,22 +291,25 @@ func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 	// 如果余额降到接近0（< 1.0），异步触发刷新来验证真实余额
 	// 避免死循环：刷新后如果真实余额 < 0.1（MinAvailableThreshold），账号将不再被选中
 	if bestToken.Available < 1.0 && oldAvailable >= 1.0 {
-		// 提取 token index 用于异步刷新
-		tokenIndex := -1
-		for i := range tm.configs {
-			cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
-			if tm.cache.tokens[cacheKey] == bestToken {
-				tokenIndex = i
-				break
-			}
-		}
-		if tokenIndex >= 0 {
-			// 异步刷新，不阻塞当前请求
-			go tm.verifyLowBalanceToken(tokenIndex)
+		// 使用缓存的 Index
+		if bestToken.Index >= 0 {
+			go tm.verifyLowBalanceToken(bestToken.Index)
 		}
 	}
 
-	return bestToken.Token, nil
+	// 复制 token 信息
+	token := bestToken.Token
+	token.ConfigIndex = bestToken.Index
+
+	// 注入代理客户端（如果启用）
+	if tm.proxyPool != nil && bestToken.Index >= 0 {
+		tokenIndexStr := fmt.Sprintf("%d", bestToken.Index)
+		if _, client, err := tm.proxyPool.GetProxyForToken(tokenIndexStr); err == nil && client != nil {
+			token.HTTPClient = client
+		}
+	}
+
+	return token, nil
 }
 
 // GetBestTokenWithUsage 获取最优可用token（包含使用信息）
@@ -334,22 +338,27 @@ func (tm *TokenManager) GetBestTokenWithUsage() (*types.TokenWithUsage, error) {
 
 	// 如果余额降到接近0（< 1.0），异步触发刷新来验证真实余额
 	if bestToken.Available < 1.0 && oldAvailable >= 1.0 {
-		tokenIndex := -1
-		for i := range tm.configs {
-			cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
-			if tm.cache.tokens[cacheKey] == bestToken {
-				tokenIndex = i
-				break
-			}
+		// 使用缓存的 Index
+		if bestToken.Index >= 0 {
+			go tm.verifyLowBalanceToken(bestToken.Index)
 		}
-		if tokenIndex >= 0 {
-			go tm.verifyLowBalanceToken(tokenIndex)
+	}
+
+	// 复制 token 信息
+	token := bestToken.Token
+	token.ConfigIndex = bestToken.Index
+
+	// 注入代理客户端（如果启用）
+	if tm.proxyPool != nil && bestToken.Index >= 0 {
+		tokenIndexStr := fmt.Sprintf("%d", bestToken.Index)
+		if _, client, err := tm.proxyPool.GetProxyForToken(tokenIndexStr); err == nil && client != nil {
+			token.HTTPClient = client
 		}
 	}
 
 	// 构造 TokenWithUsage
 	tokenWithUsage := &types.TokenWithUsage{
-		TokenInfo:       bestToken.Token,
+		TokenInfo:       token,
 		UsageLimits:     bestToken.UsageInfo,
 		AvailableCount:  available, // 使用扣减后的余额
 		LastUsageCheck:  bestToken.LastUsed,
@@ -536,9 +545,8 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 		// 清除失效标记
 		delete(tm.invalidated, index)
 
-		// 检查使用限制
-		checker := tm.getUsageCheckerForToken(index)
-		if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+		// 检查使用限制（带代理切换重试）
+		if usage, checkErr := tm.checkUsageLimitsWithRetry(index, token); checkErr == nil {
 			available := CalculateAvailableCount(usage)
 			nextResetTime := GetNextResetTime(usage)
 
@@ -546,6 +554,7 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 			now := time.Now()
 			tm.cache.tokens[cacheKey] = &CachedToken{
 				Token:         token,
+				Index:         index,
 				UsageInfo:     usage,
 				CachedAt:      now,
 				LastCheckAt:   now,
@@ -978,13 +987,12 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		// 如果刷新成功，清除失效标记
 		delete(tm.invalidated, i)
 
-		// 检查使用限制
+		// 检查使用限制（带代理切换重试）
 		var usageInfo *types.UsageLimits
 		var available float64
 		var nextResetTime time.Time
 
-		checker := tm.getUsageCheckerForToken(i)
-		if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+		if usage, checkErr := tm.checkUsageLimitsWithRetry(i, token); checkErr == nil {
 			usageInfo = usage
 			available = CalculateAvailableCount(usage)
 			nextResetTime = GetNextResetTime(usage)
@@ -1007,6 +1015,7 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		now := time.Now()
 		tm.cache.tokens[cacheKey] = &CachedToken{
 			Token:         token,
+			Index:         i,
 			UsageInfo:     usageInfo,
 			CachedAt:      now, // 成功刷新时间
 			LastCheckAt:   now, // 最后检查时间
@@ -1106,23 +1115,64 @@ func GetNextResetTime(usage *types.UsageLimits) time.Time {
 
 // getUsageCheckerForToken 获取指定token索引的usage checker（带代理支持）
 // 内部方法：调用者必须确保索引有效
-func (tm *TokenManager) getUsageCheckerForToken(tokenIndex int) *UsageLimitsChecker {
+// 返回 checker 和使用的代理 URL（如果有）
+func (tm *TokenManager) getUsageCheckerForToken(tokenIndex int) (*UsageLimitsChecker, string) {
 	// 如果没有代理池，使用默认客户端
 	if tm.proxyPool == nil {
-		return NewUsageLimitsChecker(tokenIndex)
+		return NewUsageLimitsChecker(tokenIndex), ""
 	}
 
 	// 获取代理客户端
 	tokenIndexStr := fmt.Sprintf("%d", tokenIndex)
-	_, client, err := tm.proxyPool.GetProxyForToken(tokenIndexStr)
+	proxyURL, client, err := tm.proxyPool.GetProxyForToken(tokenIndexStr)
 	if err != nil {
 		logger.Warn("获取代理失败，usage checker使用默认客户端",
 			logger.String("token_index", tokenIndexStr),
 			logger.Err(err))
-		return NewUsageLimitsChecker(tokenIndex)
+		return NewUsageLimitsChecker(tokenIndex), ""
 	}
 
-	return NewUsageLimitsChecker(tokenIndex, client)
+	return NewUsageLimitsChecker(tokenIndex, client), proxyURL
+}
+
+// checkUsageLimitsWithRetry 带代理切换重试的使用限制检查
+func (tm *TokenManager) checkUsageLimitsWithRetry(index int, token types.TokenInfo) (*types.UsageLimits, error) {
+	maxRetries := 1
+	if tm.proxyPool != nil {
+		maxRetries = 3
+	}
+
+	tokenIndexStr := fmt.Sprintf("%d", index)
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		checker, proxyURL := tm.getUsageCheckerForToken(index)
+		usage, err := checker.CheckUsageLimits(token)
+		if err == nil {
+			return usage, nil
+		}
+
+		lastErr = err
+
+		// 如果是 Token 失效错误，不重试
+		if types.IsTokenInvalidError(err) {
+			return nil, err
+		}
+
+		// 如果配置了代理池，报告失败并重置绑定以便下次获取新代理
+		if tm.proxyPool != nil {
+			if proxyURL != "" {
+				tm.proxyPool.ReportProxyFailure(proxyURL)
+			}
+			tm.proxyPool.ResetTokenProxy(tokenIndexStr)
+			logger.Warn("使用限制检查失败，切换代理重试",
+				logger.String("token_index", tokenIndexStr),
+				logger.Int("attempt", attempt+1),
+				logger.Err(err))
+		}
+	}
+
+	return nil, lastErr
 }
 
 // generateConfigOrder 生成token配置的顺序
@@ -1553,9 +1603,8 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 
 					result.token = token
 
-					// 检查使用限制
-					checker := tm.getUsageCheckerForToken(task.index)
-					if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+					// 检查使用限制（带代理切换重试）
+					if usage, checkErr := tm.checkUsageLimitsWithRetry(task.index, token); checkErr == nil {
 						result.usageInfo = usage
 						result.available = CalculateAvailableCount(usage)
 						result.nextResetTime = GetNextResetTime(usage)
@@ -1602,6 +1651,7 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 			now := time.Now()
 			tm.cache.tokens[cacheKey] = &CachedToken{
 				Token:         result.token,
+				Index:         result.index,
 				UsageInfo:     result.usageInfo,
 				CachedAt:      now,
 				LastCheckAt:   now,
@@ -1682,9 +1732,8 @@ func (tm *TokenManager) verifyLowBalanceToken(index int) {
 		return
 	}
 
-	// 检查使用限制获取真实余额
-	checker := tm.getUsageCheckerForToken(index)
-	usage, checkErr := checker.CheckUsageLimits(token)
+	// 检查使用限制获取真实余额（带代理切换重试）
+	usage, checkErr := tm.checkUsageLimitsWithRetry(index, token)
 	if checkErr != nil {
 		logger.Warn("低余额验证：检查使用限制失败",
 			logger.Int("index", index),
@@ -1706,6 +1755,7 @@ func (tm *TokenManager) verifyLowBalanceToken(index int) {
 	now := time.Now()
 	tm.cache.tokens[cacheKey] = &CachedToken{
 		Token:         token,
+		Index:         index,
 		UsageInfo:     usage,
 		CachedAt:      now,
 		LastCheckAt:   now,
@@ -1786,9 +1836,8 @@ func (tm *TokenManager) asyncRefreshToken(index int) {
 			return
 		}
 
-		// 检查使用限制（不持锁）
-		checker := tm.getUsageCheckerForToken(index)
-		usage, checkErr := checker.CheckUsageLimits(token)
+		// 检查使用限制（带代理切换重试，不持锁）
+		usage, checkErr := tm.checkUsageLimitsWithRetry(index, token)
 		if checkErr != nil {
 			logger.Warn("异步刷新：检查使用限制失败",
 				logger.Int("index", index),
@@ -1811,6 +1860,7 @@ func (tm *TokenManager) asyncRefreshToken(index int) {
 		now := time.Now()
 		tm.cache.tokens[cacheKey] = &CachedToken{
 			Token:         token,
+			Index:         index,
 			UsageInfo:     usage,
 			CachedAt:      now,
 			LastCheckAt:   now,
@@ -1884,8 +1934,7 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 	var available float64
 	var nextResetTime time.Time
 
-	checker := tm.getUsageCheckerForToken(index)
-	if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+	if usage, checkErr := tm.checkUsageLimitsWithRetry(index, token); checkErr == nil {
 		usageInfo = usage
 		available = CalculateAvailableCount(usage)
 		nextResetTime = GetNextResetTime(usage)
@@ -1913,6 +1962,7 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 	now := time.Now()
 	tm.cache.tokens[cacheKey] = &CachedToken{
 		Token:         token,
+		Index:         index,
 		UsageInfo:     usageInfo,
 		CachedAt:      now,
 		LastCheckAt:   now,
@@ -2033,9 +2083,8 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 
 				result.token = token
 
-				// 检查使用限制
-				checker := tm.getUsageCheckerForToken(task.index)
-				if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+				// 检查使用限制（带代理切换重试）
+				if usage, checkErr := tm.checkUsageLimitsWithRetry(task.index, token); checkErr == nil {
 					result.usageInfo = usage
 					result.available = CalculateAvailableCount(usage)
 					result.nextResetTime = GetNextResetTime(usage)
@@ -2096,6 +2145,7 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 		now := time.Now()
 		tm.cache.tokens[cacheKey] = &CachedToken{
 			Token:         tr.token,
+			Index:         tr.index,
 			UsageInfo:     tr.usageInfo,
 			CachedAt:      now,
 			LastCheckAt:   now,
@@ -2291,9 +2341,8 @@ func (tm *TokenManager) refreshActivePoolTokens() {
 
 				result.token = token
 
-				// 检查使用限制
-				checker := tm.getUsageCheckerForToken(task.index)
-				if usage, checkErr := checker.CheckUsageLimits(token); checkErr == nil {
+				// 检查使用限制（带代理切换重试）
+				if usage, checkErr := tm.checkUsageLimitsWithRetry(task.index, token); checkErr == nil {
 					result.usageInfo = usage
 					result.available = CalculateAvailableCount(usage)
 					result.nextResetTime = GetNextResetTime(usage)
@@ -2338,6 +2387,7 @@ func (tm *TokenManager) refreshActivePoolTokens() {
 		now := time.Now()
 		tm.cache.tokens[cacheKey] = &CachedToken{
 			Token:         result.token,
+			Index:         result.index,
 			UsageInfo:     result.usageInfo,
 			CachedAt:      now,
 			LastCheckAt:   now,
