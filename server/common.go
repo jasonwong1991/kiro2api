@@ -153,6 +153,17 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 					logger.Err(err),
 				)...)
 			lastErr = err
+
+			// 快速失败：如果所有token都不可用，立即返回503，不再重试
+			if authService.GetTokenManager().IsAllTokensUnavailable() {
+				logger.Warn("所有token都不可用，快速失败",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+					)...)
+				respondError(c, http.StatusServiceUnavailable, "所有token暂时不可用，请稍后重试")
+				return nil, tokenInfo, fmt.Errorf("all tokens unavailable")
+			}
+
 			if attempt < config.RetryMaxAttempts {
 				time.Sleep(config.UpstreamRetryDelay)
 				continue

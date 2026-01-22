@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "config_hash": "c9b8799f5152d47e",
+  "saved_at": "2026-01-22T13:07:01.835911+08:00",
+  "tokens": {
+    "token_0": {
+      "Token": {
+        "accessToken": "aoaAAAAAGlxuRY0T4mUia4DUm8XipNiX7IUPQyH31sanAwiF_3qxV5IVHTGKbpdqg3LvIPuSXkuPJvU18t9Ee4gsgBkc0:MGUCMQD7IwHmGDPyjTwxEoKcFVddujJ8nlf8t3+hA9cUkFlGnHCT6ENj44bccZiA2eV8FPsCMDAugsCi+4CxYx5zWW1IiEWwfYMursV35VKo1yPdPETm5k8iBDOQrCFWPrTeJt9ing",
+        "refreshToken": "aorAAAAAGmr2CoKke0uwhJRQlRIY8KHoz6kMl1CimOk3pB9Iqc6XKGFzmTa7dEVEJocSusl4lIBKEAL8te32ikJ2cBkc0:MGQCMFUwDdFpmOt7ZCvW0z+Zcq5xEqOqKHg7t2EkulcuQxousalNbI/ZCDjxoQNpmeZBrAIwIou873k+UPLyyw1MnBD4MEcBp1Iu4gAVZYZ+24G8UlwS0LPwkQ8gyFHPk7pniWEt",
+        "expiresAt": "2026-01-22T13:43:50.706213+08:00",
+        "expiresIn": 3600,
+        "fingerprint": {
+          "userAgent": "aws-sdk-js/1.1.27 ua/2.1 os/darwin#24.4.0 lang/js md/nodejs#18.1.3 api/codewhispererstreaming#1.1.27 m/E 5aaefbfb5af7d7c25161ced854753addd80e793f968a672e5dbe39e17d835c12",
+          "xAmzUserAgent": "aws-sdk-js/1.1.27 5aaefbfb5af7d7c25161ced854753addd80e793f968a672e5dbe39e17d835c12",
+          "deviceHash": "5aaefbfb5af7d7c25161ced854753addd80e793f968a672e5dbe39e17d835c12",
+          "osVersion": "24.4.0",
+          "nodeVersion": "18.1.3",
+          "sdkVersion": "1.1.27",
+          "kiroAgentMode": "spec",
+          "ideVersion": "KiroIDE-0.6.8",
+          "refreshUserAgent": "node",
+          "refreshXAmzAgent": "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE-0.4.9",
+          "usageUserAgent": "aws-sdk-js/1.0.0 ua/2.1 os/darwin#24.4.0 lang/js md/nodejs#18.1.3 api/codewhispererruntime#1.0.0 m/E 6f01855442aa7158f4c9de45708d3d93c6fa84f402ca4cf76300c285edfcacbf",
+          "usageXAmzAgent": "aws-sdk-js/1.0.0 6f01855442aa7158f4c9de45708d3d93c6fa84f402ca4cf76300c285edfcacbf"
+        }
+      },
+      "UsageInfo": {
+        "limits": [],
+        "usageBreakdownList": [
+          {
+            "nextDateReset": 1769904000,
+            "overageCharges": 0,
+            "resourceType": "CREDIT",
+            "unit": "INVOCATIONS",
+            "usageLimit": 50,
+            "usageLimitWithPrecision": 50,
+            "overageRate": 0.04,
+            "currentUsage": 22,
+            "currentUsageWithPrecision": 22.08,
+            "overageCap": 10000,
+            "overageCapWithPrecision": 10000,
+            "currency": "USD",
+            "currentOverages": 0,
+            "currentOveragesWithPrecision": 0,
+            "freeTrialInfo": {
+              "freeTrialExpiry": 1767844477.35,
+              "freeTrialStatus": "EXPIRED",
+              "usageLimit": 500,
+              "usageLimitWithPrecision": 500,
+              "currentUsage": 500,
+              "currentUsageWithPrecision": 500
+            },
+            "displayName": "Credit",
+            "displayNamePlural": "Credits"
+          }
+        ],
+        "userInfo": {
+          "email": "6kFXDkYc@wongzw.ggff.net",
+          "userId": "d-9067642ac7.947804b8-3061-70f6-2c57-b0946a656325"
+        },
+        "daysUntilReset": 0,
+        "overageConfiguration": {
+          "overageStatus": "DISABLED"
+        },
+        "nextDateReset": 1769904000,
+        "subscriptionInfo": {
+          "subscriptionManagementTarget": "PURCHASE",
+          "overageCapability": "OVERAGE_INCAPABLE",
+          "subscriptionTitle": "KIRO FREE",
+          "type": "Q_DEVELOPER_STANDALONE_FREE",
+          "upgradeCapability": "UPGRADE_CAPABLE"
+        },
+        "usageBreakdown": null
+      },
+      "CachedAt": "2026-01-22T12:43:51.73175+08:00",
+      "LastCheckAt": "2026-01-22T12:43:51.73175+08:00",
+      "LastUsed": "2026-01-22T13:01:39.259922+08:00",
+      "Available": 4.920000000000002,
+      "NextResetTime": "2026-02-01T08:00:00+08:00"
+    }
+  },
+  "invalidated": {},
+  "active_pool": [
+    0
+  ],
+  "pool_round_robin": 0
+}
