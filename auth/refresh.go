@@ -36,7 +36,7 @@ func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex in
 	var token types.TokenInfo
 	var err error
 
-	// 确保 region 有值
+	// 确保 region 有值（仅 IdC 认证需要）
 	region := authConfig.Region
 	if region == "" {
 		region = DefaultRegion
@@ -44,7 +44,7 @@ func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex in
 
 	switch authConfig.AuthType {
 	case AuthMethodSocial:
-		token, err = refreshSocialToken(authConfig.RefreshToken, region, client)
+		token, err = refreshSocialToken(authConfig.RefreshToken, client)
 	case AuthMethodIdC:
 		token, err = refreshIdCToken(authConfig, client)
 	default:
@@ -56,7 +56,7 @@ func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex in
 		tm.proxyPool.ReportProxyFailure(proxyURL)
 	}
 
-	// 设置 token 的 region
+	// 设置 token 的 region（用于记录）
 	if err == nil {
 		token.Region = region
 	}
@@ -64,9 +64,9 @@ func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex in
 	return token, err
 }
 
-// refreshSocialToken 刷新Social认证token
+// refreshSocialToken 刷新Social认证token (固定使用 us-east-1)
 // client 参数可选：如果为 nil，使用 utils.SharedHTTPClient
-func refreshSocialToken(refreshToken string, region string, client *http.Client) (types.TokenInfo, error) {
+func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenInfo, error) {
 	// 为该账号生成固定的设备指纹
 	fp := utils.GenerateRefreshFingerprint(refreshToken)
 
@@ -79,10 +79,7 @@ func refreshSocialToken(refreshToken string, region string, client *http.Client)
 		return types.TokenInfo{}, fmt.Errorf("序列化请求失败: %v", err)
 	}
 
-	// 根据 region 构建刷新 URL
-	refreshURL := fmt.Sprintf(config.RefreshTokenURLTemplate, region)
-
-	req, err := http.NewRequest("POST", refreshURL, bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", config.RefreshTokenURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return types.TokenInfo{}, fmt.Errorf("创建请求失败: %v", err)
 	}
@@ -267,17 +264,9 @@ func refreshIdCToken(authConfig AuthConfig, client *http.Client) (types.TokenInf
 	return token, nil
 }
 
-// RefreshSocialToken 公开的Social token刷新函数（使用默认区域）
+// RefreshSocialToken 公开的Social token刷新函数
 func RefreshSocialToken(refreshToken string) (types.TokenInfo, error) {
-	return refreshSocialToken(refreshToken, DefaultRegion, nil)
-}
-
-// RefreshSocialTokenWithRegion 公开的Social token刷新函数（指定区域）
-func RefreshSocialTokenWithRegion(refreshToken string, region string) (types.TokenInfo, error) {
-	if region == "" {
-		region = DefaultRegion
-	}
-	return refreshSocialToken(refreshToken, region, nil)
+	return refreshSocialToken(refreshToken, nil)
 }
 
 // RefreshIdCToken 公开的IdC token刷新函数

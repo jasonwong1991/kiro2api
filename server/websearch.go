@@ -156,12 +156,8 @@ func executeMCPRequestWithRetry(c *gin.Context, mcpReq types.McpRequest, authSer
 		}
 
 		// 构建 URL (https://q.{region}.amazonaws.com/mcp)
-		// 使用 token 的 region，如果没有则使用默认区域
-		region := tokenInfo.Region
-		if region == "" {
-			region = config.DefaultMcpRegion
-		}
-		url := fmt.Sprintf(config.McpURLTemplate, region)
+		// 使用默认区域
+		url := fmt.Sprintf(config.McpURLTemplate, config.DefaultMcpRegion)
 
 		reqBody, _ := utils.SafeMarshal(mcpReq)
 		req, err := http.NewRequest("POST", url, bytes.NewReader(reqBody))
