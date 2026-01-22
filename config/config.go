@@ -23,14 +23,17 @@ var ModelMap = map[string]string{
 	"claude-sonnet-4-20250514-thinking":   "claude-sonnet-4",
 }
 
-// RefreshTokenURL 刷新token的URL (social方式)
-const RefreshTokenURL = "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
+// RefreshTokenURL 刷新token的URL (social方式) - 模板格式
+// 格式: https://prod.{region}.auth.desktop.kiro.dev/refreshToken
+const RefreshTokenURLTemplate = "https://prod.%s.auth.desktop.kiro.dev/refreshToken"
 
-// IdcRefreshTokenURL IdC认证方式的刷新token URL
-const IdcRefreshTokenURL = "https://oidc.us-east-1.amazonaws.com/token"
+// IdcRefreshTokenURL IdC认证方式的刷新token URL - 模板格式
+// 格式: https://oidc.{region}.amazonaws.com/token
+const IdcRefreshTokenURLTemplate = "https://oidc.%s.amazonaws.com/token"
 
-// CodeWhispererURL CodeWhisperer API的URL
-const CodeWhispererURL = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
+// CodeWhispererURL CodeWhisperer API的URL - 模板格式
+// 格式: https://codewhisperer.{region}.amazonaws.com/generateAssistantResponse
+const CodeWhispererURLTemplate = "https://codewhisperer.%s.amazonaws.com/generateAssistantResponse"
 
 // McpURLTemplate MCP API URL 模板 (用于 WebSearch 等工具调用)
 // 格式: https://q.{region}.amazonaws.com/mcp

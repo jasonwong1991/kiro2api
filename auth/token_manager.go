@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"kiro2api/config"
 	"kiro2api/logger"
@@ -55,6 +56,10 @@ type TokenManager struct {
 
 	// 刷新管理器（防止重复刷新）
 	refreshManager *utils.TokenRefreshManager
+
+	// 生命周期控制（优雅关闭）
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // SimpleTokenCache 简化的token缓存（纯数据结构，无锁）
@@ -125,6 +130,9 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		logger.String("config_path", configPath),
 		logger.Bool("proxy_pool_enabled", proxyPool != nil))
 
+	// 创建生命周期context
+	ctx, cancel := context.WithCancel(context.Background())
+
 	tm := &TokenManager{
 		cache:             NewSimpleTokenCache(config.TokenCacheTTL),
 		configs:           configs,
@@ -141,6 +149,8 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		proxyPool:         proxyPool,
 		refreshStop:       make(chan bool, 1),
 		refreshManager:    utils.NewTokenRefreshManager(), // 初始化刷新管理器
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 
 	// 如果使用活跃池策略，启动定时刷新任务
@@ -1733,6 +1743,16 @@ func (tm *TokenManager) asyncRefreshToken(index int) {
 
 	// 在新goroutine中执行刷新
 	go func() {
+		// 检查是否已关闭
+		select {
+		case <-tm.ctx.Done():
+			logger.Debug("TokenManager已关闭，取消异步刷新",
+				logger.Int("index", index))
+			tm.refreshManager.CompleteRefresh(index, nil, fmt.Errorf("TokenManager已关闭"))
+			return
+		default:
+		}
+
 		// 短暂持锁获取配置
 		tm.mutex.RLock()
 		if index < 0 || index >= len(tm.configs) {
@@ -2237,8 +2257,19 @@ func (tm *TokenManager) refreshActivePoolTokens() {
 		err           error
 	}
 
-	// 使用固定并发度（最多10个并发）
-	concurrency := min(len(tasks), 10)
+	// 动态调整并发度
+	concurrency := 10 // 默认并发度
+	if tm.proxyPool != nil {
+		// 如果配置了代理池，根据健康代理数量调整并发度
+		if healthyCount := tm.proxyPool.GetHealthyProxyCount(); healthyCount > 0 {
+			concurrency = min(healthyCount, 20) // 最多20个并发
+			logger.Debug("根据代理池健康数量调整并发度",
+				logger.Int("healthy_proxies", healthyCount),
+				logger.Int("concurrency", concurrency))
+		}
+	}
+	concurrency = min(concurrency, len(tasks)) // 不超过任务数量
+
 	taskChan := make(chan refreshTask, len(tasks))
 	resultChan := make(chan taskResult, len(tasks))
 
@@ -2331,6 +2362,10 @@ func (tm *TokenManager) refreshActivePoolTokens() {
 
 // Close 关闭 TokenManager，停止定时任务
 func (tm *TokenManager) Close() {
+	// 先取消context，通知所有异步goroutine退出
+	tm.cancel()
+	logger.Info("TokenManager开始关闭，已通知所有异步任务退出")
+
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
 
@@ -2339,13 +2374,20 @@ func (tm *TokenManager) Close() {
 		tm.refreshTicker.Stop()
 		close(tm.refreshStop)
 		tm.refreshTicker = nil
-		logger.Info("TokenManager已关闭")
+		logger.Info("TokenManager定时任务已停止")
 	}
 
 	// 停止代理池健康检查
 	if tm.proxyPool != nil {
 		tm.proxyPool.Stop()
 	}
+
+	logger.Info("TokenManager已完全关闭")
+}
+
+// GetRefreshStats 获取刷新管理器统计信息
+func (tm *TokenManager) GetRefreshStats() map[string]any {
+	return tm.refreshManager.GetStats()
 }
 
 // AddToken 添加新 token（自动保存）

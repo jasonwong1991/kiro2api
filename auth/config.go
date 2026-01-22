@@ -16,8 +16,12 @@ type AuthConfig struct {
 	RefreshToken string `json:"refreshToken"`
 	ClientID     string `json:"clientId,omitempty"`
 	ClientSecret string `json:"clientSecret,omitempty"`
+	Region       string `json:"region,omitempty"`
 	Disabled     bool   `json:"disabled,omitempty"`
 }
+
+// DefaultRegion 默认 AWS 区域
+const DefaultRegion = "us-east-1"
 
 // 认证方法常量
 const (
@@ -173,6 +177,11 @@ func processConfigs(configs []AuthConfig) []AuthConfig {
 		// 设置默认认证类型
 		if config.AuthType == "" {
 			config.AuthType = AuthMethodSocial
+		}
+
+		// 设置默认区域
+		if config.Region == "" {
+			config.Region = DefaultRegion
 		}
 
 		// 验证IdC认证的必要字段

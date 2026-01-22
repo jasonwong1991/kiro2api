@@ -301,7 +301,14 @@ func buildCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReque
 		c.Set("cw_request_body", cwReqBody)
 	}
 
-	req, err := http.NewRequest("POST", config.CodeWhispererURL, bytes.NewReader(cwReqBody))
+	// 根据 token 的 region 构建 CodeWhisperer API URL
+	region := tokenInfo.Region
+	if region == "" {
+		region = "us-east-1" // 默认区域
+	}
+	codeWhispererURL := fmt.Sprintf(config.CodeWhispererURLTemplate, region)
+
+	req, err := http.NewRequest("POST", codeWhispererURL, bytes.NewReader(cwReqBody))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}

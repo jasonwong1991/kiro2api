@@ -1,18 +1,19 @@
 {
   "version": 1,
-  "config_hash": "c9b8799f5152d47e",
-  "saved_at": "2026-01-22T13:07:01.835911+08:00",
+  "config_hash": "86e4454255636c8d",
+  "saved_at": "2026-01-22T19:52:20.156737+08:00",
   "tokens": {
     "token_0": {
       "Token": {
-        "accessToken": "aoaAAAAAGlxuRY0T4mUia4DUm8XipNiX7IUPQyH31sanAwiF_3qxV5IVHTGKbpdqg3LvIPuSXkuPJvU18t9Ee4gsgBkc0:MGUCMQD7IwHmGDPyjTwxEoKcFVddujJ8nlf8t3+hA9cUkFlGnHCT6ENj44bccZiA2eV8FPsCMDAugsCi+4CxYx5zWW1IiEWwfYMursV35VKo1yPdPETm5k8iBDOQrCFWPrTeJt9ing",
+        "accessToken": "aoaAAAAAGlyHXsWft7QvB3wIiamnM2z7I_NPNE7bSyNDIGRxL1RQfEtOUo4rlsfx2taz9wZUQQ-IaB3C-HDuXxaa4Bkc0:MGQCMCPx3ilztxz8rTLw7TWP/Z0DBbmiNgZw5wYpxckicpbDMUb1x9QQ0rzd87PcsWTonwIwZvbaRPgQE4tLhbB9SG2N452ZIzDbY/yFB1EAl+cIUwzq/IWkGesDIsG73IZTFZim",
         "refreshToken": "aorAAAAAGmr2CoKke0uwhJRQlRIY8KHoz6kMl1CimOk3pB9Iqc6XKGFzmTa7dEVEJocSusl4lIBKEAL8te32ikJ2cBkc0:MGQCMFUwDdFpmOt7ZCvW0z+Zcq5xEqOqKHg7t2EkulcuQxousalNbI/ZCDjxoQNpmeZBrAIwIou873k+UPLyyw1MnBD4MEcBp1Iu4gAVZYZ+24G8UlwS0LPwkQ8gyFHPk7pniWEt",
-        "expiresAt": "2026-01-22T13:43:50.706213+08:00",
+        "expiresAt": "2026-01-22T20:52:11.296408+08:00",
         "expiresIn": 3600,
+        "region": "us-east-1",
         "fingerprint": {
-          "userAgent": "aws-sdk-js/1.1.27 ua/2.1 os/darwin#24.4.0 lang/js md/nodejs#18.1.3 api/codewhispererstreaming#1.1.27 m/E 5aaefbfb5af7d7c25161ced854753addd80e793f968a672e5dbe39e17d835c12",
-          "xAmzUserAgent": "aws-sdk-js/1.1.27 5aaefbfb5af7d7c25161ced854753addd80e793f968a672e5dbe39e17d835c12",
-          "deviceHash": "5aaefbfb5af7d7c25161ced854753addd80e793f968a672e5dbe39e17d835c12",
+          "userAgent": "aws-sdk-js/1.1.27 ua/2.1 os/darwin#24.4.0 lang/js md/nodejs#18.1.3 api/codewhispererstreaming#1.1.27 m/E ad4f687fd5cd742bcff6e15a8ac1b3e2bed2f09cb01607952f809da98f35d391",
+          "xAmzUserAgent": "aws-sdk-js/1.1.27 ad4f687fd5cd742bcff6e15a8ac1b3e2bed2f09cb01607952f809da98f35d391",
+          "deviceHash": "ad4f687fd5cd742bcff6e15a8ac1b3e2bed2f09cb01607952f809da98f35d391",
           "osVersion": "24.4.0",
           "nodeVersion": "18.1.3",
           "sdkVersion": "1.1.27",
@@ -20,8 +21,8 @@
           "ideVersion": "KiroIDE-0.6.8",
           "refreshUserAgent": "node",
           "refreshXAmzAgent": "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE-0.4.9",
-          "usageUserAgent": "aws-sdk-js/1.0.0 ua/2.1 os/darwin#24.4.0 lang/js md/nodejs#18.1.3 api/codewhispererruntime#1.0.0 m/E 6f01855442aa7158f4c9de45708d3d93c6fa84f402ca4cf76300c285edfcacbf",
-          "usageXAmzAgent": "aws-sdk-js/1.0.0 6f01855442aa7158f4c9de45708d3d93c6fa84f402ca4cf76300c285edfcacbf"
+          "usageUserAgent": "aws-sdk-js/1.0.0 ua/2.1 os/darwin#24.4.0 lang/js md/nodejs#18.1.3 api/codewhispererruntime#1.0.0 m/E d352f8b726e1134c14bedcc01ba90fbb3f7452a4f944527337dffe6740535eeb",
+          "usageXAmzAgent": "aws-sdk-js/1.0.0 d352f8b726e1134c14bedcc01ba90fbb3f7452a4f944527337dffe6740535eeb"
         }
       },
       "UsageInfo": {
@@ -35,8 +36,8 @@
             "usageLimit": 50,
             "usageLimitWithPrecision": 50,
             "overageRate": 0.04,
-            "currentUsage": 22,
-            "currentUsageWithPrecision": 22.08,
+            "currentUsage": 26,
+            "currentUsageWithPrecision": 26.21,
             "overageCap": 10000,
             "overageCapWithPrecision": 10000,
             "currency": "USD",
@@ -72,16 +73,85 @@
         },
         "usageBreakdown": null
       },
-      "CachedAt": "2026-01-22T12:43:51.73175+08:00",
-      "LastCheckAt": "2026-01-22T12:43:51.73175+08:00",
-      "LastUsed": "2026-01-22T13:01:39.259922+08:00",
-      "Available": 4.920000000000002,
+      "CachedAt": "2026-01-22T19:52:12.167041+08:00",
+      "LastCheckAt": "2026-01-22T19:52:12.167041+08:00",
+      "LastUsed": "0001-01-01T00:00:00Z",
+      "Available": 23.79,
+      "NextResetTime": "2026-02-01T08:00:00+08:00"
+    },
+    "token_1": {
+      "Token": {
+        "accessToken": "aoaAAAAAGlyHXsle8f0iGcyi5c6JiRw2oGReo6u8_Y24sXEFO3-HvcTcP95jBbcdz3aGD0XdwsLqnrIvTjpMd4m8cBkc1:MGYCMQDNWAlJ3r4n8MJD/5H9PPRLg5GU3LGs111YA/CS3Db920hsYaJUbmkQ++cmgy+za04CMQDMWo0Z/dAfRJyaA/2avEVhLjtXiZANrZ6uNaO8DmoWulzcCQXYACJfqLVjLL9bf0Q",
+        "refreshToken": "aorAAAAAGnonKkUCLrhmOc79KYpNRwiS7J7dKq_wq1lOZri15yB9UnefO6_8te07xVNBr2WK9qzBUAUA29ctMOgUMBkc1:MGQCMDcMHXPuWPCyaXxPaCVVvEO5XgGQ6uf0Lak5uRAES4XKZVkT7pdxP4hC2GeHMnbw8AIwcsq9kxA2T8cX378lWDpkGrTBacSctTb82jVF5O2nF7hWPWq8FWOpvPfqh5bTQsyo",
+        "expiresAt": "2026-01-22T20:52:11.245482+08:00",
+        "expiresIn": 3600,
+        "region": "us-east-2",
+        "fingerprint": {
+          "userAgent": "aws-sdk-js/1.4.26 ua/2.1 os/darwin#24.0.3 lang/js md/nodejs#20.4.5 api/codewhispererstreaming#1.4.26 m/E 9f0c22c852babf10fd713903859216449077d3f2f09f11602607e031fc9669f4",
+          "xAmzUserAgent": "aws-sdk-js/1.4.26 9f0c22c852babf10fd713903859216449077d3f2f09f11602607e031fc9669f4",
+          "deviceHash": "9f0c22c852babf10fd713903859216449077d3f2f09f11602607e031fc9669f4",
+          "osVersion": "24.0.3",
+          "nodeVersion": "20.4.5",
+          "sdkVersion": "1.4.26",
+          "kiroAgentMode": "manual",
+          "ideVersion": "KiroIDE-0.5.16",
+          "refreshUserAgent": "node",
+          "refreshXAmzAgent": "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE-0.6.3",
+          "usageUserAgent": "aws-sdk-js/1.0.0 ua/2.1 os/darwin#24.0.3 lang/js md/nodejs#20.4.5 api/codewhispererruntime#1.0.0 m/E cdd3a7d4db4adb9c5bb6c1aaada5b794b53400589b351e988b82170f4a7cdc97",
+          "usageXAmzAgent": "aws-sdk-js/1.0.0 cdd3a7d4db4adb9c5bb6c1aaada5b794b53400589b351e988b82170f4a7cdc97"
+        }
+      },
+      "UsageInfo": {
+        "limits": [],
+        "usageBreakdownList": [
+          {
+            "nextDateReset": 1769904000,
+            "overageCharges": 0,
+            "resourceType": "CREDIT",
+            "unit": "INVOCATIONS",
+            "usageLimit": 10000,
+            "usageLimitWithPrecision": 10000,
+            "overageRate": 0.04,
+            "currentUsage": 0,
+            "currentUsageWithPrecision": 0.78,
+            "overageCap": 10000,
+            "overageCapWithPrecision": 10000,
+            "currency": "USD",
+            "currentOverages": 0,
+            "currentOveragesWithPrecision": 0,
+            "displayName": "Credit",
+            "displayNamePlural": "Credits"
+          }
+        ],
+        "userInfo": {
+          "email": "",
+          "userId": "d-9a67553ca6.716b9580-e031-7020-edfb-4113db1a1e3e"
+        },
+        "daysUntilReset": 0,
+        "overageConfiguration": {
+          "overageStatus": "DISABLED"
+        },
+        "nextDateReset": 1769904000,
+        "subscriptionInfo": {
+          "subscriptionManagementTarget": "MANAGE",
+          "overageCapability": "OVERAGE_CAPABLE",
+          "subscriptionTitle": "KIRO POWER",
+          "type": "Q_DEVELOPER_STANDALONE_POWER",
+          "upgradeCapability": "UPGRADE_INCAPABLE"
+        },
+        "usageBreakdown": null
+      },
+      "CachedAt": "2026-01-22T19:52:12.167047+08:00",
+      "LastCheckAt": "2026-01-22T19:52:12.167047+08:00",
+      "LastUsed": "0001-01-01T00:00:00Z",
+      "Available": 9999.22,
       "NextResetTime": "2026-02-01T08:00:00+08:00"
     }
   },
   "invalidated": {},
   "active_pool": [
-    0
+    0,
+    1
   ],
   "pool_round_robin": 0
 }

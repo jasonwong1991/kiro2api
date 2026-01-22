@@ -282,6 +282,23 @@ func (h *AdminHandlers) HandleRefreshTokens(c *gin.Context) {
 	})
 }
 
+// HandleGetRefreshStats 获取刷新管理器统计信息
+// GET /v1/admin/tokens/refresh/stats
+func (h *AdminHandlers) HandleGetRefreshStats(c *gin.Context) {
+	tm := h.authService.GetTokenManager()
+	if tm == nil {
+		respondError(c, http.StatusInternalServerError, "TokenManager 未初始化")
+		return
+	}
+
+	stats := tm.GetRefreshStats()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    stats,
+	})
+}
+
 // RegisterAdminRoutes 注册管理 API 路由
 func RegisterAdminRoutes(r *gin.Engine, authService *auth.AuthService, adminToken string, isDefaultAdminToken bool) {
 	handlers := NewAdminHandlers(authService)
@@ -374,6 +391,7 @@ func RegisterAdminRoutes(r *gin.Engine, authService *auth.AuthService, adminToke
 	admin.GET("/tokens/:index", handlers.HandleGetToken)
 	admin.POST("/tokens/export", handlers.HandleExportTokens)
 	admin.POST("/tokens/refresh", handlers.HandleRefreshTokens)
+	admin.GET("/tokens/refresh/stats", handlers.HandleGetRefreshStats)
 	admin.POST("/tokens/:index/refresh", handlers.HandleRefreshToken)
 	admin.DELETE("/tokens/:index", handlers.HandleDeleteToken)
 	admin.DELETE("/tokens/invalid", handlers.HandleDeleteInvalidTokens)
@@ -395,6 +413,7 @@ func RegisterAdminRoutes(r *gin.Engine, authService *auth.AuthService, adminToke
 	logger.Info("  PUT    /v1/admin/tokens/:index         - 更新 token")
 	logger.Info("  POST   /v1/admin/tokens/export         - 导出 token 配置")
 	logger.Info("  POST   /v1/admin/tokens/refresh        - 批量刷新账号状态")
+	logger.Info("  GET    /v1/admin/tokens/refresh/stats  - 获取刷新管理器统计信息")
 	logger.Info("  POST   /v1/admin/tokens/:index/refresh - 刷新单个账号状态")
 	logger.Info("  DELETE /v1/admin/tokens/:index         - 删除单个失效 token")
 	logger.Info("  DELETE /v1/admin/tokens/invalid        - 批量删除所有失效 token")

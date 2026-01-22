@@ -31,6 +31,9 @@ type Token struct {
 	ExpiresIn  int    `json:"expiresIn,omitempty"`  // 多少秒后失效，来自RefreshResponse
 	ProfileArn string `json:"profileArn,omitempty"` // 来自RefreshResponse
 
+	// 区域信息
+	Region string `json:"region,omitempty"` // AWS 区域，如 us-east-1, us-east-2
+
 	// 设备指纹信息（每个账号的固定设备标识）
 	Fingerprint *DeviceFingerprint `json:"fingerprint,omitempty"`
 }

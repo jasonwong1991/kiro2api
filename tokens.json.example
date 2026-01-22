@@ -2,11 +2,13 @@
   {
     "auth": "Social",
     "refreshToken": "your_social_refresh_token_here_1",
+    "region": "us-east-1",
     "disabled": false
   },
   {
     "auth": "Social",
     "refreshToken": "your_social_refresh_token_here_2",
+    "region": "us-east-2",
     "disabled": false
   },
   {
@@ -14,6 +16,7 @@
     "refreshToken": "your_idc_refresh_token_here",
     "clientId": "your_idc_client_id",
     "clientSecret": "your_idc_client_secret",
+    "region": "us-east-1",
     "disabled": false
   }
 ]
