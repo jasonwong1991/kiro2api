@@ -4,11 +4,17 @@ import (
 	"crypto/md5"
 	"fmt"
 	"math/rand"
+	"runtime"
 )
 
 // 固定版本号常量
 const (
-	SDKVersionFixed = "1.0.27" // aws-sdk-js 固定版本
+	SDKVersionFixed  = "1.0.27"  // aws-sdk-js 固定版本 (所有请求统一使用)
+	KiroIDEVersion   = "0.8.140" // KiroIDE 固定版本
+	NodeVersionFixed = "22.21.1" // Node.js 固定版本
+	DarwinVersion    = "24.6.0"  // macOS Darwin 固定版本
+	LinuxKernel      = "6.8.0"   // Linux 内核版本
+	WindowsVersion   = "10.0"    // Windows 版本
 )
 
 // DeviceFingerprint 设备指纹信息
@@ -35,6 +41,21 @@ func NewDeviceFingerprintGenerator(seed int64) *DeviceFingerprintGenerator {
 	}
 }
 
+// getOSInfo 获取当前操作系统信息 (用于 User-Agent)
+// 返回: osType (darwin/linux/windows), osVersion
+func getOSInfo() (string, string) {
+	switch runtime.GOOS {
+	case "darwin":
+		return "darwin", DarwinVersion
+	case "linux":
+		return "linux", LinuxKernel
+	case "windows":
+		return "windows", WindowsVersion
+	default:
+		return "darwin", DarwinVersion // 默认伪装为 macOS
+	}
+}
+
 // GenerateFingerprint 生成设备指纹
 // 基于 refreshToken 作为种子，确保同一账号每次生成的指纹相同
 func GenerateFingerprint(refreshToken string) *DeviceFingerprint {
@@ -42,21 +63,19 @@ func GenerateFingerprint(refreshToken string) *DeviceFingerprint {
 	seed := hashToSeed(refreshToken)
 	gen := NewDeviceFingerprintGenerator(seed)
 
-	// 生成各种版本号
-	osVersion := gen.randomOSVersion()
-	nodeVersion := gen.randomNodeVersion()
-	ideVersion := gen.randomIDEVersion()
+	// 获取真实操作系统信息
+	osType, osVersion := getOSInfo()
 	deviceHash := gen.generateDeviceHash(refreshToken)
 	agentMode := gen.randomAgentMode()
 
-	// KiroIDE 完整标识（版本-hash）
-	kiroIDEFull := fmt.Sprintf("KiroIDE-%s-%s", ideVersion, deviceHash)
+	// KiroIDE 完整标识（固定版本-hash）
+	kiroIDEFull := fmt.Sprintf("KiroIDE-%s-%s", KiroIDEVersion, deviceHash)
 
 	// 构建完整的 User-Agent
 	// 格式: aws-sdk-js/1.0.27 ua/2.1 os/darwin#24.6.0 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.8.140-{hash}
 	userAgent := fmt.Sprintf(
-		"aws-sdk-js/%s ua/2.1 os/darwin#%s lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E %s",
-		SDKVersionFixed, osVersion, nodeVersion, SDKVersionFixed, kiroIDEFull,
+		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E %s",
+		SDKVersionFixed, osType, osVersion, NodeVersionFixed, SDKVersionFixed, kiroIDEFull,
 	)
 
 	// 构建 x-amz-user-agent
@@ -71,10 +90,10 @@ func GenerateFingerprint(refreshToken string) *DeviceFingerprint {
 		XAmzUserAgent: xAmzUserAgent,
 		DeviceHash:    deviceHash,
 		OSVersion:     osVersion,
-		NodeVersion:   nodeVersion,
+		NodeVersion:   NodeVersionFixed,
 		SDKVersion:    SDKVersionFixed,
 		KiroAgentMode: agentMode,
-		IDEVersion:    ideVersion,
+		IDEVersion:    KiroIDEVersion,
 	}
 }
 
@@ -83,28 +102,33 @@ func GenerateRefreshFingerprint(refreshToken string) *DeviceFingerprint {
 	seed := hashToSeed(refreshToken)
 	gen := NewDeviceFingerprintGenerator(seed)
 
-	osVersion := gen.randomOSVersion()
-	ideVersion := gen.randomIDEVersion()
+	// 获取真实操作系统信息
+	osType, osVersion := getOSInfo()
 	deviceHash := gen.generateDeviceHash(refreshToken)
 
-	// IdC 刷新使用的固定 SDK 版本
-	sdkVersion := "3.738.0"
+	// KiroIDE 完整标识 (固定版本)
+	kiroIDEFull := fmt.Sprintf("KiroIDE-%s-%s", KiroIDEVersion, deviceHash)
 
-	// KiroIDE 完整标识
-	kiroIDEFull := fmt.Sprintf("KiroIDE-%s-%s", ideVersion, deviceHash)
-
+	// 统一使用 SDKVersionFixed (1.0.27)，与主请求保持一致
 	xAmzUserAgent := fmt.Sprintf(
-		"aws-sdk-js/%s ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#%s m/E %s",
-		sdkVersion, sdkVersion, kiroIDEFull,
+		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/sso-oidc#%s m/E %s",
+		SDKVersionFixed, osType, osVersion, NodeVersionFixed, SDKVersionFixed, kiroIDEFull,
+	)
+
+	// User-Agent 也使用完整格式
+	userAgent := fmt.Sprintf(
+		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/sso-oidc#%s m/E %s",
+		SDKVersionFixed, osType, osVersion, NodeVersionFixed, SDKVersionFixed, kiroIDEFull,
 	)
 
 	return &DeviceFingerprint{
-		UserAgent:     "node",
+		UserAgent:     userAgent,
 		XAmzUserAgent: xAmzUserAgent,
 		DeviceHash:    deviceHash,
 		OSVersion:     osVersion,
-		SDKVersion:    sdkVersion,
-		IDEVersion:    ideVersion,
+		SDKVersion:    SDKVersionFixed,
+		IDEVersion:    KiroIDEVersion,
+		NodeVersion:   NodeVersionFixed,
 	}
 }
 
@@ -113,16 +137,16 @@ func GenerateUsageCheckerFingerprint(refreshToken string) *DeviceFingerprint {
 	seed := hashToSeed(refreshToken)
 	gen := NewDeviceFingerprintGenerator(seed)
 
-	osVersion := gen.randomOSVersion()
-	nodeVersion := gen.randomNodeVersion()
+	// 获取真实操作系统信息
+	osType, osVersion := getOSInfo()
 	deviceHash := gen.generateDeviceHash(refreshToken)
 
-	// KiroIDE 完整标识
-	kiroIDEFull := fmt.Sprintf("KiroIDE-%s-%s", gen.randomIDEVersion(), deviceHash)
+	// KiroIDE 完整标识 (固定版本)
+	kiroIDEFull := fmt.Sprintf("KiroIDE-%s-%s", KiroIDEVersion, deviceHash)
 
 	userAgent := fmt.Sprintf(
-		"aws-sdk-js/%s ua/2.1 os/darwin#%s lang/js md/nodejs#%s api/codewhispererruntime#%s m/E %s",
-		SDKVersionFixed, osVersion, nodeVersion, SDKVersionFixed, kiroIDEFull,
+		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/codewhispererruntime#%s m/E %s",
+		SDKVersionFixed, osType, osVersion, NodeVersionFixed, SDKVersionFixed, kiroIDEFull,
 	)
 
 	xAmzUserAgent := fmt.Sprintf(
@@ -135,8 +159,9 @@ func GenerateUsageCheckerFingerprint(refreshToken string) *DeviceFingerprint {
 		XAmzUserAgent: xAmzUserAgent,
 		DeviceHash:    deviceHash,
 		OSVersion:     osVersion,
-		NodeVersion:   nodeVersion,
+		NodeVersion:   NodeVersionFixed,
 		SDKVersion:    SDKVersionFixed,
+		IDEVersion:    KiroIDEVersion,
 	}
 }
 

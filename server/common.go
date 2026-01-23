@@ -341,6 +341,11 @@ func buildCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReque
 	req.Header.Set("x-amz-user-agent", xAmzUserAgent)
 	req.Header.Set("user-agent", userAgent)
 
+	// 添加真实 Kiro 客户端必需的 Header
+	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	req.Header.Set("amz-sdk-invocation-id", utils.GenerateUUID())
+	req.Header.Set("amz-sdk-request", "attempt=1; max=3")
+
 	return req, nil
 }
 
