@@ -35,6 +35,7 @@ type ProxyPoolManager struct {
 	healthCheckInterval time.Duration // 健康检查间隔
 	maxFailures         int           // 最大失败次数（超过则标记为不健康）
 	stopChan            chan struct{} // 停止信号
+	proxyDisabled       bool          // 代理禁用标志（所有代理不健康时自动禁用）
 }
 
 // NewProxyPoolManager 创建代理池管理器
@@ -104,6 +105,11 @@ func (pm *ProxyPoolManager) GetProxyForToken(tokenIndex string) (string, *http.C
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 
+	// 检查代理是否已禁用（所有代理不健康时自动禁用）
+	if pm.proxyDisabled {
+		return "", nil, nil
+	}
+
 	// 检查是否已分配代理（会话保持）
 	if proxyURL, exists := pm.tokenProxyMap[tokenIndex]; exists {
 		// 检查代理是否仍然健康
@@ -118,8 +124,6 @@ func (pm *ProxyPoolManager) GetProxyForToken(tokenIndex string) (string, *http.C
 	// 选择健康代理
 	proxyURL := pm.selectProxyForAssignment()
 	if proxyURL == "" {
-		logger.Warn("所有代理都不可用，降级为直连模式",
-			logger.String("token_index", tokenIndex))
 		return "", nil, nil
 	}
 
@@ -155,18 +159,10 @@ func (pm *ProxyPoolManager) selectProxyForAssignment() string {
 	}
 
 	if len(healthyProxies) == 0 {
-		// 所有代理都不健康，回退到使用失败次数最少的
-		logger.Warn("所有代理都不健康，选择失败次数最少的代理")
-		minFailures := -1
-		var fallbackProxy *ProxyInfo
-		for _, proxy := range pm.proxies {
-			if minFailures == -1 || proxy.FailureCount < minFailures {
-				minFailures = proxy.FailureCount
-				fallbackProxy = proxy
-			}
-		}
-		if fallbackProxy != nil {
-			return fallbackProxy.URL
+		// 所有代理都不健康，禁用代理功能，等待健康检查恢复
+		if !pm.proxyDisabled {
+			pm.proxyDisabled = true
+			logger.Warn("所有代理都不健康，禁用代理功能，等待健康检查恢复")
 		}
 		return ""
 	}
@@ -372,6 +368,13 @@ func (pm *ProxyPoolManager) performHealthCheck() {
 			healthyCount++
 		}
 	}
+
+	// 如果有健康代理且代理功能已禁用，重新启用
+	if healthyCount > 0 && pm.proxyDisabled {
+		pm.proxyDisabled = false
+		logger.Info("检测到健康代理，重新启用代理功能",
+			logger.Int("healthy_count", healthyCount))
+	}
 	pm.mutex.Unlock()
 
 	logger.Debug("代理健康检查完成",
@@ -452,6 +455,7 @@ func (pm *ProxyPoolManager) GetStats() map[string]interface{} {
 
 	stats["healthy_count"] = healthyCount
 	stats["assigned_tokens"] = len(pm.tokenProxyMap)
+	stats["proxy_disabled"] = pm.proxyDisabled
 	stats["proxies"] = proxyStats
 
 	return stats
@@ -469,6 +473,13 @@ func (pm *ProxyPoolManager) GetHealthyProxyCount() int {
 		}
 	}
 	return count
+}
+
+// IsProxyDisabled 检查代理功能是否已禁用
+func (pm *ProxyPoolManager) IsProxyDisabled() bool {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+	return pm.proxyDisabled
 }
 
 // ResetTokenProxy 重置token的代理绑定（用于强制重新分配）
