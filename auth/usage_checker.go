@@ -8,7 +8,6 @@ import (
 	"kiro2api/utils"
 	"net/http"
 	"net/url"
-	"time"
 )
 
 // UsageLimitsChecker 使用限制检查器 (遵循SRP原则)
@@ -64,8 +63,10 @@ func (c *UsageLimitsChecker) CheckUsageLimits(token types.TokenInfo) (*types.Usa
 
 	req.Header.Set("x-amz-user-agent", xAmzUserAgent)
 	req.Header.Set("user-agent", userAgent)
-	req.Header.Set("host", "codewhisperer.us-east-1.amazonaws.com")
-	req.Header.Set("amz-sdk-invocation-id", generateInvocationID())
+	// net/http 发送 Host header 使用 req.Host
+	req.Host = req.URL.Host
+	req.Header.Set("host", req.URL.Host)
+	req.Header.Set("amz-sdk-invocation-id", utils.GenerateUUID()) // 使用标准 UUID 格式
 	req.Header.Set("amz-sdk-request", "attempt=1; max=1")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.AccessToken))
 	req.Header.Set("Connection", "close")
@@ -172,11 +173,6 @@ func (c *UsageLimitsChecker) logUsageLimits(limits *types.UsageLimits) {
 		logger.String("subscription_type", limits.SubscriptionInfo.Type),
 		logger.String("subscription_title", limits.SubscriptionInfo.SubscriptionTitle),
 		logger.String("user_email", limits.UserInfo.Email))
-}
-
-// generateInvocationID 生成请求ID (简化版本)
-func generateInvocationID() string {
-	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), "kiro2api")
 }
 
 // isUsageLimitsTokenInvalidError 判断使用限制检查错误是否是 token 失效

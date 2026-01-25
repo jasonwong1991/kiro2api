@@ -33,7 +33,6 @@ func TestGenerateFingerprint_Uniqueness(t *testing.T) {
 
 	assert.NotEqual(t, fp1.UserAgent, fp2.UserAgent, "不同账号的 UserAgent 应该不同")
 	assert.NotEqual(t, fp1.DeviceHash, fp2.DeviceHash, "不同账号的 DeviceHash 应该不同")
-	// OS 版本和 Node 版本有可能相同（随机范围有限），所以不做强制要求
 }
 
 func TestGenerateFingerprint_Format(t *testing.T) {
@@ -47,7 +46,7 @@ func TestGenerateFingerprint_Format(t *testing.T) {
 	assert.Contains(t, fp.UserAgent, "md/nodejs#")
 	assert.Contains(t, fp.UserAgent, fp.DeviceHash)
 
-	// 验证 DeviceHash 长度（应该是 64 个十六进制字符）
+	// 验证 DeviceHash 长度（应该是 64 个十六进制字符 - SHA256）
 	assert.Len(t, fp.DeviceHash, 64, "DeviceHash 应该是 64 个字符")
 
 	// 验证版本号格式
@@ -55,9 +54,8 @@ func TestGenerateFingerprint_Format(t *testing.T) {
 	assert.Regexp(t, `^\d+\.\d+\.\d+$`, fp.NodeVersion, "NodeVersion 格式应该是 x.y.z")
 	assert.Regexp(t, `^1\.\d+\.\d+$`, fp.SDKVersion, "SDKVersion 格式应该是 1.x.y")
 
-	// 验证 KiroAgentMode
-	validModes := []string{"spec", "auto", "manual"}
-	assert.Contains(t, validModes, fp.KiroAgentMode, "KiroAgentMode 应该是有效值")
+	// 验证 KiroAgentMode (对齐 kiro.rs 固定为 vibe)
+	assert.Equal(t, KiroAgentModeFixed, fp.KiroAgentMode, "KiroAgentMode 应该固定为 vibe")
 }
 
 func TestGenerateFingerprint_VersionRanges(t *testing.T) {
@@ -65,27 +63,42 @@ func TestGenerateFingerprint_VersionRanges(t *testing.T) {
 	refreshToken := "test-token"
 	fp := GenerateFingerprint(refreshToken)
 
-	// 检查 OS 版本（应该是 darwin 23.x 或 24.x）
-	assert.True(t, strings.HasPrefix(fp.OSVersion, "23.") || strings.HasPrefix(fp.OSVersion, "24."),
-		"OS 版本应该在 23.x - 24.x 范围内")
+	// 检查 OS 版本（应该是 darwin 24.x）
+	assert.True(t, strings.HasPrefix(fp.OSVersion, "24."),
+		"OS 版本应该是 24.x")
 
-	// 检查 Node 版本（应该是 18.x - 20.x）
-	nodePrefix := fp.NodeVersion[:2]
-	assert.Contains(t, []string{"18", "19", "20"}, nodePrefix,
-		"Node 版本应该在 18.x - 20.x 范围内")
+	// 检查 Node 版本（对齐 kiro.rs 默认值 22.21.1）
+	assert.True(t, strings.HasPrefix(fp.NodeVersion, "22."),
+		"Node 版本应该以 22. 开头")
 
 	// 检查 SDK 版本（应该是 1.x.y）
 	assert.True(t, strings.HasPrefix(fp.SDKVersion, "1."),
 		"SDK 版本应该以 1. 开头")
 }
 
+func TestGenerateSocialRefreshFingerprint(t *testing.T) {
+	// 测试 Social Token 刷新指纹生成
+	refreshToken := "test-social-refresh-token"
+
+	fp := GenerateSocialRefreshFingerprint(refreshToken)
+
+	// Social 刷新使用简单 User-Agent 格式
+	assert.Contains(t, fp.UserAgent, "KiroIDE-")
+	assert.NotContains(t, fp.UserAgent, "aws-sdk-js/")
+	assert.Empty(t, fp.XAmzUserAgent, "Social 刷新不应携带 x-amz-user-agent")
+	assert.Len(t, fp.DeviceHash, 64)
+	assert.NotEmpty(t, fp.DeviceHash)
+}
+
 func TestGenerateRefreshFingerprint(t *testing.T) {
-	// 测试刷新指纹生成
+	// 测试 IdC Token 刷新指纹生成
 	refreshToken := "test-refresh-token"
 
 	fp := GenerateRefreshFingerprint(refreshToken)
 
-	assert.Equal(t, "node", fp.UserAgent, "刷新请求的 UserAgent 应该是 'node'")
+	// IdC 刷新使用固定的 User-Agent: node 和 x-amz-user-agent
+	assert.Equal(t, "node", fp.UserAgent, "IdC 刷新请求的 UserAgent 应该是 'node'")
+	assert.Equal(t, IDCAmzUserAgent, fp.XAmzUserAgent, "IdC 刷新应使用固定的 x-amz-user-agent")
 	assert.Contains(t, fp.XAmzUserAgent, "aws-sdk-js/3.738.0")
 	assert.Contains(t, fp.XAmzUserAgent, "api/sso-oidc#3.738.0")
 	assert.NotEmpty(t, fp.DeviceHash)
@@ -97,10 +110,35 @@ func TestGenerateUsageCheckerFingerprint(t *testing.T) {
 
 	fp := GenerateUsageCheckerFingerprint(refreshToken)
 
+	// Usage Checker 使用 SDK 版本 1.0.0 (对齐 kiro.rs)
 	assert.Contains(t, fp.UserAgent, "aws-sdk-js/1.0.0")
 	assert.Contains(t, fp.UserAgent, "api/codewhispererruntime#1.0.0")
 	assert.Contains(t, fp.XAmzUserAgent, "aws-sdk-js/1.0.0")
 	assert.NotEmpty(t, fp.DeviceHash)
+}
+
+func TestMachineID_SHA256Algorithm(t *testing.T) {
+	// 测试 Machine ID 使用 SHA256 算法 + KotlinNativeAPI 前缀
+	refreshToken := "test-token-for-sha256"
+
+	machineID := GenerateMachineID(refreshToken)
+
+	// SHA256 输出应该是 64 个十六进制字符
+	assert.Len(t, machineID, 64, "Machine ID 应该是 64 个字符 (SHA256)")
+
+	// 验证是有效的十六进制字符串
+	for _, c := range machineID {
+		assert.True(t, (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'),
+			"Machine ID 应该只包含十六进制字符")
+	}
+
+	// 验证稳定性
+	machineID2 := GenerateMachineID(refreshToken)
+	assert.Equal(t, machineID, machineID2, "同一 token 的 Machine ID 应该相同")
+
+	// 验证不同 token 产生不同的 Machine ID
+	machineID3 := GenerateMachineID("different-token")
+	assert.NotEqual(t, machineID, machineID3, "不同 token 的 Machine ID 应该不同")
 }
 
 func TestFingerprintStability_MultipleTypes(t *testing.T) {
@@ -108,16 +146,18 @@ func TestFingerprintStability_MultipleTypes(t *testing.T) {
 	refreshToken := "stable-token-test"
 
 	fp1 := GenerateFingerprint(refreshToken)
-	fp2 := GenerateRefreshFingerprint(refreshToken)
-	fp3 := GenerateUsageCheckerFingerprint(refreshToken)
+	fp2 := GenerateSocialRefreshFingerprint(refreshToken)
+	fp3 := GenerateRefreshFingerprint(refreshToken)
+	fp4 := GenerateUsageCheckerFingerprint(refreshToken)
 
 	// DeviceHash 应该相同（基于同一 refreshToken）
 	assert.Equal(t, fp1.DeviceHash, fp2.DeviceHash, "同一账号不同类型的请求应该有相同的 DeviceHash")
 	assert.Equal(t, fp1.DeviceHash, fp3.DeviceHash, "同一账号不同类型的请求应该有相同的 DeviceHash")
+	assert.Equal(t, fp1.DeviceHash, fp4.DeviceHash, "同一账号不同类型的请求应该有相同的 DeviceHash")
 
 	// OS 版本应该相同
 	assert.Equal(t, fp1.OSVersion, fp2.OSVersion, "同一账号不同类型的请求应该有相同的 OSVersion")
-	assert.Equal(t, fp1.OSVersion, fp3.OSVersion, "同一账号不同类型的请求应该有相同的 OSVersion")
+	assert.Equal(t, fp1.OSVersion, fp4.OSVersion, "同一账号不同类型的请求应该有相同的 OSVersion")
 }
 
 func BenchmarkGenerateFingerprint(b *testing.B) {
@@ -126,6 +166,15 @@ func BenchmarkGenerateFingerprint(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		GenerateFingerprint(refreshToken)
+	}
+}
+
+func BenchmarkGenerateMachineID(b *testing.B) {
+	refreshToken := "benchmark-token"
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		GenerateMachineID(refreshToken)
 	}
 }
 

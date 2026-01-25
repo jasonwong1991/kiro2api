@@ -165,16 +165,27 @@ func executeMCPRequestWithRetry(c *gin.Context, mcpReq types.McpRequest, authSer
 			return nil, err
 		}
 
-		// 设置 Header (参考 kiro.rs 实现)
-		// 从 Fingerprint 获取 User-Agent 信息
-		xAmzUserAgent := "aws-sdk-js/1.0.27 KiroIDE-1.0.0"
-		if tokenInfo.Fingerprint != nil && tokenInfo.Fingerprint.XAmzUserAgent != "" {
+		// 设置 Header (对齐 kiro.rs 实现)
+		var userAgent, xAmzUserAgent string
+		if tokenInfo.Fingerprint != nil {
+			userAgent = tokenInfo.Fingerprint.UserAgent
 			xAmzUserAgent = tokenInfo.Fingerprint.XAmzUserAgent
+		}
+		// 向后兼容：缺失时回退到即时生成的指纹
+		if userAgent == "" || xAmzUserAgent == "" {
+			fp := utils.GenerateFingerprint(tokenInfo.RefreshToken)
+			if userAgent == "" {
+				userAgent = fp.UserAgent
+			}
+			if xAmzUserAgent == "" {
+				xAmzUserAgent = fp.XAmzUserAgent
+			}
 		}
 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("x-amz-user-agent", xAmzUserAgent)
-		req.Header.Set("User-Agent", "aws-sdk-js/1.0.27")
+		req.Header.Set("User-Agent", userAgent)
+		req.Host = req.URL.Host // net/http 发送 Host header 使用 req.Host
 		req.Header.Set("amz-sdk-invocation-id", utils.GenerateUUID())
 		req.Header.Set("amz-sdk-request", "attempt=1; max=3")
 		req.Header.Set("Authorization", "Bearer "+tokenInfo.AccessToken)
