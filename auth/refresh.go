@@ -91,8 +91,8 @@ func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex in
 // refreshSocialToken 刷新Social认证token (固定使用 us-east-1)
 // client 参数可选：如果为 nil，使用 utils.SharedHTTPClient
 func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenInfo, error) {
-	// 为该账号生成 Social 刷新专用的设备指纹 (对齐 kiro.rs)
-	fp := utils.GenerateSocialRefreshFingerprint(refreshToken)
+	// 为该账号生成固定的设备指纹
+	fp := utils.GenerateRefreshFingerprint(refreshToken)
 
 	refreshReq := types.RefreshRequest{
 		RefreshToken: refreshToken,
@@ -108,15 +108,10 @@ func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenIn
 		return types.TokenInfo{}, fmt.Errorf("创建请求失败: %v", err)
 	}
 
-	// Social 刷新：简单 User-Agent，无 x-amz-user-agent（对齐 kiro.rs）
-	req.Header.Set("Accept", "application/json, text/plain, */*")
+	// 使用该账号专属的设备指纹
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-amz-user-agent", fp.XAmzUserAgent)
 	req.Header.Set("User-Agent", fp.UserAgent)
-	req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
-	req.Header.Set("Connection", "close")
-
-	// net/http 发送 Host header 使用 req.Host
-	req.Host = req.URL.Host
 
 	// 如果未提供客户端，使用默认客户端
 	if client == nil {
@@ -156,7 +151,7 @@ func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenIn
 
 	// 附加完整的设备指纹信息
 	fullFp := utils.GenerateFingerprint(refreshToken)
-	socialRefreshFp := utils.GenerateSocialRefreshFingerprint(refreshToken)
+	refreshFp := utils.GenerateRefreshFingerprint(refreshToken)
 	usageFp := utils.GenerateUsageCheckerFingerprint(refreshToken)
 
 	token.Fingerprint = &types.DeviceFingerprint{
@@ -168,8 +163,8 @@ func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenIn
 		SDKVersion:       fullFp.SDKVersion,
 		KiroAgentMode:    fullFp.KiroAgentMode,
 		IDEVersion:       fullFp.IDEVersion,
-		RefreshUserAgent: socialRefreshFp.UserAgent,
-		RefreshXAmzAgent: socialRefreshFp.XAmzUserAgent,
+		RefreshUserAgent: refreshFp.UserAgent,
+		RefreshXAmzAgent: refreshFp.XAmzUserAgent,
 		UsageUserAgent:   usageFp.UserAgent,
 		UsageXAmzAgent:   usageFp.XAmzUserAgent,
 	}
@@ -180,7 +175,7 @@ func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenIn
 // refreshIdCToken 刷新IdC认证token
 // client 参数可选：如果为 nil，使用 utils.SharedHTTPClient
 func refreshIdCToken(authConfig AuthConfig, client *http.Client) (types.TokenInfo, error) {
-	// 为该账号生成 IdC 刷新专用的设备指纹 (对齐 kiro.rs: 固定 x-amz-user-agent 和 User-Agent: node)
+	// 为该账号生成固定的设备指纹
 	fp := utils.GenerateRefreshFingerprint(authConfig.RefreshToken)
 
 	refreshReq := types.IdcRefreshRequest{
@@ -210,9 +205,9 @@ func refreshIdCToken(authConfig AuthConfig, client *http.Client) (types.TokenInf
 		return types.TokenInfo{}, fmt.Errorf("创建IdC请求失败: %v", err)
 	}
 
-	// IdC 刷新：使用固定的 x-amz-user-agent 和 User-Agent: node（对齐 kiro.rs）
+	// 使用该账号专属的设备指纹设置IdC特殊headers
 	req.Header.Set("Content-Type", "application/json")
-	req.Host = hostHeader // net/http 发送 Host header 使用 req.Host
+	req.Header.Set("Host", hostHeader)
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("x-amz-user-agent", fp.XAmzUserAgent)
 	req.Header.Set("Accept", "*/*")
@@ -272,7 +267,7 @@ func refreshIdCToken(authConfig AuthConfig, client *http.Client) (types.TokenInf
 
 	// 附加完整的设备指纹信息
 	fullFp := utils.GenerateFingerprint(authConfig.RefreshToken)
-	idcRefreshFp := utils.GenerateRefreshFingerprint(authConfig.RefreshToken)
+	refreshFp := utils.GenerateRefreshFingerprint(authConfig.RefreshToken)
 	usageFp := utils.GenerateUsageCheckerFingerprint(authConfig.RefreshToken)
 
 	token.Fingerprint = &types.DeviceFingerprint{
@@ -284,8 +279,8 @@ func refreshIdCToken(authConfig AuthConfig, client *http.Client) (types.TokenInf
 		SDKVersion:       fullFp.SDKVersion,
 		KiroAgentMode:    fullFp.KiroAgentMode,
 		IDEVersion:       fullFp.IDEVersion,
-		RefreshUserAgent: idcRefreshFp.UserAgent,
-		RefreshXAmzAgent: idcRefreshFp.XAmzUserAgent,
+		RefreshUserAgent: refreshFp.UserAgent,
+		RefreshXAmzAgent: refreshFp.XAmzUserAgent,
 		UsageUserAgent:   usageFp.UserAgent,
 		UsageXAmzAgent:   usageFp.XAmzUserAgent,
 	}

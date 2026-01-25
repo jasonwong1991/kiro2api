@@ -8,6 +8,7 @@ import (
 	"kiro2api/utils"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // UsageLimitsChecker 使用限制检查器 (遵循SRP原则)
@@ -173,6 +174,11 @@ func (c *UsageLimitsChecker) logUsageLimits(limits *types.UsageLimits) {
 		logger.String("subscription_type", limits.SubscriptionInfo.Type),
 		logger.String("subscription_title", limits.SubscriptionInfo.SubscriptionTitle),
 		logger.String("user_email", limits.UserInfo.Email))
+}
+
+// generateInvocationID 生成请求ID (简化版本)
+func generateInvocationID() string {
+	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), "kiro2api")
 }
 
 // isUsageLimitsTokenInvalidError 判断使用限制检查错误是否是 token 失效

@@ -325,34 +325,21 @@ func buildCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReque
 
 	// 添加上游请求必需的header (使用账号专属的设备指纹)
 	var userAgent, xAmzUserAgent, agentMode string
-	if tokenInfo.Fingerprint != nil {
+	if tokenInfo.Fingerprint != nil && tokenInfo.Fingerprint.UserAgent != "" {
 		userAgent = tokenInfo.Fingerprint.UserAgent
 		xAmzUserAgent = tokenInfo.Fingerprint.XAmzUserAgent
 		agentMode = tokenInfo.Fingerprint.KiroAgentMode
-	}
-
-	// 向后兼容：旧 token 可能存在部分字段为空；缺失时回退到即时生成的指纹
-	if userAgent == "" || xAmzUserAgent == "" || agentMode == "" {
+	} else {
+		// 如果没有指纹信息，临时生成（向后兼容）
 		fp := utils.GenerateFingerprint(tokenInfo.RefreshToken)
-		if userAgent == "" {
-			userAgent = fp.UserAgent
-		}
-		if xAmzUserAgent == "" {
-			xAmzUserAgent = fp.XAmzUserAgent
-		}
-		if agentMode == "" {
-			agentMode = fp.KiroAgentMode
-		}
-	}
-	if agentMode == "" {
-		agentMode = utils.KiroAgentModeFixed
+		userAgent = fp.UserAgent
+		xAmzUserAgent = fp.XAmzUserAgent
+		agentMode = fp.KiroAgentMode
 	}
 
 	req.Header.Set("x-amzn-kiro-agent-mode", agentMode)
 	req.Header.Set("x-amz-user-agent", xAmzUserAgent)
 	req.Header.Set("user-agent", userAgent)
-	req.Host = req.URL.Host // net/http 发送 Host header 使用 req.Host
-	req.Header.Set("Connection", "close")
 
 	// 添加真实 Kiro 客户端必需的 Header
 	req.Header.Set("x-amzn-codewhisperer-optout", "true")
