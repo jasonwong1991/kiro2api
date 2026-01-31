@@ -862,7 +862,7 @@ func (tm *TokenManager) selectRoundRobinAll() *CachedToken {
 		currentKey := tm.configOrder[tm.currentIndex]
 		configIndex := tm.currentIndex
 
-		// 检查缓存是否存在且新鲜
+		// 检查缓存是否存在且 token 是否即将过期
 		cached, exists := tm.cache.tokens[currentKey]
 		needRefresh := false
 
@@ -872,13 +872,18 @@ func (tm *TokenManager) selectRoundRobinAll() *CachedToken {
 			logger.Debug("账号缓存不存在，需要刷新",
 				logger.String("key", currentKey),
 				logger.Int("index", configIndex))
-		} else if time.Since(cached.CachedAt) > config.TokenCacheTTL {
-			// 缓存过期，需要刷新
-			needRefresh = true
-			logger.Debug("账号缓存过期，需要刷新",
-				logger.String("key", currentKey),
-				logger.Int("index", configIndex),
-				logger.String("cached_at", cached.CachedAt.Format(time.RFC3339)))
+		} else {
+			// *** 修复：基于 token 实际过期时间判断，而不是缓存时间 ***
+			// 只有在 token 还剩 5 分钟就要过期时才刷新
+			timeUntilExpiry := time.Until(cached.Token.ExpiresAt)
+			if timeUntilExpiry < 5*time.Minute {
+				needRefresh = true
+				logger.Debug("token 即将过期，需要刷新",
+					logger.String("key", currentKey),
+					logger.Int("index", configIndex),
+					logger.Duration("time_until_expiry", timeUntilExpiry),
+					logger.String("expires_at", cached.Token.ExpiresAt.Format(time.RFC3339)))
+			}
 		}
 
 		// 如果需要刷新且账号未被禁用/失效
