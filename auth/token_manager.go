@@ -886,12 +886,18 @@ func (tm *TokenManager) selectRoundRobinAll() *CachedToken {
 			cfg := tm.configs[configIndex]
 			if !cfg.Disabled {
 				if _, isInvalid := tm.invalidated[configIndex]; !isInvalid {
-					// 触发异步刷新（不阻塞）
-					logger.Debug("触发异步刷新单个账号",
-						logger.Int("index", configIndex),
-						logger.String("auth_type", cfg.AuthType))
+					// *** 检查是否已确认用完，避免刷新已耗尽的账号 ***
+					if _, alreadyExhausted := tm.lowBalanceVerified[configIndex]; alreadyExhausted {
+						logger.Debug("账号已确认用完，跳过刷新",
+							logger.Int("index", configIndex))
+					} else {
+						// 触发异步刷新（不阻塞）
+						logger.Debug("触发异步刷新单个账号",
+							logger.Int("index", configIndex),
+							logger.String("auth_type", cfg.AuthType))
 
-					go tm.asyncRefreshToken(configIndex)
+						go tm.asyncRefreshToken(configIndex)
+					}
 				}
 			}
 		}
