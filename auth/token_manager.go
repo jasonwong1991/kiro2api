@@ -23,8 +23,8 @@ const (
 )
 
 // MinAvailableThreshold 最小可用余额阈值
-// 余额 <= 此值视为耗尽（即只有 > 0.1 才可用）
-const MinAvailableThreshold = 0.1
+// 余额 <= 此值视为耗尽（即只有 > 0.5 才可用）
+const MinAvailableThreshold = 0.5
 
 // TokenManager 简化的token管理器
 type TokenManager struct {
