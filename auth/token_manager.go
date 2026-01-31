@@ -57,6 +57,9 @@ type TokenManager struct {
 	// 刷新管理器（防止重复刷新）
 	refreshManager *utils.TokenRefreshManager
 
+	// 低余额验证冷却时间（防止频繁刷新已用完的账号）
+	lowBalanceVerified map[int]time.Time // 索引 -> 最后验证时间
+
 	// 生命周期控制（优雅关闭）
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -135,23 +138,24 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	tm := &TokenManager{
-		cache:             NewSimpleTokenCache(config.TokenCacheTTL),
-		configs:           configs,
-		configOrder:       configOrder,
-		currentIndex:      0,
-		exhausted:         make(map[string]bool),
-		invalidated:       make(map[int]time.Time),
-		strategy:          strategy,
-		configPath:        configPath,
-		batchSize:         batchSize,
-		activePool:        []int{}, // 初始为空，首次使用时构建
-		poolRoundRobin:    0,
-		autoRemoveInvalid: autoRemove,
-		proxyPool:         proxyPool,
-		refreshStop:       make(chan bool, 1),
-		refreshManager:    utils.NewTokenRefreshManager(), // 初始化刷新管理器
-		ctx:               ctx,
-		cancel:            cancel,
+		cache:              NewSimpleTokenCache(config.TokenCacheTTL),
+		configs:            configs,
+		configOrder:        configOrder,
+		currentIndex:       0,
+		exhausted:          make(map[string]bool),
+		invalidated:        make(map[int]time.Time),
+		lowBalanceVerified: make(map[int]time.Time), // 初始化低余额验证记录
+		strategy:           strategy,
+		configPath:         configPath,
+		batchSize:          batchSize,
+		activePool:         []int{}, // 初始为空，首次使用时构建
+		poolRoundRobin:     0,
+		autoRemoveInvalid:  autoRemove,
+		proxyPool:          proxyPool,
+		refreshStop:        make(chan bool, 1),
+		refreshManager:     utils.NewTokenRefreshManager(), // 初始化刷新管理器
+		ctx:                ctx,
+		cancel:             cancel,
 	}
 
 	// 如果使用活跃池策略，启动定时刷新任务
@@ -288,11 +292,18 @@ func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 		bestToken.Available = max(bestToken.Available-1.0, 0)
 	}
 
+	// *** 优化：仅在首次降到低余额时触发验证 ***
 	// 如果余额降到接近0（< 1.0），异步触发刷新来验证真实余额
-	// 避免死循环：刷新后如果真实余额 < 0.1（MinAvailableThreshold），账号将不再被选中
+	// 但如果已经验证过且确认用完（在 lowBalanceVerified 中有记录），则不再触发
+	// 这样可以避免反复刷新已用完的账号
 	if bestToken.Available < 1.0 && oldAvailable >= 1.0 {
-		// 使用缓存的 Index
-		if bestToken.Index >= 0 {
+		// 检查是否已经验证过且确认用完
+		tm.mutex.Lock()
+		_, alreadyVerified := tm.lowBalanceVerified[bestToken.Index]
+		tm.mutex.Unlock()
+
+		// 只有未验证过的账号才触发验证
+		if !alreadyVerified && bestToken.Index >= 0 {
 			go tm.verifyLowBalanceToken(bestToken.Index)
 		}
 	}
@@ -336,10 +347,15 @@ func (tm *TokenManager) GetBestTokenWithUsage() (*types.TokenWithUsage, error) {
 	}
 	available := bestToken.Available
 
+	// *** 优化：仅在首次降到低余额时触发验证 ***
 	// 如果余额降到接近0（< 1.0），异步触发刷新来验证真实余额
+	// 但如果已经验证过且确认用完（在 lowBalanceVerified 中有记录），则不再触发
 	if bestToken.Available < 1.0 && oldAvailable >= 1.0 {
-		// 使用缓存的 Index
-		if bestToken.Index >= 0 {
+		// 检查是否已经验证过且确认用完
+		_, alreadyVerified := tm.lowBalanceVerified[bestToken.Index]
+
+		// 只有未验证过的账号才触发验证
+		if !alreadyVerified && bestToken.Index >= 0 {
 			go tm.verifyLowBalanceToken(bestToken.Index)
 		}
 	}
@@ -1702,6 +1718,7 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 
 // verifyLowBalanceToken 验证低余额账号的真实余额
 // 当本地计算的余额降到接近0时，异步调用此方法刷新获取真实余额
+// 注意：此方法只会被调用一次（通过 lowBalanceVerified 标记防止重复）
 func (tm *TokenManager) verifyLowBalanceToken(index int) {
 	logger.Info("触发低余额账号验证",
 		logger.Int("index", index))
@@ -1765,18 +1782,23 @@ func (tm *TokenManager) verifyLowBalanceToken(index int) {
 
 	// 清除失效标记
 	delete(tm.invalidated, index)
-	tm.mutex.Unlock()
 
+	// *** 关键：只有确认用完时才记录，避免后续重复验证 ***
 	if available < MinAvailableThreshold {
-		logger.Warn("低余额验证：账号余额已耗尽",
+		// 记录此账号已验证且确认用完
+		tm.lowBalanceVerified[index] = time.Now()
+		logger.Warn("低余额验证：账号余额已耗尽，标记为已验证",
 			logger.Int("index", index),
 			logger.Float64("available", available),
 			logger.Float64("threshold", MinAvailableThreshold))
 	} else {
+		// 账号仍有余额，不记录（允许下次再验证）
 		logger.Info("低余额验证：账号仍有余额",
 			logger.Int("index", index),
 			logger.Float64("available", available))
 	}
+
+	tm.mutex.Unlock()
 }
 
 // asyncRefreshToken 异步刷新单个token（使用TokenRefreshManager防重复）
@@ -2597,4 +2619,17 @@ func (tm *TokenManager) RemoveProxy(index int) error {
 	}
 
 	return tm.proxyPool.RemoveProxy(index)
+}
+
+// ClearLowBalanceVerified 清除低余额验证记录
+// 应该在每月1日调用，允许已用完的账号重新被验证
+func (tm *TokenManager) ClearLowBalanceVerified() {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	count := len(tm.lowBalanceVerified)
+	tm.lowBalanceVerified = make(map[int]time.Time)
+
+	logger.Info("清除低余额验证记录（月度重置）",
+		logger.Int("cleared_count", count))
 }

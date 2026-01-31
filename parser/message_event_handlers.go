@@ -625,3 +625,28 @@ func (h *LegacyToolUseEventHandler) handleToolCallEvent(message *EventStreamMess
 	// 非stop事件的流式片段处理完成，返回空事件
 	return []SSEEvent{}, nil
 }
+
+// ContextUsageEventHandler 上下文使用事件处理器
+// 用于解析 contextUsageEvent 并提取实际的 input tokens 消耗
+type ContextUsageEventHandler struct{}
+
+// Handle 处理上下文使用事件
+func (h *ContextUsageEventHandler) Handle(message *EventStreamMessage) ([]SSEEvent, error) {
+	var evt contextUsageEvent
+	if err := utils.FastUnmarshal(message.Payload, &evt); err != nil {
+		logger.Warn("解析contextUsageEvent失败", logger.Err(err))
+		return []SSEEvent{}, nil
+	}
+
+	logger.Debug("收到contextUsageEvent",
+		logger.Float64("percentage", evt.ContextUsagePercentage))
+
+	// 返回包含百分比的事件，由上层处理器计算实际 token 数
+	return []SSEEvent{{
+		Event: "context_usage",
+		Data: map[string]any{
+			"type":                     "context_usage",
+			"context_usage_percentage": evt.ContextUsagePercentage,
+		},
+	}}, nil
+}

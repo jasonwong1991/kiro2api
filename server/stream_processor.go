@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"kiro2api/config"
 	"kiro2api/converter"
 	"kiro2api/logger"
 	"kiro2api/parser"
@@ -24,6 +25,10 @@ type StreamProcessorContext struct {
 	sender      StreamEventSender
 	messageID   string
 	inputTokens int
+
+	// *** 实际 input tokens（从 contextUsageEvent 计算） ***
+	// 优先使用此值，如果为 nil 则回退到 inputTokens 估算值
+	actualInputTokens *int
 
 	// 状态管理器
 	sseStateManager   *SSEStateManager
@@ -163,6 +168,26 @@ func (ctx *StreamProcessorContext) sendInitialEvents(eventCreator func(string, i
 	return nil
 }
 
+// processContextUsageEvent 处理上下文使用事件
+// 从 contextUsageEvent 的百分比计算实际的 input tokens
+func (ctx *StreamProcessorContext) processContextUsageEvent(dataMap map[string]any) {
+	percentage, ok := dataMap["context_usage_percentage"].(float64)
+	if !ok {
+		logger.Warn("contextUsageEvent 缺少 context_usage_percentage 字段")
+		return
+	}
+
+	// 计算实际 input tokens
+	// 公式: percentage * ContextWindowSize / 100
+	actualTokens := int(percentage * float64(config.ContextWindowSize) / 100.0)
+	ctx.actualInputTokens = &actualTokens
+
+	logger.Debug("从 contextUsageEvent 计算实际 input tokens",
+		logger.Float64("percentage", percentage),
+		logger.Int("actual_tokens", actualTokens),
+		logger.Int("estimated_tokens", ctx.inputTokens))
+}
+
 // processToolUseStart 处理工具使用开始事件
 func (ctx *StreamProcessorContext) processToolUseStart(dataMap map[string]any) {
 	cb, ok := dataMap["content_block"].(map[string]any)
@@ -288,13 +313,24 @@ func (ctx *StreamProcessorContext) sendFinalEvents() error {
 	// 确定stop_reason
 	stopReason := ctx.stopReasonManager.DetermineStopReason()
 
+	// *** 使用实际 input tokens（如果可用） ***
+	// 优先使用从 contextUsageEvent 计算的实际值，否则使用估算值
+	finalInputTokens := ctx.inputTokens
+	if ctx.actualInputTokens != nil {
+		finalInputTokens = *ctx.actualInputTokens
+		logger.Debug("使用实际 input tokens",
+			logger.Int("actual", finalInputTokens),
+			logger.Int("estimated", ctx.inputTokens))
+	}
+
 	logger.Debug("创建结束事件",
 		logger.String("stop_reason", stopReason),
 		logger.String("stop_reason_description", GetStopReasonDescription(stopReason)),
+		logger.Int("input_tokens", finalInputTokens),
 		logger.Int("output_tokens", outputTokens))
 
 	// 创建并发送结束事件
-	finalEvents := createAnthropicFinalEvents(outputTokens, ctx.inputTokens, stopReason)
+	finalEvents := createAnthropicFinalEvents(outputTokens, finalInputTokens, stopReason)
 	for _, event := range finalEvents {
 		if err := ctx.sseStateManager.SendEvent(ctx.c, ctx.sender, event); err != nil {
 			logger.Error("结束事件发送违规", logger.Err(err))
@@ -404,6 +440,12 @@ func (esp *EventStreamProcessor) processEvent(event parser.SSEEvent) error {
 
 	// 处理不同类型的事件
 	switch eventType {
+	case "context_usage":
+		// 处理上下文使用事件，计算实际 input tokens
+		esp.ctx.processContextUsageEvent(dataMap)
+		// 不转发此事件给客户端
+		return nil
+
 	case "content_block_start":
 		esp.ctx.processToolUseStart(dataMap)
 

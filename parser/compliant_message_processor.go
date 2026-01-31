@@ -77,6 +77,9 @@ func (cmp *CompliantMessageProcessor) registerEventHandlers() {
 	cmp.eventHandlers[EventTypes.SESSION_START] = &SessionStartHandler{cmp.sessionManager}
 	cmp.eventHandlers[EventTypes.SESSION_END] = &SessionEndHandler{cmp.sessionManager}
 
+	// 上下文使用事件处理器
+	cmp.eventHandlers[EventTypes.CONTEXT_USAGE_EVENT] = &ContextUsageEventHandler{}
+
 	// 标准事件处理器 - 将assistantResponseEvent作为标准事件
 	cmp.eventHandlers[EventTypes.ASSISTANT_RESPONSE_EVENT] = &StandardAssistantResponseEventHandler{cmp}
 

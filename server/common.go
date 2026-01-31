@@ -274,13 +274,8 @@ func buildCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReque
 	// 关键兼容性字段：Kiro App 会在顶层携带 profileArn；缺失时上游可能返回 400（Improperly formed request）
 	if tokenInfo.ProfileArn != "" {
 		cwReq.ProfileArn = tokenInfo.ProfileArn
-	} else {
-		if c != nil {
-			logger.Warn("token缺少profileArn，可能导致上游请求校验失败", addReqFields(c)...)
-		} else {
-			logger.Warn("token缺少profileArn，可能导致上游请求校验失败")
-		}
 	}
+	// 注意：profileArn 为空是正常情况，不需要警告
 
 	cwReqBody, err := utils.SafeMarshal(cwReq)
 	if err != nil {

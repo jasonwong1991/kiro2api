@@ -97,6 +97,9 @@ var EventTypes = struct {
 	SESSION_START string
 	SESSION_END   string
 
+	// 上下文使用
+	CONTEXT_USAGE_EVENT string
+
 	// 兼容旧格式
 	ASSISTANT_RESPONSE_EVENT string
 	TOOL_USE_EVENT           string
@@ -112,6 +115,8 @@ var EventTypes = struct {
 
 	SESSION_START: "session_start",
 	SESSION_END:   "session_end",
+
+	CONTEXT_USAGE_EVENT: "contextUsageEvent",
 
 	ASSISTANT_RESPONSE_EVENT: "assistantResponseEvent",
 	TOOL_USE_EVENT:           "toolUseEvent",
@@ -287,6 +292,12 @@ type toolUseEvent struct {
 	ToolUseId string `json:"toolUseId"`
 	Input     any    `json:"input"` // 修复：支持对象和字符串格式
 	Stop      bool   `json:"stop"`
+}
+
+// contextUsageEvent 上下文使用事件
+// 用于从上游获取实际的 input tokens 消耗
+type contextUsageEvent struct {
+	ContextUsagePercentage float64 `json:"contextUsagePercentage"`
 }
 
 // parseFullAssistantResponseEvent 解析完整的助手响应事件

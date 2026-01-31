@@ -49,4 +49,9 @@ const (
 	// TokenEstimationRatio 字符到token的估算比例
 	// 用于工具调用参数的JSON内容token估算
 	TokenEstimationRatio = 4
+
+	// ContextWindowSize AWS CodeWhisperer 上下文窗口大小
+	// 用于从 contextUsageEvent 的百分比计算实际 input tokens
+	// 公式: actualInputTokens = percentage * ContextWindowSize / 100
+	ContextWindowSize = 200000
 )
