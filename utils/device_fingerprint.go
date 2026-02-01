@@ -21,7 +21,7 @@ const (
 type DeviceFingerprint struct {
 	UserAgent     string // 完整的 User-Agent
 	XAmzUserAgent string // AWS SDK User-Agent
-	DeviceHash    string // 设备指纹 hash
+	DeviceHash    string // 账号专属机器码 (64 字符，基于 refreshToken 生成)
 	OSVersion     string // 操作系统版本
 	NodeVersion   string // Node.js 版本
 	SDKVersion    string // SDK 版本
@@ -35,9 +35,9 @@ func getOSInfo() (string, string) {
 	return "darwin", DarwinVersion
 }
 
-// generateDeviceHash 基于 refreshToken 生成稳定的设备 hash (使用 SHA256)
+// generateDeviceHash 基于 refreshToken 生成账号专属机器码 (使用 SHA256)
 // 格式: sha256("KiroAPI/{refreshToken}")
-// 确保同一 refreshToken 每次生成相同的 64 字符十六进制 hash
+// 确保同一 refreshToken 每次生成相同的 64 字符十六进制机器码
 func generateDeviceHash(refreshToken string) string {
 	data := fmt.Sprintf("KiroAPI/%s", refreshToken)
 	hash := sha256.Sum256([]byte(data))
@@ -50,24 +50,24 @@ func GenerateFingerprint(refreshToken string) *DeviceFingerprint {
 	// 获取操作系统信息
 	osType, osVersion := getOSInfo()
 
-	// 生成确定性的设备 hash
+	// 生成账号专属机器码（确定性）
 	deviceHash := generateDeviceHash(refreshToken)
 
 	// 使用固定的 agent mode (对齐 kiro.rs)
 	agentMode := KiroAgentModeFixed
 
-	// KiroIDE 完整标识（固定版本-hash）
+	// KiroIDE 完整标识（固定版本-账号专属机器码）
 	kiroIDEFull := fmt.Sprintf("KiroIDE-%s-%s", KiroIDEVersion, deviceHash)
 
 	// 构建完整的 User-Agent
-	// 格式: aws-sdk-js/1.0.27 ua/2.1 os/darwin#24.6.0 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.8.140-{hash}
+	// 格式: aws-sdk-js/1.0.27 ua/2.1 os/darwin#24.6.0 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.8.140-{机器码}
 	userAgent := fmt.Sprintf(
 		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E %s",
 		SDKVersionFixed, osType, osVersion, NodeVersionFixed, SDKVersionFixed, kiroIDEFull,
 	)
 
 	// 构建 x-amz-user-agent
-	// 格式: aws-sdk-js/1.0.27 KiroIDE-0.8.140-{hash}
+	// 格式: aws-sdk-js/1.0.27 KiroIDE-0.8.140-{机器码}
 	xAmzUserAgent := fmt.Sprintf(
 		"aws-sdk-js/%s %s",
 		SDKVersionFixed, kiroIDEFull,
@@ -91,10 +91,10 @@ func GenerateSocialRefreshFingerprint(refreshToken string) *DeviceFingerprint {
 	// 获取操作系统信息
 	_, osVersion := getOSInfo()
 
-	// 生成确定性的设备 hash
+	// 生成账号专属机器码（确定性）
 	deviceHash := generateDeviceHash(refreshToken)
 
-	// KiroIDE 完整标识 (固定版本)
+	// KiroIDE 完整标识（固定版本-账号专属机器码）
 	kiroIDEFull := fmt.Sprintf("KiroIDE-%s-%s", KiroIDEVersion, deviceHash)
 
 	// Social 刷新使用简单的 User-Agent（只包含 KiroIDE 标识）
@@ -117,7 +117,7 @@ func GenerateRefreshFingerprint(refreshToken string) *DeviceFingerprint {
 	// 获取操作系统信息
 	osType, osVersion := getOSInfo()
 
-	// 生成确定性的设备 hash
+	// 生成账号专属机器码（确定性）
 	deviceHash := generateDeviceHash(refreshToken)
 
 	// IdC 刷新使用完整的 User-Agent (与实际请求一致)
@@ -148,10 +148,10 @@ func GenerateUsageCheckerFingerprint(refreshToken string) *DeviceFingerprint {
 	// 获取操作系统信息
 	osType, osVersion := getOSInfo()
 
-	// 生成确定性的设备 hash
+	// 生成账号专属机器码（确定性）
 	deviceHash := generateDeviceHash(refreshToken)
 
-	// KiroIDE 完整标识 (固定版本)
+	// KiroIDE 完整标识（固定版本-账号专属机器码）
 	kiroIDEFull := fmt.Sprintf("KiroIDE-%s-%s", KiroIDEVersion, deviceHash)
 
 	// Usage Checker 使用 SDK 版本 1.0.0 (对齐 kiro.rs)

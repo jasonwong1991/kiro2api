@@ -9,7 +9,7 @@ import (
 type DeviceFingerprint struct {
 	UserAgent           string `json:"userAgent,omitempty"`           // 完整的 User-Agent
 	XAmzUserAgent       string `json:"xAmzUserAgent,omitempty"`       // AWS SDK User-Agent
-	DeviceHash          string `json:"deviceHash,omitempty"`          // 设备指纹 hash
+	DeviceHash          string `json:"deviceHash,omitempty"`          // 账号专属机器码 (64 字符)
 	OSVersion           string `json:"osVersion,omitempty"`           // 操作系统版本
 	NodeVersion         string `json:"nodeVersion,omitempty"`         // Node.js 版本
 	SDKVersion          string `json:"sdkVersion,omitempty"`          // SDK 版本
