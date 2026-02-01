@@ -96,11 +96,18 @@ func TestGenerateRefreshFingerprint(t *testing.T) {
 
 	fp := GenerateRefreshFingerprint(refreshToken)
 
-	// IdC 刷新使用固定的 User-Agent: node 和 x-amz-user-agent
-	assert.Equal(t, "node", fp.UserAgent, "IdC 刷新请求的 UserAgent 应该是 'node'")
-	assert.Equal(t, IDCAmzUserAgent, fp.XAmzUserAgent, "IdC 刷新应使用固定的 x-amz-user-agent")
-	assert.Contains(t, fp.XAmzUserAgent, "aws-sdk-js/3.738.0")
-	assert.Contains(t, fp.XAmzUserAgent, "api/sso-oidc#3.738.0")
+	// IdC 刷新使用完整的 AWS SDK User-Agent 格式
+	assert.Contains(t, fp.UserAgent, "aws-sdk-js/3.738.0", "IdC 刷新应使用 SDK 版本 3.738.0")
+	assert.Contains(t, fp.UserAgent, "ua/2.1", "应包含 ua/2.1")
+	assert.Contains(t, fp.UserAgent, "os/darwin#", "应包含 os/darwin")
+	assert.Contains(t, fp.UserAgent, "lang/js", "应包含 lang/js")
+	assert.Contains(t, fp.UserAgent, "md/nodejs#", "应包含 nodejs")
+	assert.Contains(t, fp.UserAgent, "api/sso-oidc#3.738.0", "应包含 api/sso-oidc")
+	assert.Contains(t, fp.UserAgent, "m/E KiroIDE", "应包含 KiroIDE")
+
+	// x-amz-user-agent 应该是简短格式（无 hash）
+	assert.Equal(t, "aws-sdk-js/3.738.0 KiroIDE", fp.XAmzUserAgent, "x-amz-user-agent 应该是简短格式")
+	assert.NotContains(t, fp.XAmzUserAgent, "ua/2.1", "x-amz-user-agent 不应包含详细信息")
 	assert.NotEmpty(t, fp.DeviceHash)
 }
 
@@ -112,7 +119,7 @@ func TestGenerateUsageCheckerFingerprint(t *testing.T) {
 
 	// Usage Checker 使用 SDK 版本 1.0.0 (对齐 kiro.rs)
 	assert.Contains(t, fp.UserAgent, "aws-sdk-js/1.0.0")
-	assert.Contains(t, fp.UserAgent, "api/codewhispererruntime#1.0.0")
+	assert.Contains(t, fp.UserAgent, "api/codewhispererstreaming#1.0.0")
 	assert.Contains(t, fp.XAmzUserAgent, "aws-sdk-js/1.0.0")
 	assert.NotEmpty(t, fp.DeviceHash)
 }

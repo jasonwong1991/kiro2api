@@ -91,8 +91,8 @@ func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex in
 // refreshSocialToken 刷新Social认证token (固定使用 us-east-1)
 // client 参数可选：如果为 nil，使用 utils.SharedHTTPClient
 func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenInfo, error) {
-	// 为该账号生成固定的设备指纹
-	fp := utils.GenerateRefreshFingerprint(refreshToken)
+	// 为该账号生成固定的设备指纹（Social 刷新专用）
+	fp := utils.GenerateSocialRefreshFingerprint(refreshToken)
 
 	refreshReq := types.RefreshRequest{
 		RefreshToken: refreshToken,
@@ -108,10 +108,14 @@ func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenIn
 		return types.TokenInfo{}, fmt.Errorf("创建请求失败: %v", err)
 	}
 
-	// 使用该账号专属的设备指纹
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-amz-user-agent", fp.XAmzUserAgent)
+	// Social 刷新请求头（按真实请求顺序）
+	// User-Agent 格式: KiroIDE-{版本}-{hash}
 	req.Header.Set("User-Agent", fp.UserAgent)
+	req.Header.Set("Connection", "close")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
+	req.Header.Set("Content-Type", "application/json")
+	// 注意：Social 刷新不使用 x-amz-user-agent
 
 	// 如果未提供客户端，使用默认客户端
 	if client == nil {
@@ -206,15 +210,14 @@ func refreshIdCToken(authConfig AuthConfig, client *http.Client) (types.TokenInf
 	}
 
 	// 使用该账号专属的设备指纹设置IdC特殊headers
+	// 对齐实际 IdC 刷新请求的 headers
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Host", hostHeader)
-	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("x-amz-user-agent", fp.XAmzUserAgent)
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "*")
-	req.Header.Set("sec-fetch-mode", "cors")
 	req.Header.Set("User-Agent", fp.UserAgent)
-	req.Header.Set("Accept-Encoding", "br, gzip, deflate")
+	req.Header.Set("Host", hostHeader)
+	req.Header.Set("amz-sdk-invocation-id", utils.GenerateUUID())
+	req.Header.Set("amz-sdk-request", "attempt=1; max=4")
+	req.Header.Set("Connection", "close")
 
 	// 如果未提供客户端，使用默认客户端
 	if client == nil {
