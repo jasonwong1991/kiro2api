@@ -223,7 +223,71 @@ docker run -d \
   -p 8080:8080 \
   --env-file .env \
   kiro2api
+
+# 方式四：使用文件挂载（推荐用于生产环境）
+# 注意：确保宿主机文件权限正确
+docker run -d \
+  --name kiro2api \
+  -p 8080:8080 \
+  -v $(pwd)/tokens.json:/app/tokens.json \
+  -e KIRO_AUTH_TOKEN=/app/tokens.json \
+  -e KIRO_CLIENT_TOKEN="123456" \
+  ghcr.io/caidaoli/kiro2api:latest
 ```
+
+#### ⚠️ 文件权限问题（重要）
+
+当使用 `-v` 挂载宿主机文件时，可能遇到权限问题：
+
+```bash
+# 问题：写入配置文件失败: open /app/tokens.json: permission denied
+```
+
+**解决方案：**
+
+1. **方案一：使用 Docker Volume（推荐）**
+```bash
+# 创建 volume
+docker volume create kiro-data
+
+# 使用 volume
+docker run -d \
+  --name kiro2api \
+  -p 8080:8080 \
+  -v kiro-data:/app \
+  -e KIRO_AUTH_TOKEN=/app/tokens.json \
+  ghcr.io/caidaoli/kiro2api:latest
+```
+
+2. **方案二：修复宿主机文件权限**
+```bash
+# 创建文件并设置正确权限
+echo '[]' > tokens.json
+chmod 666 tokens.json  # 允许容器内用户写入
+
+# 然后挂载
+docker run -d \
+  --name kiro2api \
+  -p 8080:8080 \
+  -v $(pwd)/tokens.json:/app/tokens.json \
+  -e KIRO_AUTH_TOKEN=/app/tokens.json \
+  ghcr.io/caidaoli/kiro2api:latest
+```
+
+3. **方案三：使用环境变量（无需文件）**
+```bash
+# 直接通过环境变量传递配置（推荐用于少量账号）
+docker run -d \
+  --name kiro2api \
+  -p 8080:8080 \
+  -e KIRO_AUTH_TOKEN='[{"auth":"Social","refreshToken":"your_token"}]' \
+  ghcr.io/caidaoli/kiro2api:latest
+```
+
+**自动降级机制：**
+- 如果检测到挂载文件不可写，容器会自动复制到 `/tmp/tokens.json`
+- 修改会保存到临时位置，**容器重启后丢失**
+- 日志会提示：`[init] 配置文件已复制到: /tmp/tokens.json`
 
 #### 配置管理
 
