@@ -42,6 +42,11 @@ func (c *UsageLimitsChecker) CheckUsageLimits(token types.TokenInfo) (*types.Usa
 	params.Add("origin", "AI_EDITOR")
 	params.Add("resourceType", "AGENTIC_REQUEST")
 
+	// 如果有 profileArn，添加到请求参数中
+	if token.ProfileArn != "" {
+		params.Add("profileArn", token.ProfileArn)
+	}
+
 	requestURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
 
 	// 创建HTTP请求

@@ -1377,6 +1377,51 @@ func (tm *TokenManager) GetTokenStatus(index int) (*TokenStatus, error) {
 	return status, nil
 }
 
+// rebuildCacheAfterDeletion 删除账号后重建缓存
+// 因为删除账号会导致所有后续账号的索引前移，需要重建整个缓存
+// 调用者必须持有 tm.mutex 锁
+func (tm *TokenManager) rebuildCacheAfterDeletion() {
+	// 保存旧缓存
+	oldCache := tm.cache.tokens
+
+	// 创建新缓存
+	newCache := make(map[string]*CachedToken)
+
+	// 遍历旧缓存，根据 refresh_token 匹配新索引
+	for _, oldCached := range oldCache {
+		// 在新配置中查找对应的账号
+		for newIndex, cfg := range tm.configs {
+			if cfg.RefreshToken == oldCached.Token.RefreshToken {
+				// 找到匹配的账号，使用新索引
+				newKey := fmt.Sprintf(config.TokenCacheKeyFormat, newIndex)
+				newCached := &CachedToken{
+					Token:         oldCached.Token,
+					Index:         newIndex, // 使用新索引
+					UsageInfo:     oldCached.UsageInfo,
+					CachedAt:      oldCached.CachedAt,
+					LastCheckAt:   oldCached.LastCheckAt,
+					LastUsed:      oldCached.LastUsed,
+					Available:     oldCached.Available,
+					NextResetTime: oldCached.NextResetTime,
+				}
+				newCache[newKey] = newCached
+				logger.Debug("重建缓存：账号索引更新",
+					logger.Int("old_index", oldCached.Index),
+					logger.Int("new_index", newIndex),
+					logger.String("new_key", newKey))
+				break
+			}
+		}
+	}
+
+	// 替换缓存
+	tm.cache.tokens = newCache
+
+	logger.Info("删除账号后重建缓存完成",
+		logger.Int("old_cache_size", len(oldCache)),
+		logger.Int("new_cache_size", len(newCache)))
+}
+
 // RemoveToken 删除单个 token（仅失效的可删除）
 func (tm *TokenManager) RemoveToken(index int) error {
 	tm.mutex.Lock()
@@ -1406,12 +1451,29 @@ func (tm *TokenManager) RemoveToken(index int) error {
 	}
 	tm.invalidated = newInvalidated
 
+	// 更新低余额验证记录（索引需要调整）
+	newLowBalanceVerified := make(map[int]time.Time)
+	for i, t := range tm.lowBalanceVerified {
+		if i < index {
+			newLowBalanceVerified[i] = t
+		} else if i > index {
+			newLowBalanceVerified[i-1] = t
+		}
+	}
+	tm.lowBalanceVerified = newLowBalanceVerified
+
 	// 重新生成配置顺序
 	tm.configOrder = generateConfigOrder(tm.configs)
 
-	// 清理缓存中对应的 token
-	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
-	delete(tm.cache.tokens, cacheKey)
+	// 重建整个缓存（因为所有索引都变了）
+	tm.rebuildCacheAfterDeletion()
+
+	// 清空并重建活跃池（如果使用活跃池策略）
+	if tm.batchSize > 0 {
+		tm.activePool = []int{}
+		tm.poolRoundRobin = 0
+		logger.Info("删除账号后清空活跃池，下次使用时将重建")
+	}
 
 	logger.Info("删除失效token",
 		logger.Int("index", index),
@@ -1469,17 +1531,24 @@ func (tm *TokenManager) removeInvalidTokensUnlocked() (int, error) {
 	for _, index := range indices {
 		tm.configs = append(tm.configs[:index], tm.configs[index+1:]...)
 		removedCount++
-
-		// 清理缓存
-		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
-		delete(tm.cache.tokens, cacheKey)
 	}
 
-	// 清空失效记录
+	// 清空失效记录和低余额验证记录
 	tm.invalidated = make(map[int]time.Time)
+	tm.lowBalanceVerified = make(map[int]time.Time)
 
 	// 重新生成配置顺序
 	tm.configOrder = generateConfigOrder(tm.configs)
+
+	// 重建整个缓存（因为所有索引都变了）
+	tm.rebuildCacheAfterDeletion()
+
+	// 清空并重建活跃池（如果使用活跃池策略）
+	if tm.batchSize > 0 {
+		tm.activePool = []int{}
+		tm.poolRoundRobin = 0
+		logger.Info("批量删除账号后清空活跃池，下次使用时将重建")
+	}
 
 	logger.Info("批量删除失效token（内部）",
 		logger.Int("removed_count", removedCount),
