@@ -546,6 +546,9 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 	if forceRefresh {
 		logger.Debug("账号无缓存，尝试刷新获取状态", logger.Int("index", index))
 
+		// 记录刷新开始时间，用于防止竞态条件
+		refreshStartTime := time.Now()
+
 		// 刷新账号获取最新状态（注意：这里需要避免死锁，使用内部方法）
 		cfg := tm.configs[index]
 		token, err := tm.refreshSingleToken(cfg, index)
@@ -557,9 +560,6 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 			}
 			return false
 		}
-
-		// 清除失效标记
-		delete(tm.invalidated, index)
 
 		// 检查使用限制（带代理切换重试）
 		if usage, checkErr := tm.checkUsageLimitsWithRetry(index, token); checkErr == nil {
@@ -576,6 +576,17 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 				LastCheckAt:   now,
 				Available:     available,
 				NextResetTime: nextResetTime,
+			}
+
+			// 使用限制检查成功，清除失效标记（带时间戳保护）
+			// 只有当失效时间早于刷新开始时间时才清除，防止清除更新的失效标记
+			if invalidTime, exists := tm.invalidated[index]; !exists || invalidTime.Before(refreshStartTime) {
+				delete(tm.invalidated, index)
+			} else {
+				logger.Debug("检测到更新的失效标记，保留失效状态",
+					logger.Int("index", index),
+					logger.String("invalid_time", invalidTime.Format(time.RFC3339)),
+					logger.String("refresh_start", refreshStartTime.Format(time.RFC3339)))
 			}
 
 			logger.Debug("成功刷新账号状态",
@@ -942,6 +953,26 @@ func (tm *TokenManager) selectRoundRobinAll() *CachedToken {
 func (tm *TokenManager) refreshCacheUnlocked() error {
 	logger.Debug("开始刷新token缓存")
 
+	// 自动清理低余额验证记录（每月1日）
+	now := time.Now()
+	if now.Day() == 1 {
+		// 检查是否需要清理（避免同一天多次清理）
+		needClear := true
+		for _, verifiedTime := range tm.lowBalanceVerified {
+			// 如果有任何记录是今天的，说明已经清理过了
+			if verifiedTime.Year() == now.Year() && verifiedTime.Month() == now.Month() && verifiedTime.Day() == now.Day() {
+				needClear = false
+				break
+			}
+		}
+		if needClear && len(tm.lowBalanceVerified) > 0 {
+			count := len(tm.lowBalanceVerified)
+			tm.lowBalanceVerified = make(map[int]time.Time)
+			logger.Info("自动清除低余额验证记录（月度重置）",
+				logger.Int("cleared_count", count))
+		}
+	}
+
 	// 刷新所有非禁用且未失效的 token
 	var refreshIndices []int
 	for i, cfg := range tm.configs {
@@ -1011,9 +1042,6 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 			continue
 		}
 
-		// 如果刷新成功，清除失效标记
-		delete(tm.invalidated, i)
-
 		// 检查使用限制（带代理切换重试）
 		var usageInfo *types.UsageLimits
 		var available float64
@@ -1023,6 +1051,9 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 			usageInfo = usage
 			available = CalculateAvailableCount(usage)
 			nextResetTime = GetNextResetTime(usage)
+
+			// 使用限制检查成功，清除失效标记
+			delete(tm.invalidated, i)
 		} else {
 			// 检查是否是 token 失效错误
 			if types.IsTokenInvalidError(checkErr) {
@@ -1408,7 +1439,20 @@ func (tm *TokenManager) removeInvalidTokensUnlocked() (int, error) {
 	// 收集需要删除的索引（从大到小排序，避免删除时索引错乱）
 	indices := make([]int, 0, len(tm.invalidated))
 	for i := range tm.invalidated {
-		indices = append(indices, i)
+		// 只收集有效范围内的索引
+		if i >= 0 && i < len(tm.configs) {
+			indices = append(indices, i)
+		} else {
+			logger.Warn("检测到超出范围的失效索引，跳过",
+				logger.Int("index", i),
+				logger.Int("configs_len", len(tm.configs)))
+		}
+	}
+
+	if len(indices) == 0 {
+		// 所有索引都超出范围，清空失效记录
+		tm.invalidated = make(map[int]time.Time)
+		return 0, nil
 	}
 
 	// 排序（降序）
@@ -1423,14 +1467,12 @@ func (tm *TokenManager) removeInvalidTokensUnlocked() (int, error) {
 	// 从后往前删除
 	removedCount := 0
 	for _, index := range indices {
-		if index >= 0 && index < len(tm.configs) {
-			tm.configs = append(tm.configs[:index], tm.configs[index+1:]...)
-			removedCount++
+		tm.configs = append(tm.configs[:index], tm.configs[index+1:]...)
+		removedCount++
 
-			// 清理缓存
-			cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
-			delete(tm.cache.tokens, cacheKey)
-		}
+		// 清理缓存
+		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+		delete(tm.cache.tokens, cacheKey)
 	}
 
 	// 清空失效记录
@@ -1734,6 +1776,9 @@ func (tm *TokenManager) verifyLowBalanceToken(index int) {
 	logger.Info("触发低余额账号验证",
 		logger.Int("index", index))
 
+	// 记录刷新开始时间，用于防止竞态条件
+	refreshStartTime := time.Now()
+
 	tm.mutex.Lock()
 	if index < 0 || index >= len(tm.configs) {
 		tm.mutex.Unlock()
@@ -1791,8 +1836,16 @@ func (tm *TokenManager) verifyLowBalanceToken(index int) {
 		NextResetTime: nextResetTime,
 	}
 
-	// 清除失效标记
-	delete(tm.invalidated, index)
+	// 使用限制检查成功，清除失效标记（带时间戳保护）
+	// 只有当失效时间早于刷新开始时间时才清除，防止清除更新的失效标记
+	if invalidTime, exists := tm.invalidated[index]; !exists || invalidTime.Before(refreshStartTime) {
+		delete(tm.invalidated, index)
+	} else {
+		logger.Debug("检测到更新的失效标记，保留失效状态",
+			logger.Int("index", index),
+			logger.String("invalid_time", invalidTime.Format(time.RFC3339)),
+			logger.String("refresh_start", refreshStartTime.Format(time.RFC3339)))
+	}
 
 	// *** 关键：只有确认用完时才记录，避免后续重复验证 ***
 	if available < MinAvailableThreshold {
@@ -1826,6 +1879,9 @@ func (tm *TokenManager) asyncRefreshToken(index int) {
 
 	// 在新goroutine中执行刷新
 	go func() {
+		// 记录刷新开始时间，用于防止竞态条件
+		refreshStartTime := time.Now()
+
 		// 检查是否已关闭
 		select {
 		case <-tm.ctx.Done():
@@ -1900,8 +1956,16 @@ func (tm *TokenManager) asyncRefreshToken(index int) {
 			Available:     available,
 			NextResetTime: nextResetTime,
 		}
-		// 清除失效标记
-		delete(tm.invalidated, index)
+		// 使用限制检查成功，清除失效标记（带时间戳保护）
+		// 只有当失效时间早于刷新开始时间时才清除，防止清除更新的失效标记
+		if invalidTime, exists := tm.invalidated[index]; !exists || invalidTime.Before(refreshStartTime) {
+			delete(tm.invalidated, index)
+		} else {
+			logger.Debug("检测到更新的失效标记，保留失效状态",
+				logger.Int("index", index),
+				logger.String("invalid_time", invalidTime.Format(time.RFC3339)),
+				logger.String("refresh_start", refreshStartTime.Format(time.RFC3339)))
+		}
 		tm.mutex.Unlock()
 
 		logger.Info("异步刷新token完成",
@@ -1959,9 +2023,6 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 		}, nil
 	}
 
-	// 如果刷新成功，清除失效标记
-	delete(tm.invalidated, index)
-
 	// 检查使用限制
 	var usageInfo *types.UsageLimits
 	var available float64
@@ -1971,6 +2032,9 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 		usageInfo = usage
 		available = CalculateAvailableCount(usage)
 		nextResetTime = GetNextResetTime(usage)
+
+		// 使用限制检查成功，清除失效标记
+		delete(tm.invalidated, index)
 	} else {
 		// 检查是否是 token 失效错误
 		if types.IsTokenInvalidError(checkErr) {
