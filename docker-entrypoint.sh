@@ -2,7 +2,7 @@
 set -eu
 
 # 目标：在不要求用户手动处理宿主机文件的前提下，自动处理 Docker bind mount
-# “文件不存在会被创建为目录”的坑，确保 Token 导入后可以持久化。
+# "文件不存在会被创建为目录"的坑，确保 Token 导入后可以持久化。
 #
 # 典型问题：
 #   -v ./tokens.json:/app/tokens.json
@@ -12,6 +12,7 @@ set -eu
 # 自愈策略：
 # 1) 若 KIRO_AUTH_TOKEN 指向目录，则自动改写为 <dir>/tokens.json
 # 2) 若文件不存在，则创建空数组文件 []，便于后续 WebUI 导入落盘
+# 3) 权限修复由 docker-init.sh（root 权限）完成
 
 CONFIG_PATH="${KIRO_AUTH_TOKEN:-/app/tokens.json}"
 

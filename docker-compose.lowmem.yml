@@ -26,13 +26,15 @@ services:
       - LOG_CONSOLE=${LOG_CONSOLE:-true}
       - LOG_FILE=${LOG_FILE:-}
     volumes:
-      # 启动自愈脚本（处理 tokens.json 目录挂载问题）
+      # 启动自愈脚本（处理 tokens.json 目录挂载问题和权限修复）
       - ./docker-entrypoint.sh:/docker-entrypoint.sh:ro
+      - ./docker-init.sh:/docker-init.sh:ro
       - aws_sso_cache:/home/appuser/.aws/sso/cache
       # Token 配置文件（可写，支持 WebUI 导入持久化）
-      # 注意：宿主机 tokens.json 若不存在，Docker 会创建同名“目录”。
+      # 注意：宿主机 tokens.json 若不存在，Docker 会创建同名"目录"。
       # 本项目会自动将真实配置写入到 ./tokens.json/tokens.json（仍可持久化，但位置会变化）。
       # 可选：首次启动前执行 `echo '[]' > tokens.json`，避免目录/文件混淆。
+      # 权限修复：容器启动时会自动修复文件权限（chown 1001:1001），无需手动干预。
       - ./tokens.json:/app/tokens.json
     # 运行时资源限制（适用于 1GB RAM VPS）
     deploy:

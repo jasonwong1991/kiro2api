@@ -34,8 +34,8 @@ RUN go build \
 # 运行阶段
 FROM alpine:3.19
 
-# 安装运行时依赖
-RUN apk --no-cache add ca-certificates tzdata
+# 安装运行时依赖（添加 su-exec 用于权限切换）
+RUN apk --no-cache add ca-certificates tzdata su-exec
 
 # 创建非 root 用户
 RUN addgroup -g 1001 -S appgroup && \
@@ -48,16 +48,15 @@ WORKDIR /app
 COPY --from=builder /app/kiro2api .
 COPY --from=builder /app/static ./static
 COPY --from=builder /app/docker-entrypoint.sh /docker-entrypoint.sh
+COPY --from=builder /app/docker-init.sh /docker-init.sh
 
 # 创建必要的目录并设置权限
 RUN mkdir -p /home/appuser/.aws/sso/cache && \
-    chown -R appuser:appgroup /app /home/appuser
-
-# 切换到非 root 用户
-USER appuser
+    chown -R appuser:appgroup /app /home/appuser && \
+    chmod +x /docker-init.sh /docker-entrypoint.sh
 
 # 暴露默认端口
 EXPOSE 8080
 
-# 通过 entrypoint 做启动自愈（处理 tokens.json 目录挂载问题）
-ENTRYPOINT ["/bin/sh", "/docker-entrypoint.sh"]
+# 使用 docker-init.sh 作为入口点（以 root 身份运行，修复权限后切换到 appuser）
+ENTRYPOINT ["/bin/sh", "/docker-init.sh"]
