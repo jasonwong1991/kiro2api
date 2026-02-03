@@ -79,6 +79,15 @@ services:
       # 最大失败次数（可选，默认 3 次）
       - KIRO_PROXY_MAX_FAILURES=${KIRO_PROXY_MAX_FAILURES:-}
 
+      # ============================================================================
+      # IP 并发限制配置
+      # ============================================================================
+      # 每个 IP 最大并发请求数（默认 5）
+      - KIRO_MAX_CONCURRENT_PER_IP=${KIRO_MAX_CONCURRENT_PER_IP:-5}
+
+      # IP 并发排队等待超时时间（默认 60s，超时返回 429）
+      - KIRO_IP_ACQUIRE_TIMEOUT=${KIRO_IP_ACQUIRE_TIMEOUT:-60s}
+
     volumes:
       # 启动自愈脚本（处理 tokens.json 目录挂载问题和权限修复）
       - ./docker-entrypoint.sh:/docker-entrypoint.sh:ro

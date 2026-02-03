@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"strconv"
@@ -15,87 +16,142 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 默认每个 IP 最大并发请求数
-const defaultMaxConcurrentPerIP = 5
+// IP 并发限制器配置常量
+const (
+	defaultMaxConcurrentPerIP = 5             // 默认每个 IP 最大并发请求数
+	defaultAcquireTimeout     = 60 * time.Second // 默认排队等待超时时间
+	ipCleanupInterval         = 10 * time.Minute // IP 信号量清理间隔
+)
 
-// ipCleanupInterval IP 计数器清理间隔
-const ipCleanupInterval = 10 * time.Minute
+// ipSemaphore 单个 IP 的信号量
+type ipSemaphore struct {
+	ch      chan struct{} // 信号量通道
+	waiting int64         // 等待中的请求数（用于监控）
+}
 
-// IPConcurrencyLimiter IP 并发限制器
+// IPConcurrencyLimiter IP 并发限制器（基于信号量，支持排队等待）
 type IPConcurrencyLimiter struct {
-	maxConcurrent int64
-	counters      sync.Map // map[string]*int64
+	maxConcurrent  int
+	acquireTimeout time.Duration
+	semaphores     sync.Map // map[string]*ipSemaphore
 }
 
 // NewIPConcurrencyLimiter 创建 IP 并发限制器
-func NewIPConcurrencyLimiter(maxConcurrent int) *IPConcurrencyLimiter {
+func NewIPConcurrencyLimiter(maxConcurrent int, acquireTimeout time.Duration) *IPConcurrencyLimiter {
 	l := &IPConcurrencyLimiter{
-		maxConcurrent: int64(maxConcurrent),
+		maxConcurrent:  maxConcurrent,
+		acquireTimeout: acquireTimeout,
 	}
 	go l.cleanupLoop()
 	return l
 }
 
-// cleanupLoop 定期清理计数为0的IP条目，防止内存泄漏
+// cleanupLoop 定期清理空闲的 IP 信号量，防止内存泄漏
 func (l *IPConcurrencyLimiter) cleanupLoop() {
 	ticker := time.NewTicker(ipCleanupInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		l.counters.Range(func(key, value interface{}) bool {
-			counter := value.(*int64)
-			if atomic.LoadInt64(counter) == 0 {
-				l.counters.Delete(key)
+		l.semaphores.Range(func(key, value interface{}) bool {
+			sem := value.(*ipSemaphore)
+			// 只清理完全空闲的信号量（无活跃请求且无等待请求）
+			if len(sem.ch) == l.maxConcurrent && atomic.LoadInt64(&sem.waiting) == 0 {
+				l.semaphores.Delete(key)
 			}
 			return true
 		})
 	}
 }
 
-// Acquire 尝试获取并发槽位，返回是否成功
-func (l *IPConcurrencyLimiter) Acquire(ip string) bool {
-	counterPtr, _ := l.counters.LoadOrStore(ip, new(int64))
-	counter := counterPtr.(*int64)
-	newVal := atomic.AddInt64(counter, 1)
-	if newVal > l.maxConcurrent {
-		atomic.AddInt64(counter, -1)
-		return false
+// getOrCreateSemaphore 获取或创建 IP 的信号量
+func (l *IPConcurrencyLimiter) getOrCreateSemaphore(ip string) *ipSemaphore {
+	if val, ok := l.semaphores.Load(ip); ok {
+		return val.(*ipSemaphore)
 	}
-	return true
+	// 创建新的信号量（预填充表示可用槽位）
+	sem := &ipSemaphore{
+		ch: make(chan struct{}, l.maxConcurrent),
+	}
+	for i := 0; i < l.maxConcurrent; i++ {
+		sem.ch <- struct{}{}
+	}
+	actual, _ := l.semaphores.LoadOrStore(ip, sem)
+	return actual.(*ipSemaphore)
+}
+
+// Acquire 尝试获取并发槽位（支持排队等待）
+// 返回: 是否成功, 等待时间
+func (l *IPConcurrencyLimiter) Acquire(ctx context.Context, ip string) (bool, time.Duration) {
+	sem := l.getOrCreateSemaphore(ip)
+	startTime := time.Now()
+
+	// 先尝试非阻塞获取
+	select {
+	case <-sem.ch:
+		return true, 0
+	default:
+		// 需要排队等待
+	}
+
+	// 记录等待状态
+	atomic.AddInt64(&sem.waiting, 1)
+	defer atomic.AddInt64(&sem.waiting, -1)
+
+	// 创建超时 context
+	timeoutCtx, cancel := context.WithTimeout(ctx, l.acquireTimeout)
+	defer cancel()
+
+	select {
+	case <-sem.ch:
+		return true, time.Since(startTime)
+	case <-timeoutCtx.Done():
+		return false, time.Since(startTime)
+	}
 }
 
 // Release 释放并发槽位
 func (l *IPConcurrencyLimiter) Release(ip string) {
-	if counterPtr, ok := l.counters.Load(ip); ok {
-		counter := counterPtr.(*int64)
-		// 防御性检查：使用 CAS 避免计数器变为负数
-		for {
-			old := atomic.LoadInt64(counter)
-			if old <= 0 {
-				return
-			}
-			if atomic.CompareAndSwapInt64(counter, old, old-1) {
-				return
-			}
+	if val, ok := l.semaphores.Load(ip); ok {
+		sem := val.(*ipSemaphore)
+		// 非阻塞写入（防止重复释放导致阻塞）
+		select {
+		case sem.ch <- struct{}{}:
+		default:
+			logger.Warn("IP 信号量释放异常：槽位已满",
+				logger.String("ip", ip))
 		}
 	}
 }
 
 // GetCurrentCount 获取指定 IP 当前并发数（用于调试）
-func (l *IPConcurrencyLimiter) GetCurrentCount(ip string) int64 {
-	if counterPtr, ok := l.counters.Load(ip); ok {
-		return atomic.LoadInt64(counterPtr.(*int64))
+func (l *IPConcurrencyLimiter) GetCurrentCount(ip string) int {
+	if val, ok := l.semaphores.Load(ip); ok {
+		sem := val.(*ipSemaphore)
+		return l.maxConcurrent - len(sem.ch)
+	}
+	return 0
+}
+
+// GetWaitingCount 获取指定 IP 等待中的请求数
+func (l *IPConcurrencyLimiter) GetWaitingCount(ip string) int64 {
+	if val, ok := l.semaphores.Load(ip); ok {
+		return atomic.LoadInt64(&val.(*ipSemaphore).waiting)
 	}
 	return 0
 }
 
 // GetStats 获取所有 IP 的并发统计（用于监控）
-func (l *IPConcurrencyLimiter) GetStats() map[string]int64 {
-	stats := make(map[string]int64)
-	l.counters.Range(func(key, value interface{}) bool {
+func (l *IPConcurrencyLimiter) GetStats() map[string]map[string]int64 {
+	stats := make(map[string]map[string]int64)
+	l.semaphores.Range(func(key, value interface{}) bool {
 		ip := key.(string)
-		count := atomic.LoadInt64(value.(*int64))
-		if count > 0 {
-			stats[ip] = count
+		sem := value.(*ipSemaphore)
+		active := int64(l.maxConcurrent - len(sem.ch))
+		waiting := atomic.LoadInt64(&sem.waiting)
+		if active > 0 || waiting > 0 {
+			stats[ip] = map[string]int64{
+				"active":  active,
+				"waiting": waiting,
+			}
 		}
 		return true
 	})
@@ -118,36 +174,53 @@ func initIPLimiter() *IPConcurrencyLimiter {
 		}
 	}
 
-	globalIPLimiter = NewIPConcurrencyLimiter(maxConcurrent)
+	acquireTimeout := defaultAcquireTimeout
+	if envVal := os.Getenv("KIRO_IP_ACQUIRE_TIMEOUT"); envVal != "" {
+		if val, err := time.ParseDuration(envVal); err == nil && val > 0 {
+			acquireTimeout = val
+		}
+	}
+
+	globalIPLimiter = NewIPConcurrencyLimiter(maxConcurrent, acquireTimeout)
 	logger.Info("IP 并发限制器已初始化",
-		logger.Int("max_concurrent_per_ip", maxConcurrent))
+		logger.Int("max_concurrent_per_ip", maxConcurrent),
+		logger.Duration("acquire_timeout", acquireTimeout))
 	return globalIPLimiter
 }
 
 // IPConcurrencyMiddleware 创建基于 IP 的并发限制中间件
-// 限制每个 IP 同时只能有 N 个请求在处理中
+// 限制每个 IP 同时只能有 N 个请求在处理中，超限时排队等待
 func IPConcurrencyMiddleware() gin.HandlerFunc {
 	limiter := initIPLimiter()
 
 	return func(c *gin.Context) {
-		// 获取客户端真实 IP
 		clientIP := c.ClientIP()
 
-		// 尝试获取并发槽位
-		if !limiter.Acquire(clientIP) {
-			logger.Warn("IP 并发请求超限",
+		// 尝试获取并发槽位（支持排队等待）
+		acquired, waitTime := limiter.Acquire(c.Request.Context(), clientIP)
+		if !acquired {
+			logger.Warn("IP 并发请求排队超时",
 				logger.String("client_ip", clientIP),
-				logger.Int64("current_count", limiter.GetCurrentCount(clientIP)),
-				logger.Int64("max_concurrent", limiter.maxConcurrent))
+				logger.Int("current_count", limiter.GetCurrentCount(clientIP)),
+				logger.Int64("waiting_count", limiter.GetWaitingCount(clientIP)),
+				logger.Duration("wait_time", waitTime),
+				logger.Duration("timeout", limiter.acquireTimeout))
 
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error": gin.H{
-					"message": "Too many concurrent requests from your IP. Please wait and retry.",
+					"message": "Too many concurrent requests from your IP. Queue timeout exceeded.",
 					"code":    "rate_limited",
 				},
 			})
 			c.Abort()
 			return
+		}
+
+		// 记录等待时间（如果有）
+		if waitTime > 0 {
+			logger.Debug("IP 并发请求排队成功",
+				logger.String("client_ip", clientIP),
+				logger.Duration("wait_time", waitTime))
 		}
 
 		// 确保请求结束时释放槽位
@@ -165,9 +238,10 @@ func GetIPLimiterStats() map[string]interface{} {
 		}
 	}
 	return map[string]interface{}{
-		"enabled":        true,
-		"max_concurrent": globalIPLimiter.maxConcurrent,
-		"active_ips":     globalIPLimiter.GetStats(),
+		"enabled":         true,
+		"max_concurrent":  globalIPLimiter.maxConcurrent,
+		"acquire_timeout": globalIPLimiter.acquireTimeout.String(),
+		"active_ips":      globalIPLimiter.GetStats(),
 	}
 }
 
