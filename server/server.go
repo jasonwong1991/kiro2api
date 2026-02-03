@@ -64,11 +64,19 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 
 	r := gin.New()
 
-	// 配置可信代理（防止 IP 伪造）
-	// 默认不信任任何代理，使用 RemoteAddr 作为真实 IP
-	// 如果部署在反向代理后，需要通过环境变量 KIRO_TRUSTED_PROXIES 配置
-	trustedProxies := os.Getenv("KIRO_TRUSTED_PROXIES")
-	if trustedProxies != "" {
+	// 配置可信代理（影响 gin.Context.ClientIP() 的取值）
+	// - Gin 默认会信任所有代理并使用 X-Forwarded-For / X-Real-IP 解析真实客户端 IP（但存在 IP 伪造风险）
+	// - 推荐在反向代理后部署时显式配置 KIRO_TRUSTED_PROXIES，只信任你的 LB/Nginx
+	// - 如需完全禁用代理信任（强制只用 RemoteAddr），设置 KIRO_DISABLE_PROXY_TRUST=true
+	disableProxyTrust := strings.TrimSpace(os.Getenv("KIRO_DISABLE_PROXY_TRUST"))
+	trustedProxies := strings.TrimSpace(os.Getenv("KIRO_TRUSTED_PROXIES"))
+
+	if disableProxyTrust == "1" || strings.EqualFold(disableProxyTrust, "true") {
+		if err := r.SetTrustedProxies(nil); err != nil {
+			logger.Error("禁用代理信任失败", logger.Err(err))
+		}
+		logger.Info("已禁用代理信任，使用 RemoteAddr 作为真实 IP")
+	} else if trustedProxies != "" {
 		// 支持逗号分隔的多个代理 IP/CIDR
 		proxies := []string{}
 		for _, proxy := range strings.Split(trustedProxies, ",") {
@@ -77,17 +85,17 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 				proxies = append(proxies, proxy)
 			}
 		}
-		if err := r.SetTrustedProxies(proxies); err != nil {
-			logger.Error("设置可信代理失败", logger.Err(err))
+		if len(proxies) == 0 {
+			logger.Warn("KIRO_TRUSTED_PROXIES 为空，沿用 Gin 默认（信任所有代理）")
 		} else {
-			logger.Info("已配置可信代理", logger.Int("count", len(proxies)))
+			if err := r.SetTrustedProxies(proxies); err != nil {
+				logger.Error("设置可信代理失败", logger.Err(err))
+			} else {
+				logger.Info("已配置可信代理", logger.Int("count", len(proxies)))
+			}
 		}
 	} else {
-		// 不信任任何代理，直接使用 RemoteAddr
-		if err := r.SetTrustedProxies(nil); err != nil {
-			logger.Error("禁用代理信任失败", logger.Err(err))
-		}
-		logger.Info("已禁用代理信任，使用 RemoteAddr 作为真实 IP")
+		logger.Warn("未配置 KIRO_TRUSTED_PROXIES，沿用 Gin 默认（信任所有代理）。建议显式配置可信代理以避免 IP 伪造。")
 	}
 
 	// 添加中间件

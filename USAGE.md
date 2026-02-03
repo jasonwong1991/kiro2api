@@ -330,6 +330,10 @@ services:
 | `LOG_FORMAT` | ❌ | `json` | 日志格式（text/json） |
 | `GIN_MODE` | ❌ | `release` | Gin 运行模式（debug/release/test） |
 | `MAX_TOOL_DESCRIPTION_LENGTH` | ❌ | `1024` | 工具描述最大长度 |
+| `KIRO_MAX_CONCURRENT_PER_IP` | ❌ | `5` | 每个 IP 最大并发请求数（超限排队等待） |
+| `KIRO_IP_ACQUIRE_TIMEOUT` | ❌ | `60s` | IP 并发排队等待超时时间（超时返回 429） |
+| `KIRO_TRUSTED_PROXIES` | ❌ | 空（沿用 Gin 默认：信任所有代理） | 可信代理 IP/CIDR 列表（逗号分隔），影响 `ClientIP()` 解析（推荐生产显式配置） |
+| `KIRO_DISABLE_PROXY_TRUST` | ❌ | 空（false） | 禁用代理信任（强制只用 RemoteAddr；反向代理后会看到代理 IP） |
 
 ## 安全建议
 

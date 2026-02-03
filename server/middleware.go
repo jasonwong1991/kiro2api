@@ -18,7 +18,7 @@ import (
 
 // IP 并发限制器配置常量
 const (
-	defaultMaxConcurrentPerIP = 5             // 默认每个 IP 最大并发请求数
+	defaultMaxConcurrentPerIP = 5                // 默认每个 IP 最大并发请求数
 	defaultAcquireTimeout     = 60 * time.Second // 默认排队等待超时时间
 	ipCleanupInterval         = 10 * time.Minute // IP 信号量清理间隔
 )
@@ -228,6 +228,9 @@ func IPConcurrencyMiddleware() gin.HandlerFunc {
 		if !acquired {
 			logger.Warn("IP 并发请求排队超时",
 				logger.String("client_ip", clientIP),
+				logger.String("x_forwarded_for", c.GetHeader("X-Forwarded-For")),
+				logger.String("x_real_ip", c.GetHeader("X-Real-IP")),
+				logger.String("remote_addr", c.Request.RemoteAddr),
 				logger.Int("current_count", limiter.GetCurrentCount(clientIP)),
 				logger.Int64("waiting_count", limiter.GetWaitingCount(clientIP)),
 				logger.Duration("wait_time", waitTime),
