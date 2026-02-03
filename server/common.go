@@ -286,12 +286,26 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 			cancel() // 显式释放 context
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			logger.Warn("收到可重试错误，换token重试",
-				addReqFields(c,
-					logger.Int("attempt", attempt),
-					logger.Int("status_code", resp.StatusCode),
-					logger.String("response_body", string(body)),
-				)...)
+
+			// *** 新增：检测401/403错误，标记token为失效 ***
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				logger.Warn("检测到token失效错误，标记token为失效并换token重试",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Int("status_code", resp.StatusCode),
+						logger.Int("token_index", tokenInfo.ConfigIndex),
+						logger.String("response_body", string(body)),
+					)...)
+				authService.GetTokenManager().MarkTokenInvalid(tokenInfo.ConfigIndex)
+			} else {
+				logger.Warn("收到可重试错误，换token重试",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Int("status_code", resp.StatusCode),
+						logger.String("response_body", string(body)),
+					)...)
+			}
+
 			time.Sleep(config.RetryDelay)
 			continue
 		}
@@ -300,6 +314,17 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 		if handleCodeWhispererError(c, resp) {
 			cancel() // 显式释放 context
 			resp.Body.Close()
+
+			// *** 新增：如果是401/403错误且未重试，也标记token为失效 ***
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				logger.Warn("最终错误为token失效，标记token为失效",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Int("token_index", tokenInfo.ConfigIndex),
+					)...)
+				authService.GetTokenManager().MarkTokenInvalid(tokenInfo.ConfigIndex)
+			}
+
 			return nil, tokenInfo, fmt.Errorf("CodeWhisperer API error")
 		}
 

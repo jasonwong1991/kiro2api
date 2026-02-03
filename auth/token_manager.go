@@ -258,7 +258,12 @@ func (tm *TokenManager) IsAllTokensUnavailable() bool {
 	defer tm.mutex.RUnlock()
 
 	// 检查是否有任何可用的token
-	for _, key := range tm.configOrder {
+	for i, key := range tm.configOrder {
+		// *** 新增：跳过已失效的token ***
+		if _, isInvalid := tm.invalidated[i]; isInvalid {
+			continue
+		}
+
 		if cached, exists := tm.cache.tokens[key]; exists {
 			if cached.IsUsable() {
 				return false
@@ -412,6 +417,11 @@ func (tm *TokenManager) selectSequentialToken() *CachedToken {
 	// 如果没有配置顺序，降级到按map遍历顺序
 	if len(tm.configOrder) == 0 {
 		for key, cached := range tm.cache.tokens {
+			// *** 新增：跳过已失效的token ***
+			if _, isInvalid := tm.invalidated[cached.Index]; isInvalid {
+				continue
+			}
+
 			if cached.IsUsable() {
 				logger.Debug("顺序策略选择token（无顺序配置）",
 					logger.String("selected_key", key),
@@ -425,6 +435,15 @@ func (tm *TokenManager) selectSequentialToken() *CachedToken {
 	// 从当前索引开始，找到第一个可用的token
 	for attempts := 0; attempts < len(tm.configOrder); attempts++ {
 		currentKey := tm.configOrder[tm.currentIndex]
+
+		// *** 新增：跳过已失效的token ***
+		if _, isInvalid := tm.invalidated[tm.currentIndex]; isInvalid {
+			tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
+			logger.Debug("token已失效，跳过",
+				logger.String("invalid_key", currentKey),
+				logger.Int("next_index", tm.currentIndex))
+			continue
+		}
 
 		// 检查这个token是否存在且可用
 		if cached, exists := tm.cache.tokens[currentKey]; exists {
@@ -477,7 +496,12 @@ func (tm *TokenManager) selectRandomToken() *CachedToken {
 	var availableTokens []*CachedToken
 	var availableKeys []string
 
-	for _, key := range tm.configOrder {
+	for i, key := range tm.configOrder {
+		// *** 新增：跳过已失效的token ***
+		if _, isInvalid := tm.invalidated[i]; isInvalid {
+			continue
+		}
+
 		if cached, exists := tm.cache.tokens[key]; exists {
 			if cached.IsUsable() {
 				availableTokens = append(availableTokens, cached)
@@ -848,10 +872,14 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 	if len(tm.activePool) > 0 {
 		configIndex := tm.activePool[0]
 		currentKey := tm.configOrder[configIndex]
-		if cached, exists := tm.cache.tokens[currentKey]; exists {
-			if cached.IsUsable() {
-				tm.poolRoundRobin = 1 % len(tm.activePool)
-				return cached
+
+		// *** 新增：跳过已失效的token ***
+		if _, isInvalid := tm.invalidated[configIndex]; !isInvalid {
+			if cached, exists := tm.cache.tokens[currentKey]; exists {
+				if cached.IsUsable() {
+					tm.poolRoundRobin = 1 % len(tm.activePool)
+					return cached
+				}
 			}
 		}
 	}
@@ -918,15 +946,18 @@ func (tm *TokenManager) selectRoundRobinAll() *CachedToken {
 
 		// 再次检查缓存（刷新后的结果）
 		if cached, exists := tm.cache.tokens[currentKey]; exists {
-			if cached.IsUsable() {
-				logger.Debug("全局轮询策略选择token",
-					logger.String("selected_key", currentKey),
-					logger.Int("index", tm.currentIndex),
-					logger.Float64("available_count", cached.Available))
+			// *** 新增：跳过已失效的token ***
+			if _, isInvalid := tm.invalidated[configIndex]; !isInvalid {
+				if cached.IsUsable() {
+					logger.Debug("全局轮询策略选择token",
+						logger.String("selected_key", currentKey),
+						logger.Int("index", tm.currentIndex),
+						logger.Float64("available_count", cached.Available))
 
-				// 轮询策略：每次使用后移动到下一个
-				tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
-				return cached
+					// 轮询策略：每次使用后移动到下一个
+					tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
+					return cached
+				}
 			}
 		}
 
@@ -1418,6 +1449,49 @@ func (tm *TokenManager) rebuildCacheAfterDeletion() {
 	logger.Info("删除账号后重建缓存完成",
 		logger.Int("old_cache_size", len(oldCache)),
 		logger.Int("new_cache_size", len(newCache)))
+}
+
+// MarkTokenInvalid 标记指定索引的token为失效
+// 用于在请求时检测到token失效（如401/403错误）时立即标记
+// 这样可以避免后续请求继续使用已失效的token
+func (tm *TokenManager) MarkTokenInvalid(index int) {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	if index < 0 || index >= len(tm.configs) {
+		logger.Warn("尝试标记无效索引的token为失效",
+			logger.Int("index", index),
+			logger.Int("configs_len", len(tm.configs)))
+		return
+	}
+
+	// 检查是否已经标记为失效
+	if _, exists := tm.invalidated[index]; exists {
+		logger.Debug("token已经标记为失效，跳过",
+			logger.Int("index", index))
+		return
+	}
+
+	// 标记为失效
+	tm.invalidated[index] = time.Now()
+
+	logger.Warn("标记token为失效",
+		logger.Int("index", index),
+		logger.String("auth_type", tm.configs[index].AuthType))
+
+	// 如果使用活跃池策略，尝试从活跃池中移除该token
+	if tm.batchSize > 0 {
+		for i, poolIndex := range tm.activePool {
+			if poolIndex == index {
+				// 从活跃池中移除
+				tm.activePool = append(tm.activePool[:i], tm.activePool[i+1:]...)
+				logger.Info("从活跃池中移除失效token",
+					logger.Int("index", index),
+					logger.Int("remaining_pool_size", len(tm.activePool)))
+				break
+			}
+		}
+	}
 }
 
 // RemoveToken 删除单个 token（仅失效的可删除）
