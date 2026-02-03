@@ -833,6 +833,7 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 						attempt = -1 // 下次循环会+1变成0
 						startIndex = 0
 						unhealthyAccounts = make(map[int]bool)
+						hasTriedReplacement = false // 重置标志，允许在新一轮中再次替换
 						continue
 					} else {
 						// 替换失败（可能已移除不健康账号），更新池大小
@@ -846,6 +847,7 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 						// 池已改变，从头重新开始轮询
 						attempt = -1
 						startIndex = 0
+						hasTriedReplacement = false // 重置标志，允许在新一轮中再次替换
 						continue
 					}
 				}
