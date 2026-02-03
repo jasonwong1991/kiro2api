@@ -110,6 +110,14 @@ func (l *IPConcurrencyLimiter) Acquire(ctx context.Context, ip string) (bool, ti
 
 // Release 释放并发槽位
 func (l *IPConcurrencyLimiter) Release(ip string) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("释放并发槽位时发生 panic",
+				logger.String("ip", ip),
+				logger.Any("panic", r))
+		}
+	}()
+
 	if val, ok := l.semaphores.Load(ip); ok {
 		sem := val.(*ipSemaphore)
 		// 非阻塞写入（防止重复释放导致阻塞）

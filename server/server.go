@@ -57,12 +57,12 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 
 	// 添加中间件
 	r.Use(gin.Logger())
+	// IP 并发限制必须在 Recovery 之前，确保 panic 时也能释放资源
+	r.Use(IPConcurrencyMiddleware())
 	r.Use(gin.Recovery())
 	// 注入请求ID，便于日志追踪
 	r.Use(RequestIDMiddleware())
 	r.Use(corsMiddleware())
-	// IP 并发限制（防止单个 IP 占用过多资源）
-	r.Use(IPConcurrencyMiddleware())
 	// 注入AuthService到context
 	r.Use(func(c *gin.Context) {
 		c.Set("authService", authService)
