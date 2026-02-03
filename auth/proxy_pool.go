@@ -244,12 +244,12 @@ func (pm *ProxyPoolManager) createProxyClient(proxyURL string) (*http.Client, er
 			},
 		},
 		// 连接池配置（防止连接耗尽）
-		MaxIdleConns:          200, // 全局最大空闲连接数
+		MaxIdleConns:          500, // 全局最大空闲连接数
 		MaxIdleConnsPerHost:   50,  // 每个host最大空闲连接数
-		MaxConnsPerHost:       200, // 每个host最大连接数（包括活跃+空闲）
+		MaxConnsPerHost:       500, // 每个host最大连接数（包括活跃+空闲）
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     false,
+		ForceAttemptHTTP2:     true,
 		DisableCompression:    false,
 	}
 

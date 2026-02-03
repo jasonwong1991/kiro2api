@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"kiro2api/auth"
@@ -26,6 +27,20 @@ const upstreamNonStreamTimeout = 120 * time.Second
 
 // upstreamStreamTimeout 上游流式请求超时时间（较长，但仍需防止无限等待）
 const upstreamStreamTimeout = 5 * time.Minute
+
+// cancelOnCloseReadCloser 确保在响应体关闭时释放 context 相关资源（timer 等）。
+// 适用于：在成功路径必须保留 ctx（用于读取 resp.Body），但又不能泄漏 cancel 的场景。
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (c *cancelOnCloseReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.once.Do(func() { c.cancel() })
+	return err
+}
 
 // respondErrorWithCode 标准化的错误响应结构
 // 统一返回: {"error": {"message": string, "code": string}}
@@ -99,8 +114,22 @@ func filterSupportedTools(tools []types.AnthropicTool) []types.AnthropicTool {
 }
 
 func executeCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicRequest, tokenInfo types.TokenInfo, isStream bool) (*http.Response, error) {
-	req, err := buildCodeWhispererRequest(c, anthropicReq, tokenInfo, isStream)
+	// 为 OpenAI 兼容端点补齐上游请求超时，避免请求悬挂占满连接池。
+	parentCtx := context.Background()
+	if c != nil && c.Request != nil {
+		parentCtx = c.Request.Context()
+	}
+	var reqCtx context.Context
+	var cancel context.CancelFunc
+	if isStream {
+		reqCtx, cancel = context.WithTimeout(parentCtx, upstreamStreamTimeout)
+	} else {
+		reqCtx, cancel = context.WithTimeout(parentCtx, upstreamNonStreamTimeout)
+	}
+
+	req, err := buildCodeWhispererRequestWithContext(reqCtx, c, anthropicReq, tokenInfo, isStream)
 	if err != nil {
+		cancel()
 		// 检查是否是模型未找到错误，如果是，则响应已经发送，不需要再次处理
 		if _, ok := err.(*types.ModelNotFoundErrorType); ok {
 			return nil, err
@@ -117,11 +146,13 @@ func executeCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReq
 
 	resp, err := client.Do(req)
 	if err != nil {
+		cancel()
 		handleRequestSendError(c, err)
 		return nil, err
 	}
 
 	if handleCodeWhispererError(c, resp) {
+		cancel()
 		resp.Body.Close()
 		return nil, fmt.Errorf("CodeWhisperer API error")
 	}
@@ -132,6 +163,9 @@ func executeCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReq
 			logger.String("direction", "upstream_response"),
 			logger.Int("status_code", resp.StatusCode),
 		)...)
+
+	// 成功返回：由调用方负责 Close(resp.Body)；Close 时触发 cancel，及时释放 WithTimeout 的 timer。
+	resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, cancel: cancel}
 
 	return resp, nil
 }
@@ -277,6 +311,9 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 				logger.Int("status_code", resp.StatusCode),
 				logger.Int("attempts", attempt+1),
 			)...)
+
+		// 成功返回：由调用方负责 Close(resp.Body)；Close 时触发 cancel，及时释放 WithTimeout 的 timer。
+		resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, cancel: cancel}
 
 		return resp, tokenInfo, nil
 	}

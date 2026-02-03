@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -53,7 +54,23 @@ func (rp *RobustEventStreamParser) ParseStream(data []byte) ([]*EventStreamMessa
 
 	// mutex已经保证了互斥访问，无需额外的parsingActive标志
 	// 直接解析数据，避免数据丢失
-	return rp.parseStreamWithBuffer(data)
+	return rp.parseStreamWithBuffer(context.Background(), data)
+}
+
+// ParseStreamWithContext 解析流数据并支持取消/超时。
+// 当 ctx.Done() 触发时，返回已解析的消息和 ctx.Err()。
+func (rp *RobustEventStreamParser) ParseStreamWithContext(ctx context.Context, data []byte) ([]*EventStreamMessage, error) {
+	// 并发访问保护
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// mutex已经保证了互斥访问，无需额外的parsingActive标志
+	// 直接解析数据，避免数据丢失
+	return rp.parseStreamWithBuffer(ctx, data)
 }
 
 // parseSingleMessageWithValidation 解析单个消息并进行CRC校验
@@ -343,7 +360,7 @@ func (rp *RobustEventStreamParser) isValidToolUseIdFormat(toolUseId string) bool
 }
 
 // parseStreamWithBuffer 使用bytes.Buffer解析流数据
-func (rp *RobustEventStreamParser) parseStreamWithBuffer(data []byte) ([]*EventStreamMessage, error) {
+func (rp *RobustEventStreamParser) parseStreamWithBuffer(ctx context.Context, data []byte) ([]*EventStreamMessage, error) {
 	// 写入新数据到缓冲区
 	_, err := rp.buffer.Write(data)
 	if err != nil {
@@ -354,6 +371,13 @@ func (rp *RobustEventStreamParser) parseStreamWithBuffer(data []byte) ([]*EventS
 	messages := make([]*EventStreamMessage, 0, 8)
 
 	for {
+		// 支持取消/超时，防止解析在极端输入下长时间占用 CPU
+		select {
+		case <-ctx.Done():
+			return messages, ctx.Err()
+		default:
+		}
+
 		// 查看可用数据
 		available := rp.buffer.Len()
 		if available < config.EventStreamMinMessageSize {

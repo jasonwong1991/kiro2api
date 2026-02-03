@@ -51,6 +51,10 @@ class TokenDashboard {
         document.getElementById('refreshProxiesBtn')?.addEventListener('click', () => this.refreshProxies());
         document.getElementById('addProxyBtn')?.addEventListener('click', () => this.openModal('addProxyModal'));
 
+        // IP 监控
+        document.getElementById('refreshIPStatsBtn')?.addEventListener('click', () => this.refreshIPStats());
+        document.getElementById('addWhitelistBtn')?.addEventListener('click', () => this.openModal('addWhitelistModal'));
+
         // 添加 Token 表单
         document.getElementById('newTokenAuthType')?.addEventListener('change', (e) => {
             document.getElementById('idcFields').style.display = e.target.value === 'IdC' ? 'block' : 'none';
@@ -204,6 +208,8 @@ class TokenDashboard {
             this.refreshTokens();
         } else if (tabName === 'proxies') {
             this.refreshProxies();
+        } else if (tabName === 'ip') {
+            this.refreshIPStats();
         }
     }
 
@@ -1083,6 +1089,163 @@ class TokenDashboard {
         a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
+    }
+
+    // ==================== IP 监控 ====================
+
+    async refreshIPStats() {
+        const statsBody = document.getElementById('ipStatsTableBody');
+        const whitelistBody = document.getElementById('whitelistTableBody');
+
+        this.showLoading(statsBody, '正在加载 IP 统计...', 4);
+        this.showLoading(whitelistBody, '正在加载白名单...', 4);
+
+        try {
+            // 获取 IP 统计
+            const statsResponse = await fetch(`${this.adminApiBaseUrl}/ip/stats`, {
+                headers: { 'Authorization': `Bearer ${this.adminToken}` }
+            });
+
+            if (!statsResponse.ok) throw new Error(`HTTP ${statsResponse.status}`);
+
+            const statsData = await statsResponse.json();
+            this.updateIPStatsTable(statsData.data);
+
+            // 获取白名单
+            const whitelistResponse = await fetch(`${this.adminApiBaseUrl}/ip/whitelist`, {
+                headers: { 'Authorization': `Bearer ${this.adminToken}` }
+            });
+
+            if (!whitelistResponse.ok) throw new Error(`HTTP ${whitelistResponse.status}`);
+
+            const whitelistData = await whitelistResponse.json();
+            this.updateWhitelistTable(whitelistData.data.entries || []);
+
+        } catch (error) {
+            console.error('刷新 IP 数据失败:', error);
+            this.showError(statsBody, `加载失败: ${error.message}`, 4);
+            this.showError(whitelistBody, `加载失败: ${error.message}`, 4);
+        }
+    }
+
+    updateIPStatsTable(data) {
+        const tbody = document.getElementById('ipStatsTableBody');
+        const ipStats = data.ip_stats || {};
+        const ips = Object.keys(ipStats);
+
+        // 更新统计信息
+        document.getElementById('activeIPCount').textContent = ips.length;
+        document.getElementById('whitelistCount').textContent = data.whitelist_count || 0;
+        document.getElementById('maxConcurrent').textContent = data.max_concurrent || '-';
+        document.getElementById('acquireTimeout').textContent = data.acquire_timeout || '-';
+
+        if (ips.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无活跃 IP</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = ips.map(ip => {
+            const stats = ipStats[ip];
+            const active = stats.active || 0;
+            const waiting = stats.waiting || 0;
+            const status = waiting > 0 ? '排队中' : '正常';
+            const statusClass = waiting > 0 ? 'status-warning' : 'status-active';
+
+            return `
+                <tr>
+                    <td><code>${ip}</code></td>
+                    <td>${active}</td>
+                    <td>${waiting}</td>
+                    <td><span class="status-badge ${statusClass}">${status}</span></td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    updateWhitelistTable(entries) {
+        const tbody = document.getElementById('whitelistTableBody');
+
+        if (entries.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无白名单</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = entries.map(entry => {
+            const addedAt = new Date(entry.added_at).toLocaleString('zh-CN');
+            return `
+                <tr>
+                    <td><code>${entry.ip}</code></td>
+                    <td>${entry.description || '-'}</td>
+                    <td>${addedAt}</td>
+                    <td>
+                        <button class="btn-icon delete-btn" onclick="dashboard.removeWhitelist('${entry.ip}')" title="移除">
+                            🗑️
+                        </button>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    async submitAddWhitelist() {
+        const ip = document.getElementById('newWhitelistIP').value.trim();
+        const description = document.getElementById('newWhitelistDesc').value.trim();
+
+        if (!ip) {
+            this.showNotification('请输入 IP 地址', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/ip/whitelist`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.adminToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ ip, description })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || `HTTP ${response.status}`);
+            }
+
+            this.showNotification('白名单已添加', 'success');
+            this.closeModal('addWhitelistModal');
+            document.getElementById('newWhitelistIP').value = '';
+            document.getElementById('newWhitelistDesc').value = '';
+            this.refreshIPStats();
+        } catch (error) {
+            this.showNotification('添加失败: ' + error.message, 'error');
+        }
+    }
+
+    async removeWhitelist(ip) {
+        if (!confirm(`确定要从白名单移除 ${ip} 吗？`)) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/ip/whitelist`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${this.adminToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ ip })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || `HTTP ${response.status}`);
+            }
+
+            this.showNotification('已从白名单移除', 'success');
+            this.refreshIPStats();
+        } catch (error) {
+            this.showNotification('移除失败: ' + error.message, 'error');
+        }
     }
 }
 

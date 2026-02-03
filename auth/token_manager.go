@@ -297,10 +297,8 @@ func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 	// 但如果已经验证过且确认用完（在 lowBalanceVerified 中有记录），则不再触发
 	// 这样可以避免反复刷新已用完的账号
 	if bestToken.Available < 1.0 && oldAvailable >= 1.0 {
-		// 检查是否已经验证过且确认用完
-		tm.mutex.Lock()
+		// 注意：当前已持有 tm.mutex，禁止重复加锁（否则会死锁）
 		_, alreadyVerified := tm.lowBalanceVerified[bestToken.Index]
-		tm.mutex.Unlock()
 
 		// 只有未验证过的账号才触发验证
 		if !alreadyVerified && bestToken.Index >= 0 {
@@ -2588,10 +2586,20 @@ func (tm *TokenManager) Close() {
 	// 停止定时刷新任务
 	if tm.refreshTicker != nil {
 		tm.refreshTicker.Stop()
-		close(tm.refreshStop)
 		tm.refreshTicker = nil
-		logger.Info("TokenManager定时任务已停止")
 	}
+
+	// refreshStop 被多个后台任务复用（定时刷新、缓存快照保存等），必须广播式停止。
+	// 使用 close(channel) 作为广播信号；这里用非阻塞接收判断是否已关闭，避免重复 close panic。
+	if tm.refreshStop != nil {
+		select {
+		case <-tm.refreshStop:
+			// already closed
+		default:
+			close(tm.refreshStop)
+		}
+	}
+	logger.Info("TokenManager定时任务已停止")
 
 	// 停止代理池健康检查
 	if tm.proxyPool != nil {

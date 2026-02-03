@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -21,17 +22,29 @@ func NewConversationIDManager() *ConversationIDManager {
 	}
 }
 
-// GenerateConversationID 生成完全随机的会话ID
-// 改进：每次请求生成新的随机ID，避免规律性模式，增强账号安全
+// GenerateConversationID 生成稳定的会话ID（默认按 1 小时时间窗）
+// 设计目标：
+// - 同一客户端（IP+User-Agent）在同一小时内保持一致，便于上游保持会话连续性
+// - 不同客户端或跨小时生成不同 ID
 func (c *ConversationIDManager) GenerateConversationID(ctx *gin.Context) string {
 	// 检查是否有自定义的会话ID头（优先级最高）
 	if customConvID := ctx.GetHeader("X-Conversation-ID"); customConvID != "" {
 		return customConvID
 	}
 
-	// 生成完全随机的会话ID
-	randomID := GenerateRandomHex(16) // 生成16字节的随机十六进制字符串
-	return fmt.Sprintf("conv-%s", randomID)
+	// 向后兼容：缺失 context 时退化为随机（避免空指针）
+	if ctx == nil {
+		return fmt.Sprintf("conv-%s", GenerateRandomHex(8)) // 8 bytes -> 16 hex chars
+	}
+
+	// 以小时为窗口生成稳定 ID（conv- + 16 hex chars）
+	clientIP := ctx.ClientIP()
+	userAgent := ctx.GetHeader("User-Agent")
+	hourBucket := time.Now().UTC().Format("2006010215")
+	input := fmt.Sprintf("%s|%s|%s", clientIP, userAgent, hourBucket)
+
+	hash := md5.Sum([]byte(input))
+	return fmt.Sprintf("conv-%x", hash[:8])
 }
 
 // GetOrCreateConversationID 获取或创建会话ID（向后兼容）
@@ -41,7 +54,7 @@ func (c *ConversationIDManager) GetOrCreateConversationID(ctx *gin.Context) stri
 
 // InvalidateOldSessions 清理过期的会话缓存（保留用于兼容性）
 func (c *ConversationIDManager) InvalidateOldSessions() {
-	// 由于现在使用随机ID，不再需要缓存清理
+	// 当前实现为纯哈希生成；保留清理入口用于兼容旧调用方/并发测试
 	c.mu.Lock()
 	c.cache = make(map[string]string)
 	c.mu.Unlock()
@@ -51,13 +64,11 @@ func (c *ConversationIDManager) InvalidateOldSessions() {
 var globalConversationIDManager = NewConversationIDManager()
 
 // GenerateStableConversationID 生成会话ID的全局函数
-// 注意：现在生成的是随机ID，名称保留用于向后兼容
 func GenerateStableConversationID(ctx *gin.Context) string {
 	return globalConversationIDManager.GetOrCreateConversationID(ctx)
 }
 
-// GenerateStableAgentContinuationID 生成随机的代理延续GUID
-// 改进：每次请求生成新的随机GUID，避免规律性模式
+// GenerateStableAgentContinuationID 生成稳定的代理延续 GUID（UUID 格式，默认按 1 小时时间窗）
 func GenerateStableAgentContinuationID(ctx *gin.Context) string {
 	// 向后兼容：如果没有提供context，使用随机UUID
 	if ctx == nil {
@@ -69,8 +80,11 @@ func GenerateStableAgentContinuationID(ctx *gin.Context) string {
 		return customAgentID
 	}
 
-	// 生成完全随机的GUID
-	return GenerateUUID()
+	clientIP := ctx.ClientIP()
+	userAgent := ctx.GetHeader("User-Agent")
+	hourBucket := time.Now().UTC().Format("2006010215")
+	input := fmt.Sprintf("%s|%s|%s", clientIP, userAgent, hourBucket)
+	return generateDeterministicGUID(input, "agent_continuation")
 }
 
 // generateDeterministicGUID 基于输入字符串生成确定性GUID (保留用于特殊场景)

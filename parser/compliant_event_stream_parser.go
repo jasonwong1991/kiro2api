@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"kiro2api/logger"
 )
@@ -74,6 +76,69 @@ func (cesp *CompliantEventStreamParser) ParseResponse(streamData []byte) (*Parse
 			logger.Int("success_messages", len(messages)),
 			logger.Int("total_events", len(allEvents)),
 			logger.Int("error_count", len(errors)))
+	}
+
+	return result, nil
+}
+
+// ParseResponseWithContext 解析完整的 CodeWhisperer 响应（支持取消/超时）
+func (cesp *CompliantEventStreamParser) ParseResponseWithContext(ctx context.Context, streamData []byte) (*ParseResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// 1. 解析二进制事件流（可取消）
+	messages, err := cesp.robustParser.ParseStreamWithContext(ctx, streamData)
+	if err != nil {
+		// 取消/超时直接返回
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		logger.Warn("事件流解析部分失败", logger.Err(err))
+	}
+
+	// 2. 处理消息（可取消）
+	var allEvents []SSEEvent
+	var procErrors []error
+
+	for i, message := range messages {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		events, processErr := cesp.messageProcessor.ProcessMessage(message)
+		if processErr != nil {
+			errMsg := fmt.Errorf("处理消息 %d 失败: %w", i, processErr)
+			procErrors = append(procErrors, errMsg)
+			logger.Warn("消息处理失败",
+				logger.Int("message_index", i),
+				logger.String("message_type", message.GetMessageType()),
+				logger.String("event_type", message.GetEventType()),
+				logger.Err(processErr))
+			continue
+		}
+
+		allEvents = append(allEvents, events...)
+	}
+
+	// 3. 构建结果
+	result := &ParseResult{
+		Messages:       messages,
+		Events:         allEvents,
+		ToolExecutions: cesp.messageProcessor.toolManager.GetCompletedTools(),
+		ActiveTools:    cesp.messageProcessor.toolManager.GetActiveTools(),
+		SessionInfo:    cesp.messageProcessor.sessionManager.GetSessionInfo(),
+		Summary:        cesp.generateSummary(messages, allEvents),
+		Errors:         procErrors,
+	}
+
+	if len(procErrors) > 0 {
+		logger.Debug("解析完成，但有部分错误",
+			logger.Int("success_messages", len(messages)),
+			logger.Int("total_events", len(allEvents)),
+			logger.Int("error_count", len(procErrors)))
 	}
 
 	return result, nil

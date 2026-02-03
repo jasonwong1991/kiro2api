@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -219,31 +220,11 @@ func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest,
 	compliantParser := parser.NewCompliantEventStreamParser()
 	compliantParser.SetMaxErrors(config.ParserMaxErrors) // 限制最大错误次数以防死循环
 
-	// 为非流式解析添加超时保护
-	result, err := func() (*parser.ParseResult, error) {
-		done := make(chan struct{})
-		var result *parser.ParseResult
-		var err error
+	// 为非流式解析添加超时保护（可取消，不创建额外 goroutine，避免超时后解析仍在后台运行）
+	parseCtx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
 
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					err = fmt.Errorf("解析器panic: %v", r)
-				}
-				close(done)
-			}()
-			result, err = compliantParser.ParseResponse(body)
-		}()
-
-		select {
-		case <-done:
-			return result, err
-		case <-time.After(10 * time.Second): // 10秒超时
-			logger.Error("非流式解析超时")
-			return nil, fmt.Errorf("解析超时")
-		}
-	}()
-
+	result, err := compliantParser.ParseResponseWithContext(parseCtx, body)
 	if err != nil {
 		logger.Error("非流式解析失败",
 			logger.Err(err),
@@ -259,12 +240,9 @@ func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest,
 
 		// 根据错误类型提供不同的HTTP状态码
 		statusCode := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "解析超时") {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			statusCode = http.StatusRequestTimeout
 			errorResp["message"] = "请求处理超时，请稍后重试"
-		} else if strings.Contains(err.Error(), "格式错误") {
-			statusCode = http.StatusBadRequest
-			errorResp["message"] = "请求格式不正确"
 		}
 
 		c.JSON(statusCode, errorResp)
@@ -363,14 +341,14 @@ func handleNonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest,
 	outputTokens := 0
 	for _, contentBlock := range contexts {
 		blockType, _ := contentBlock["type"].(string)
-		
+
 		switch blockType {
 		case "text":
 			// 文本块：基于实际发送的文本内容
 			if text, ok := contentBlock["text"].(string); ok {
 				outputTokens += estimator.EstimateTextTokens(text)
 			}
-		
+
 		case "tool_use":
 			// 工具调用块：基于实际发送的工具名称和参数
 			// 这里使用与 SSE 响应相同的 token 计算逻辑

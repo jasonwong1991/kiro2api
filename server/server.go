@@ -46,6 +46,15 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 		IsDefaultAdminToken:  isDefaultAdminToken,
 	}
 
+	// 初始化 IP 白名单管理器
+	whitelistPath := os.Getenv("KIRO_IP_WHITELIST_PATH")
+	if whitelistPath == "" {
+		whitelistPath = DefaultWhitelistPath
+	}
+	if _, err := InitIPWhitelist(whitelistPath); err != nil {
+		logger.Error("初始化 IP 白名单失败", logger.Err(err))
+	}
+
 	// 设置 gin 模式
 	ginMode := os.Getenv("GIN_MODE")
 	if ginMode == "" {
@@ -54,6 +63,32 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 	gin.SetMode(ginMode)
 
 	r := gin.New()
+
+	// 配置可信代理（防止 IP 伪造）
+	// 默认不信任任何代理，使用 RemoteAddr 作为真实 IP
+	// 如果部署在反向代理后，需要通过环境变量 KIRO_TRUSTED_PROXIES 配置
+	trustedProxies := os.Getenv("KIRO_TRUSTED_PROXIES")
+	if trustedProxies != "" {
+		// 支持逗号分隔的多个代理 IP/CIDR
+		proxies := []string{}
+		for _, proxy := range strings.Split(trustedProxies, ",") {
+			proxy = strings.TrimSpace(proxy)
+			if proxy != "" {
+				proxies = append(proxies, proxy)
+			}
+		}
+		if err := r.SetTrustedProxies(proxies); err != nil {
+			logger.Error("设置可信代理失败", logger.Err(err))
+		} else {
+			logger.Info("已配置可信代理", logger.Int("count", len(proxies)))
+		}
+	} else {
+		// 不信任任何代理，直接使用 RemoteAddr
+		if err := r.SetTrustedProxies(nil); err != nil {
+			logger.Error("禁用代理信任失败", logger.Err(err))
+		}
+		logger.Info("已禁用代理信任，使用 RemoteAddr 作为真实 IP")
+	}
 
 	// 添加中间件
 	r.Use(gin.Logger())

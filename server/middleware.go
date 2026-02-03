@@ -198,11 +198,21 @@ func initIPLimiter() *IPConcurrencyLimiter {
 
 // IPConcurrencyMiddleware 创建基于 IP 的并发限制中间件
 // 限制每个 IP 同时只能有 N 个请求在处理中，超限时排队等待
+// 白名单 IP 不受限制
 func IPConcurrencyMiddleware() gin.HandlerFunc {
 	limiter := initIPLimiter()
 
 	return func(c *gin.Context) {
 		clientIP := c.ClientIP()
+
+		// 检查是否在白名单中
+		whitelistManager := GetIPWhitelistManager()
+		if whitelistManager != nil && whitelistManager.IsWhitelisted(clientIP) {
+			logger.Debug("IP 在白名单中，跳过并发限制",
+				logger.String("client_ip", clientIP))
+			c.Next()
+			return
+		}
 
 		// 调试日志：记录 IP 识别信息
 		logger.Debug("IP 并发限制检查",

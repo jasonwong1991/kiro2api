@@ -46,3 +46,4 @@ proxies.txt
 CLAUDE.md
 kiro.rs
 .vscode/
+ip_whitelist.json

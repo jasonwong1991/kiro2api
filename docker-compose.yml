@@ -102,6 +102,9 @@ services:
       # 权限修复：容器启动时会自动修复文件权限（chown 1001:1001），无需手动干预。
       - ./tokens.json:/app/tokens.json
 
+      # IP 白名单配置文件（可写，支持 WebUI 管理持久化）
+      - ./ip_whitelist.json:/app/ip_whitelist.json
+
       # 代理池配置文件（可选，只读挂载）
       # 如果使用文件配置代理池，取消注释以下行
       # - ./proxies.txt:/app/proxies.txt:ro

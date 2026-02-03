@@ -90,10 +90,13 @@ services:
       - aws_sso_cache:/home/appuser/.aws/sso/cache
 
       # Token 配置文件（可写，支持 WebUI 导入持久化）
-      # 注意：宿主机 tokens.json 若不存在，Docker 会创建同名“目录”。
+      # 注意：宿主机 tokens.json 若不存在，Docker 会创建同名"目录"。
       # 本项目会自动将真实配置写入到 ./tokens.json/tokens.json（仍可持久化，但位置会变化）。
       # 可选：首次启动前执行 `echo '[]' > tokens.json`，避免目录/文件混淆。
       - ./tokens.json:/app/tokens.json
+
+      # IP 白名单配置文件（可写，支持 WebUI 管理持久化）
+      - ./ip_whitelist.json:/app/ip_whitelist.json
 
       # 代理池配置文件（可选，只读挂载）
       # 如果使用文件配置代理池，取消注释以下行

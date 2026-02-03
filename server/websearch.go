@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -160,8 +161,16 @@ func executeMCPRequestWithRetry(c *gin.Context, mcpReq types.McpRequest, authSer
 		url := fmt.Sprintf(config.McpURLTemplate, config.DefaultMcpRegion)
 
 		reqBody, _ := utils.SafeMarshal(mcpReq)
-		req, err := http.NewRequest("POST", url, bytes.NewReader(reqBody))
+
+		// MCP 不是流式接口：务必加超时，避免连接/请求悬挂占满 Transport 的 MaxConnsPerHost
+		parentCtx := context.Background()
+		if c != nil && c.Request != nil {
+			parentCtx = c.Request.Context()
+		}
+		timeoutCtx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+		req, err := http.NewRequestWithContext(timeoutCtx, "POST", url, bytes.NewReader(reqBody))
 		if err != nil {
+			cancel()
 			return nil, err
 		}
 
@@ -203,14 +212,21 @@ func executeMCPRequestWithRetry(c *gin.Context, mcpReq types.McpRequest, authSer
 
 		resp, err := client.Do(req)
 		if err != nil {
+			cancel()
 			lastErr = err
 			time.Sleep(config.UpstreamRetryDelay)
 			continue
 		}
-		defer resp.Body.Close()
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		cancel()
+		if readErr != nil {
+			lastErr = readErr
+			time.Sleep(config.UpstreamRetryDelay)
+			continue
+		}
 
 		if resp.StatusCode == http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
 			logger.Debug("MCP 响应", logger.String("body", string(body)))
 
 			var mcpResp types.McpResponse
@@ -273,8 +289,8 @@ func handleWebSearchStream(c *gin.Context, model, query, toolUseID string, resul
 			"stop_reason":   nil,
 			"stop_sequence": nil,
 			"usage": map[string]any{
-				"input_tokens":               inputTokens,
-				"output_tokens":              0,
+				"input_tokens":                inputTokens,
+				"output_tokens":               0,
 				"cache_creation_input_tokens": 0,
 				"cache_read_input_tokens":     0,
 			},

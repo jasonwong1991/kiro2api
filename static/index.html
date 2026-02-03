@@ -43,6 +43,7 @@
         <div class="nav-tabs">
             <button class="nav-tab active" data-tab="tokens">📊 Token 管理</button>
             <button class="nav-tab" data-tab="proxies">🌐 代理管理</button>
+            <button class="nav-tab" data-tab="ip">🔍 IP 监控</button>
             <button class="nav-tab" data-tab="settings">⚙️ 系统设置</button>
         </div>
 
@@ -147,6 +148,81 @@
                                     <div class="spinner"></div>
                                     正在加载代理数据...
                                 </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- IP 监控页面 -->
+        <div id="ipTab" class="tab-content">
+            <div class="controls">
+                <button class="refresh-btn" id="refreshIPStatsBtn">
+                    🔄 刷新数据
+                </button>
+                <button class="action-btn add-btn" id="addWhitelistBtn">
+                    ➕ 添加白名单
+                </button>
+            </div>
+
+            <!-- IP 并发统计 -->
+            <div class="main-card">
+                <h3 class="card-title">📊 IP 并发统计</h3>
+                <div class="status-bar">
+                    <div class="status-item">
+                        <span class="status-label">活跃 IP 数</span>
+                        <span class="status-value" id="activeIPCount">-</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">白名单数量</span>
+                        <span class="status-value" id="whitelistCount">-</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">最大并发/IP</span>
+                        <span class="status-value" id="maxConcurrent">-</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">排队超时</span>
+                        <span class="status-value" id="acquireTimeout">-</span>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>IP 地址</th>
+                                <th>活跃请求数</th>
+                                <th>等待请求数</th>
+                                <th>状态</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ipStatsTableBody">
+                            <tr>
+                                <td colspan="4" class="loading">正在加载...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- IP 白名单 -->
+            <div class="main-card">
+                <h3 class="card-title">🔐 IP 白名单</h3>
+                <p class="card-desc">白名单中的 IP 不受并发限制</p>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>IP 地址</th>
+                                <th>描述</th>
+                                <th>添加时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="whitelistTableBody">
+                            <tr>
+                                <td colspan="4" class="loading">正在加载...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -348,6 +424,32 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="dashboard.closeModal('addProxyModal')">取消</button>
                 <button class="btn btn-primary" onclick="dashboard.submitAddProxy()">添加</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加白名单弹窗 -->
+    <div id="addWhitelistModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>➕ 添加 IP 白名单</h3>
+                <button class="modal-close" onclick="dashboard.closeModal('addWhitelistModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>IP 地址 <span class="required">*</span></label>
+                    <input type="text" id="newWhitelistIP" class="form-input" placeholder="例如: 192.168.1.100">
+                    <p class="form-hint">请输入有效的 IPv4 或 IPv6 地址</p>
+                </div>
+                <div class="form-group">
+                    <label>描述</label>
+                    <input type="text" id="newWhitelistDesc" class="form-input" placeholder="例如: 办公室网络">
+                    <p class="form-hint">可选，用于标识此 IP 的用途</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="dashboard.closeModal('addWhitelistModal')">取消</button>
+                <button class="btn btn-primary" onclick="dashboard.submitAddWhitelist()">添加</button>
             </div>
         </div>
     </div>

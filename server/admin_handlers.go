@@ -405,6 +405,12 @@ func RegisterAdminRoutes(r *gin.Engine, authService *auth.AuthService, adminToke
 	admin.POST("/proxies/add", handlers.HandleAddProxy)
 	admin.DELETE("/proxies/:index", handlers.HandleDeleteProxy)
 
+	// IP 监控和白名单管理端点
+	admin.GET("/ip/stats", HandleGetIPStats)
+	admin.GET("/ip/whitelist", HandleGetWhitelist)
+	admin.POST("/ip/whitelist", HandleAddWhitelist)
+	admin.DELETE("/ip/whitelist", HandleRemoveWhitelist)
+
 	logger.Info("管理 API 路由已注册")
 	logger.Info("  GET    /v1/admin/status                - 获取系统状态")
 	logger.Info("  GET    /v1/admin/tokens                - 列出所有 token 状态")
@@ -421,6 +427,10 @@ func RegisterAdminRoutes(r *gin.Engine, authService *auth.AuthService, adminToke
 	logger.Info("  GET    /v1/admin/proxies               - 列出所有代理")
 	logger.Info("  POST   /v1/admin/proxies/add           - 添加代理")
 	logger.Info("  DELETE /v1/admin/proxies/:index        - 删除代理")
+	logger.Info("  GET    /v1/admin/ip/stats              - 获取 IP 并发统计")
+	logger.Info("  GET    /v1/admin/ip/whitelist          - 获取白名单列表")
+	logger.Info("  POST   /v1/admin/ip/whitelist          - 添加 IP 到白名单")
+	logger.Info("  DELETE /v1/admin/ip/whitelist          - 从白名单移除 IP (JSON Body)")
 }
 
 // AddTokenRequest 添加 token 请求

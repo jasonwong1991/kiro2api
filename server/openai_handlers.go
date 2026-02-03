@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,8 +35,18 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 
 	// 使用新的符合AWS规范的解析器
 	compliantParser := parser.NewCompliantEventStreamParser()
-	result, err := compliantParser.ParseResponse(body)
+	compliantParser.SetMaxErrors(config.ParserMaxErrors) // 防止解析器在异常输入下死循环
+
+	// 为非流式解析添加超时保护（可取消，不创建额外 goroutine）
+	parseCtx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	result, err := compliantParser.ParseResponseWithContext(parseCtx, body)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			c.JSON(http.StatusRequestTimeout, gin.H{"error": "请求处理超时，请稍后重试"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "响应解析失败"})
 		return
 	}

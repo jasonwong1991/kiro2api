@@ -250,8 +250,8 @@ func TestIsFilePath(t *testing.T) {
 }
 
 func TestProxyPoolManager_Fallback(t *testing.T) {
-	// 测试所有代理都不健康时的回退处理
-	// 当所有代理都不健康时，系统会选择失败次数最少的代理进行尝试
+	// 测试所有代理都不健康时的回退处理：
+	// 期望降级为“不使用代理”，而不是返回一个不健康代理。
 	proxies := []string{
 		"http://user1:pass1@proxy1.com:8080",
 	}
@@ -269,23 +269,17 @@ func TestProxyPoolManager_Fallback(t *testing.T) {
 	}
 	pm.mutex.Unlock()
 
-	// 获取代理，即使不健康也会选择失败次数最少的代理（容错降级）
 	proxyURL, client, err := pm.GetProxyForToken("test")
 
-	// 不应该返回错误
 	if err != nil {
 		t.Errorf("不应该返回错误: %v", err)
 	}
 
-	// 当所有代理都不健康时，会选择失败次数最少的代理
-	if proxyURL == "" {
-		t.Errorf("期望选择失败次数最少的代理，实际返回空字符串")
+	// 当所有代理都不健康时，应回退为不使用代理
+	if proxyURL != "" {
+		t.Errorf("期望 proxyURL 为空（降级不使用代理），实际为: %s", proxyURL)
 	}
-
-	// client 应该不为 nil
-	if client == nil {
-		t.Errorf("期望 client 不为 nil")
+	if client != nil {
+		t.Errorf("期望 client 为 nil（降级不使用代理）")
 	}
-
-	t.Logf("回退处理测试通过：选择了代理 %s", proxyURL)
 }
