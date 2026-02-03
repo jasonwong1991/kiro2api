@@ -196,6 +196,15 @@ func IPConcurrencyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		clientIP := c.ClientIP()
 
+		// 调试日志：记录 IP 识别信息
+		logger.Debug("IP 并发限制检查",
+			logger.String("client_ip", clientIP),
+			logger.String("x_forwarded_for", c.GetHeader("X-Forwarded-For")),
+			logger.String("x_real_ip", c.GetHeader("X-Real-IP")),
+			logger.String("remote_addr", c.Request.RemoteAddr),
+			logger.Int("current_active", limiter.GetCurrentCount(clientIP)),
+			logger.Int64("current_waiting", limiter.GetWaitingCount(clientIP)))
+
 		// 尝试获取并发槽位（支持排队等待）
 		acquired, waitTime := limiter.Acquire(c.Request.Context(), clientIP)
 		if !acquired {
