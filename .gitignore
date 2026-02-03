@@ -47,3 +47,4 @@ CLAUDE.md
 kiro.rs
 .vscode/
 ip_whitelist.json
+*.txt

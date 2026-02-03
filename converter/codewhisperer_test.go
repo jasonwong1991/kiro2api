@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -36,6 +37,116 @@ func TestBuildCodeWhispererRequest_BasicMessage(t *testing.T) {
 	assert.Equal(t, "Hello, how are you?", cwReq.ConversationState.CurrentMessage.UserInputMessage.Content)
 	assert.Equal(t, "claude-sonnet-4", cwReq.ConversationState.CurrentMessage.UserInputMessage.ModelId)
 	assert.Equal(t, "AI_EDITOR", cwReq.ConversationState.CurrentMessage.UserInputMessage.Origin)
+}
+
+func TestBuildCodeWhispererRequest_JSONFormat_OmitNullables(t *testing.T) {
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "Hello",
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+
+	body, err := json.Marshal(cwReq)
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(body, &payload))
+
+	conversationState, ok := payload["conversationState"].(map[string]any)
+	require.True(t, ok)
+
+	_, hasHistory := conversationState["history"]
+	assert.False(t, hasHistory, "history 应该被省略，避免发送 null")
+
+	currentMessage, ok := conversationState["currentMessage"].(map[string]any)
+	require.True(t, ok)
+	userInputMessage, ok := currentMessage["userInputMessage"].(map[string]any)
+	require.True(t, ok)
+
+	_, hasCtx := userInputMessage["userInputMessageContext"]
+	assert.False(t, hasCtx, "userInputMessageContext 应该被省略，避免发送空对象 {}")
+}
+
+func TestBuildCodeWhispererRequest_JSONFormat_ToolUsesArray(t *testing.T) {
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "First",
+			},
+			{
+				Role:    "assistant",
+				Content: "Response",
+			},
+			{
+				Role:    "user",
+				Content: "Second",
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+
+	body, err := json.Marshal(cwReq)
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(body, &payload))
+
+	conversationState, ok := payload["conversationState"].(map[string]any)
+	require.True(t, ok)
+
+	history, ok := conversationState["history"].([]any)
+	require.True(t, ok)
+	require.Len(t, history, 2)
+
+	assistantEntry, ok := history[1].(map[string]any)
+	require.True(t, ok)
+	assistantResponseMessage, ok := assistantEntry["assistantResponseMessage"].(map[string]any)
+	require.True(t, ok)
+
+	toolUses, exists := assistantResponseMessage["toolUses"]
+	require.True(t, exists)
+	toolUsesArray, ok := toolUses.([]any)
+	require.True(t, ok, "toolUses 必须是数组，不能为 null")
+	assert.Len(t, toolUsesArray, 0)
+}
+
+func TestBuildCodeWhispererRequest_FilteredTools_DoNotSendEmptyContext(t *testing.T) {
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "Search the web",
+			},
+		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "web_search",
+				Description: "Search the web",
+				InputSchema: map[string]any{"type": "object"},
+			},
+		},
+		ToolChoice: map[string]any{"type": "any"},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "MANUAL", cwReq.ConversationState.ChatTriggerType)
+	assert.Nil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
 }
 
 func TestBuildCodeWhispererRequest_EmptyMessages(t *testing.T) {
@@ -106,7 +217,7 @@ func TestBuildCodeWhispererRequest_WithTools(t *testing.T) {
 	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
 
 	require.NoError(t, err)
-	assert.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools)
+	require.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
 	assert.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools, 1)
 	assert.Equal(t, "get_weather", cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools[0].ToolSpecification.Name)
 }
@@ -139,6 +250,7 @@ func TestBuildCodeWhispererRequest_FilterWebSearchTool(t *testing.T) {
 
 	require.NoError(t, err)
 	// web_search 应该被过滤掉
+	require.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
 	assert.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools, 1)
 	assert.Equal(t, "get_weather", cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools[0].ToolSpecification.Name)
 }
@@ -172,7 +284,7 @@ func TestBuildCodeWhispererRequest_WithToolResults(t *testing.T) {
 	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
 
 	require.NoError(t, err)
-	assert.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults)
+	require.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
 	assert.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults, 1)
 	assert.Equal(t, "tool_123", cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults[0].ToolUseId)
 	// 包含 tool_result 的请求，content 应该为空
@@ -290,7 +402,7 @@ func TestExtractToolUsesFromMessage(t *testing.T) {
 		toolID := "tool_abc123"
 		toolName := "get_weather"
 		toolInput := any(map[string]any{"location": "Tokyo"})
-		
+
 		content := []types.ContentBlock{
 			{
 				Type: "text",
@@ -561,7 +673,7 @@ func TestBuildCodeWhispererRequest_OrphanUserMessages(t *testing.T) {
 		lastAssistantMsg, ok := cwReq.ConversationState.History[3].(types.HistoryAssistantMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "OK", lastAssistantMsg.AssistantResponseMessage.Content)
-		assert.Nil(t, lastAssistantMsg.AssistantResponseMessage.ToolUses)
+		assert.Len(t, lastAssistantMsg.AssistantResponseMessage.ToolUses, 0)
 
 		// 当前消息应该是最后一条
 		assert.Equal(t, "第三个问题（当前）", cwReq.ConversationState.CurrentMessage.UserInputMessage.Content)
@@ -680,4 +792,3 @@ func TestBuildCodeWhispererRequest_OrphanUserMessages(t *testing.T) {
 		assert.Equal(t, "第三个问题（当前）", cwReq.ConversationState.CurrentMessage.UserInputMessage.Content)
 	})
 }
-

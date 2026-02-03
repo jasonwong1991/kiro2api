@@ -22,7 +22,20 @@ import (
 // determineChatTriggerType 智能确定聊天触发类型 (SOLID-SRP: 单一责任)
 func determineChatTriggerType(anthropicReq types.AnthropicRequest) string {
 	// 如果有工具调用，通常是自动触发的
-	if len(anthropicReq.Tools) > 0 {
+	// 注意：需要忽略上游不支持的工具（如 web_search），避免出现 AUTO 但无有效工具的格式错误
+	hasSupportedTools := false
+	for _, tool := range anthropicReq.Tools {
+		if tool.Name == "" {
+			continue
+		}
+		if tool.Name == "web_search" || tool.Name == "websearch" {
+			continue
+		}
+		hasSupportedTools = true
+		break
+	}
+
+	if hasSupportedTools {
 		// 检查tool_choice是否强制要求使用工具
 		if anthropicReq.ToolChoice != nil {
 			if tc, ok := anthropicReq.ToolChoice.(*types.ToolChoice); ok && tc != nil {
@@ -57,8 +70,14 @@ func validateCodeWhispererRequest(cwReq *types.CodeWhispererRequest) error {
 	// 验证内容完整性 (KISS: 简化内容验证)
 	trimmedContent := strings.TrimSpace(cwReq.ConversationState.CurrentMessage.UserInputMessage.Content)
 	hasImages := len(cwReq.ConversationState.CurrentMessage.UserInputMessage.Images) > 0
-	hasTools := len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools) > 0
-	hasToolResults := len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults) > 0
+
+	// 安全检查 UserInputMessageContext 指针
+	hasTools := false
+	hasToolResults := false
+	if ctx := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext; ctx != nil {
+		hasTools = len(ctx.Tools) > 0
+		hasToolResults = len(ctx.ToolResults) > 0
+	}
 
 	// 如果有工具结果，允许内容为空（这是工具执行后的反馈请求）
 	if hasToolResults {
@@ -307,6 +326,10 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 	if lastMessage.Role == "user" {
 		toolResults := extractToolResultsFromMessage(lastMessage.Content)
 		if len(toolResults) > 0 {
+			// 初始化 UserInputMessageContext 指针
+			if cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext == nil {
+				cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &types.MessageContext{}
+			}
 			cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults = toolResults
 
 			logger.Debug("已添加工具结果到请求",
@@ -360,16 +383,26 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 			// 根据req.json的实际结构，确保JSON Schema完整性
 			cwTool := types.CodeWhispererTool{}
 			cwTool.ToolSpecification.Name = tool.Name
-			
+
+			// 验证并处理工具描述
+			description := strings.TrimSpace(tool.Description)
+			if description == "" {
+				// AWS CodeWhisperer API 不接受空描述，提供默认值
+				description = fmt.Sprintf("Tool: %s", tool.Name)
+				logger.Warn("工具描述为空，使用默认描述",
+					logger.String("tool_name", tool.Name),
+					logger.String("default_description", description))
+			}
+
 			// 限制 description 长度为 10000 字符
-			if len(tool.Description) > config.MaxToolDescriptionLength {
-				cwTool.ToolSpecification.Description = tool.Description[:config.MaxToolDescriptionLength]
+			if len(description) > config.MaxToolDescriptionLength {
+				cwTool.ToolSpecification.Description = description[:config.MaxToolDescriptionLength]
 				logger.Debug("工具描述超长已截断",
 					logger.String("tool_name", tool.Name),
-					logger.Int("original_length", len(tool.Description)),
+					logger.Int("original_length", len(description)),
 					logger.Int("max_length", config.MaxToolDescriptionLength))
 			} else {
-				cwTool.ToolSpecification.Description = tool.Description
+				cwTool.ToolSpecification.Description = description
 			}
 
 			// 直接使用原始的InputSchema，避免过度处理 (恢复v0.4兼容性)
@@ -380,7 +413,14 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 		}
 
 		// 工具配置放在 UserInputMessageContext.Tools 中 (符合req.json结构)
-		cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools = tools
+		// 注意：如果过滤后没有任何有效工具，不要发送空的 userInputMessageContext（上游可能判定为格式错误）
+		if len(tools) > 0 {
+			// 初始化 UserInputMessageContext 指针
+			if cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext == nil {
+				cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &types.MessageContext{}
+			}
+			cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools = tools
+		}
 	}
 
 	// 构建历史消息
@@ -411,7 +451,7 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 
 			assistantMsg := types.HistoryAssistantMessage{}
 			assistantMsg.AssistantResponseMessage.Content = "OK"
-			assistantMsg.AssistantResponseMessage.ToolUses = nil
+			assistantMsg.AssistantResponseMessage.ToolUses = []types.ToolUseEntry{}
 			history = append(history, assistantMsg)
 		}
 
@@ -472,6 +512,10 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 						mergedUserMsg.UserInputMessage.Images = allImages
 					}
 					if len(allToolResults) > 0 {
+						// 初始化 UserInputMessageContext 指针
+						if mergedUserMsg.UserInputMessage.UserInputMessageContext == nil {
+							mergedUserMsg.UserInputMessage.UserInputMessageContext = &types.MessageContext{}
+						}
 						mergedUserMsg.UserInputMessage.UserInputMessageContext.ToolResults = allToolResults
 						// 如果历史用户消息包含工具结果，也将 content 设置为空字符串
 						mergedUserMsg.UserInputMessage.Content = ""
@@ -501,7 +545,7 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 					if len(toolUses) > 0 {
 						assistantMsg.AssistantResponseMessage.ToolUses = toolUses
 					} else {
-						assistantMsg.AssistantResponseMessage.ToolUses = nil
+						assistantMsg.AssistantResponseMessage.ToolUses = []types.ToolUseEntry{}
 					}
 
 					history = append(history, assistantMsg)
@@ -545,6 +589,10 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 				mergedOrphanUserMsg.UserInputMessage.Images = allImages
 			}
 			if len(allToolResults) > 0 {
+				// 初始化 UserInputMessageContext 指针
+				if mergedOrphanUserMsg.UserInputMessage.UserInputMessageContext == nil {
+					mergedOrphanUserMsg.UserInputMessage.UserInputMessageContext = &types.MessageContext{}
+				}
 				mergedOrphanUserMsg.UserInputMessage.UserInputMessageContext.ToolResults = allToolResults
 				mergedOrphanUserMsg.UserInputMessage.Content = ""
 			}
@@ -556,7 +604,7 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 			// 自动配对一个"OK"的assistant响应
 			autoAssistantMsg := types.HistoryAssistantMessage{}
 			autoAssistantMsg.AssistantResponseMessage.Content = "OK"
-			autoAssistantMsg.AssistantResponseMessage.ToolUses = nil
+			autoAssistantMsg.AssistantResponseMessage.ToolUses = []types.ToolUseEntry{}
 			history = append(history, autoAssistantMsg)
 
 			logger.Debug("历史消息末尾存在孤立的user消息，已自动配对assistant",

@@ -383,9 +383,11 @@ func buildCodeWhispererRequestWithContext(ctx context.Context, c *gin.Context, a
 	// 临时调试：记录发送给CodeWhisperer的请求内容
 	// 补充：当工具直传启用时输出工具名称预览
 	var toolNamesPreview string
-	if len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools) > 0 {
-		names := make([]string, 0, len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools))
-		for _, t := range cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools {
+	toolsCount := 0
+	if ctx := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext; ctx != nil && len(ctx.Tools) > 0 {
+		toolsCount = len(ctx.Tools)
+		names := make([]string, 0, len(ctx.Tools))
+		for _, t := range ctx.Tools {
 			if t.ToolSpecification.Name != "" {
 				names = append(names, t.ToolSpecification.Name)
 			}
@@ -397,7 +399,7 @@ func buildCodeWhispererRequestWithContext(ctx context.Context, c *gin.Context, a
 		logger.String("direction", "upstream_request"),
 		logger.Int("request_size", len(cwReqBody)),
 		logger.String("request_body", string(cwReqBody)),
-		logger.Int("tools_count", len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools)),
+		logger.Int("tools_count", toolsCount),
 		logger.String("tools_names", toolNamesPreview))
 
 	// 存储请求体到 Context，用于错误调试

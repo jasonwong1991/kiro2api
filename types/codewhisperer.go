@@ -17,18 +17,15 @@ type CodeWhispererRequest struct {
 		ChatTriggerType     string `json:"chatTriggerType"`
 		CurrentMessage      struct {
 			UserInputMessage struct {
-				UserInputMessageContext struct {
-					ToolResults []ToolResult        `json:"toolResults,omitempty"`
-					Tools       []CodeWhispererTool `json:"tools,omitempty"`
-				} `json:"userInputMessageContext"`
-				Content string               `json:"content"`
-				ModelId string               `json:"modelId"`
-				Images  []CodeWhispererImage `json:"images"`
-				Origin  string               `json:"origin"`
+				UserInputMessageContext *MessageContext      `json:"userInputMessageContext,omitempty"`
+				Content                 string               `json:"content"`
+				ModelId                 string               `json:"modelId"`
+				Images                  []CodeWhispererImage `json:"images"`
+				Origin                  string               `json:"origin"`
 			} `json:"userInputMessage"`
 		} `json:"currentMessage"`
 		ConversationId string `json:"conversationId"`
-		History        []any  `json:"history"`
+		History        []any  `json:"history,omitempty"`
 	} `json:"conversationState"`
 }
 
@@ -60,6 +57,12 @@ type CodeWhispererTool struct {
 	ToolSpecification ToolSpecification `json:"toolSpecification"`
 }
 
+// MessageContext 定义用户输入消息的上下文
+type MessageContext struct {
+	ToolResults []ToolResult        `json:"toolResults,omitempty"`
+	Tools       []CodeWhispererTool `json:"tools,omitempty"`
+}
+
 // HistoryUserMessage 表示历史记录中的用户消息
 type HistoryUserMessage struct {
 	UserInputMessage struct {
@@ -67,10 +70,7 @@ type HistoryUserMessage struct {
 		ModelId                 string               `json:"modelId"`
 		Origin                  string               `json:"origin"`
 		Images                  []CodeWhispererImage `json:"images,omitempty"`
-		UserInputMessageContext struct {
-			ToolResults []ToolResult        `json:"toolResults,omitempty"`
-			Tools       []CodeWhispererTool `json:"tools,omitempty"`
-		} `json:"userInputMessageContext"`
+		UserInputMessageContext *MessageContext      `json:"userInputMessageContext,omitempty"`
 	} `json:"userInputMessage"`
 }
 
