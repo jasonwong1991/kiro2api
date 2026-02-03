@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"kiro2api/logger"
@@ -10,6 +11,9 @@ import (
 	"net/url"
 	"time"
 )
+
+// usageCheckTimeout 使用限制检查超时时间
+const usageCheckTimeout = 30 * time.Second
 
 // UsageLimitsChecker 使用限制检查器 (遵循SRP原则)
 type UsageLimitsChecker struct {
@@ -49,8 +53,12 @@ func (c *UsageLimitsChecker) CheckUsageLimits(token types.TokenInfo) (*types.Usa
 
 	requestURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
 
+	// 创建带超时的context，防止请求无限等待导致锁死
+	ctx, cancel := context.WithTimeout(context.Background(), usageCheckTimeout)
+	defer cancel()
+
 	// 创建HTTP请求
-	req, err := http.NewRequest("GET", requestURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("创建使用限制检查请求失败: %v", err)
 	}

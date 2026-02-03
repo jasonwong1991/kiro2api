@@ -16,13 +16,23 @@ import (
 	"kiro2api/logger"
 )
 
+// 代理冷却时间常量
+const (
+	// baseCooldownDuration 基础冷却时间（第1次失败后冷却1小时）
+	baseCooldownDuration = 1 * time.Hour
+	// maxCooldownDuration 最大冷却时间（24小时封顶）
+	maxCooldownDuration = 24 * time.Hour
+)
+
 // ProxyInfo 代理信息
 type ProxyInfo struct {
-	URL           string    `json:"url"`           // 代理URL，格式：http://username:password@ip:port
-	Healthy       bool      `json:"healthy"`       // 健康状态
-	LastCheck     time.Time `json:"last_check"`    // 最后检查时间
-	FailureCount  int       `json:"failure_count"` // 连续失败次数
-	AssignedCount int       `json:"-"`             // 已分配账号数（运行时统计）
+	URL              string    `json:"url"`                // 代理URL，格式：http://username:password@ip:port
+	Healthy          bool      `json:"healthy"`            // 健康状态
+	LastCheck        time.Time `json:"last_check"`         // 最后检查时间
+	FailureCount     int       `json:"failure_count"`      // 连续失败次数
+	AssignedCount    int       `json:"-"`                  // 已分配账号数（运行时统计）
+	BlacklistedUntil time.Time `json:"blacklisted_until"`  // 黑名单解除时间（指数退避冷却）
+	BlacklistCount   int       `json:"blacklist_count"`    // 被拉黑次数（用于计算指数退避）
 }
 
 // ProxyPoolManager 代理池管理器
@@ -235,8 +245,8 @@ func (pm *ProxyPoolManager) createProxyClient(proxyURL string) (*http.Client, er
 		},
 		// 连接池配置（防止连接耗尽）
 		MaxIdleConns:          200, // 全局最大空闲连接数
-		MaxIdleConnsPerHost:   20,  // 每个host最大空闲连接数
-		MaxConnsPerHost:       100, // 每个host最大连接数（包括活跃+空闲）
+		MaxIdleConnsPerHost:   50,  // 每个host最大空闲连接数
+		MaxConnsPerHost:       200, // 每个host最大连接数（包括活跃+空闲）
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     false,
@@ -280,14 +290,19 @@ func (pm *ProxyPoolManager) performHealthCheck() {
 	pm.mutex.RLock()
 	proxyCount := len(pm.proxies)
 	type proxySnapshot struct {
-		url    string
-		client *http.Client
+		url              string
+		client           *http.Client
+		blacklistedUntil time.Time
 	}
 	snapshots := make([]proxySnapshot, 0, proxyCount)
 	for _, proxy := range pm.proxies {
 		client := pm.proxyClients[proxy.URL]
 		if client != nil {
-			snapshots = append(snapshots, proxySnapshot{url: proxy.URL, client: client})
+			snapshots = append(snapshots, proxySnapshot{
+				url:              proxy.URL,
+				client:           client,
+				blacklistedUntil: proxy.BlacklistedUntil,
+			})
 		}
 	}
 	healthCheckURL := pm.healthCheckURL
@@ -297,13 +312,37 @@ func (pm *ProxyPoolManager) performHealthCheck() {
 		return
 	}
 
-	logger.Debug("开始代理健康检查", logger.Int("proxy_count", len(snapshots)))
+	// 过滤掉仍在黑名单冷却期内的代理
+	now := time.Now()
+	activeSnapshots := make([]proxySnapshot, 0, len(snapshots))
+	skippedCount := 0
+	for _, snap := range snapshots {
+		if !snap.blacklistedUntil.IsZero() && now.Before(snap.blacklistedUntil) {
+			// 仍在冷却期，跳过健康检查
+			skippedCount++
+			continue
+		}
+		activeSnapshots = append(activeSnapshots, snap)
+	}
+
+	if skippedCount > 0 {
+		logger.Debug("跳过黑名单冷却期内的代理",
+			logger.Int("skipped_count", skippedCount),
+			logger.Int("active_count", len(activeSnapshots)))
+	}
+
+	if len(activeSnapshots) == 0 {
+		logger.Debug("所有代理都在冷却期，跳过本次健康检查")
+		return
+	}
+
+	logger.Debug("开始代理健康检查", logger.Int("proxy_count", len(activeSnapshots)))
 
 	// 并发执行健康检查（不持锁）
-	results := make(chan healthCheckResult, len(snapshots))
+	results := make(chan healthCheckResult, len(activeSnapshots))
 	var wg sync.WaitGroup
 
-	for _, snap := range snapshots {
+	for _, snap := range activeSnapshots {
 		wg.Add(1)
 		go func(proxyURL string, client *http.Client) {
 			defer wg.Done()
@@ -395,9 +434,21 @@ func (pm *ProxyPoolManager) markProxyFailed(proxy *ProxyInfo) {
 	if proxy.FailureCount >= pm.maxFailures {
 		if proxy.Healthy {
 			proxy.Healthy = false
-			logger.Warn("代理标记为不健康",
+			proxy.BlacklistCount++
+
+			// 计算指数退避冷却时间：1小时 * 2^(blacklistCount-1)，最大24小时
+			cooldown := baseCooldownDuration * time.Duration(1<<(proxy.BlacklistCount-1))
+			if cooldown > maxCooldownDuration {
+				cooldown = maxCooldownDuration
+			}
+			proxy.BlacklistedUntil = time.Now().Add(cooldown)
+
+			logger.Warn("代理标记为不健康并加入黑名单",
 				logger.String("proxy_url", proxy.URL),
-				logger.Int("failure_count", proxy.FailureCount))
+				logger.Int("failure_count", proxy.FailureCount),
+				logger.Int("blacklist_count", proxy.BlacklistCount),
+				logger.Duration("cooldown", cooldown),
+				logger.String("blacklisted_until", proxy.BlacklistedUntil.Format(time.RFC3339)))
 		}
 	}
 }
@@ -408,10 +459,13 @@ func (pm *ProxyPoolManager) markProxyHealthy(proxy *ProxyInfo) {
 	if !proxy.Healthy || proxy.FailureCount > 0 {
 		logger.Info("代理恢复健康",
 			logger.String("proxy_url", proxy.URL),
-			logger.Int("previous_failures", proxy.FailureCount))
+			logger.Int("previous_failures", proxy.FailureCount),
+			logger.Int("blacklist_count", proxy.BlacklistCount))
 	}
 	proxy.Healthy = true
 	proxy.FailureCount = 0
+	// 注意：不重置 BlacklistCount，保留历史记录用于下次计算退避时间
+	// 只有连续成功多次后才考虑重置（可选优化）
 }
 
 // ReportProxyFailure 报告代理失败（由外部调用）
@@ -444,22 +498,32 @@ func (pm *ProxyPoolManager) GetStats() map[string]interface{} {
 	stats["total_proxies"] = len(pm.proxies)
 
 	healthyCount := 0
+	blacklistedCount := 0
+	now := time.Now()
 	proxyStats := make([]map[string]interface{}, 0, len(pm.proxies))
 
 	for _, proxy := range pm.proxies {
 		if proxy.Healthy {
 			healthyCount++
 		}
+		isBlacklisted := !proxy.BlacklistedUntil.IsZero() && now.Before(proxy.BlacklistedUntil)
+		if isBlacklisted {
+			blacklistedCount++
+		}
 		proxyStats = append(proxyStats, map[string]interface{}{
-			"url":            proxy.URL,
-			"healthy":        proxy.Healthy,
-			"failure_count":  proxy.FailureCount,
-			"assigned_count": proxy.AssignedCount,
-			"last_check":     proxy.LastCheck,
+			"url":               proxy.URL,
+			"healthy":           proxy.Healthy,
+			"failure_count":     proxy.FailureCount,
+			"assigned_count":    proxy.AssignedCount,
+			"last_check":        proxy.LastCheck,
+			"blacklisted_until": proxy.BlacklistedUntil,
+			"blacklist_count":   proxy.BlacklistCount,
+			"is_blacklisted":    isBlacklisted,
 		})
 	}
 
 	stats["healthy_count"] = healthyCount
+	stats["blacklisted_count"] = blacklistedCount
 	stats["assigned_tokens"] = len(pm.tokenProxyMap)
 	stats["proxy_disabled"] = pm.proxyDisabled
 	stats["proxies"] = proxyStats
@@ -621,7 +685,7 @@ func maskProxyURL(proxyURL string) string {
 func getHealthCheckURL() string {
 	url := os.Getenv("KIRO_PROXY_HEALTH_CHECK_URL")
 	if url == "" {
-		url = "https://www.google.com" // 默认健康检查URL
+		url = "http://cp.cloudflare.com/generate_204" // 默认健康检查URL
 	}
 	return url
 }

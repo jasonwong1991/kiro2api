@@ -61,6 +61,8 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 	// 注入请求ID，便于日志追踪
 	r.Use(RequestIDMiddleware())
 	r.Use(corsMiddleware())
+	// IP 并发限制（防止单个 IP 占用过多资源）
+	r.Use(IPConcurrencyMiddleware())
 	// 注入AuthService到context
 	r.Use(func(c *gin.Context) {
 		c.Set("authService", authService)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// upstreamRequestTimeout 上游请求超时时间（非流式）
+const upstreamNonStreamTimeout = 120 * time.Second
+
+// upstreamStreamTimeout 上游流式请求超时时间（较长，但仍需防止无限等待）
+const upstreamStreamTimeout = 5 * time.Minute
 
 // respondErrorWithCode 标准化的错误响应结构
 // 统一返回: {"error": {"message": string, "code": string}}
@@ -186,9 +193,20 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 				)...)
 		}
 
-		// 构建请求
-		req, err := buildCodeWhispererRequest(c, anthropicReq, tokenInfo, isStream)
+		// 构建请求（带超时控制）
+		// 流式请求设置较长超时（5分钟），非流式请求设置较短超时（2分钟）
+		// 注意：不使用 defer cancel()，因为在循环内会导致资源泄漏
+		var reqCtx context.Context
+		var cancel context.CancelFunc
+		if isStream {
+			reqCtx, cancel = context.WithTimeout(c.Request.Context(), upstreamStreamTimeout)
+		} else {
+			reqCtx, cancel = context.WithTimeout(c.Request.Context(), upstreamNonStreamTimeout)
+		}
+
+		req, err := buildCodeWhispererRequestWithContext(reqCtx, c, anthropicReq, tokenInfo, isStream)
 		if err != nil {
+			cancel() // 显式释放 context
 			if _, ok := err.(*types.ModelNotFoundErrorType); ok {
 				return nil, tokenInfo, err
 			}
@@ -205,11 +223,21 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 
 		resp, err := client.Do(req)
 		if err != nil {
-			logger.Warn("请求发送失败",
-				addReqFields(c,
-					logger.Int("attempt", attempt),
-					logger.Err(err),
-				)...)
+			cancel() // 显式释放 context
+			// 检查是否是超时错误
+			if reqCtx.Err() == context.DeadlineExceeded {
+				logger.Warn("上游请求超时",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Duration("timeout", upstreamNonStreamTimeout),
+					)...)
+			} else {
+				logger.Warn("请求发送失败",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Err(err),
+					)...)
+			}
 			lastErr = err
 			if attempt < config.RetryMaxAttempts {
 				time.Sleep(config.UpstreamRetryDelay)
@@ -221,6 +249,7 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 
 		// 检查是否可重试的错误状态码
 		if isRetryableStatusCode(resp.StatusCode) && attempt < config.RetryMaxAttempts {
+			cancel() // 显式释放 context
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			logger.Warn("收到可重试错误，换token重试",
@@ -235,11 +264,13 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 
 		// 不可重试或已达最大重试次数，检查错误
 		if handleCodeWhispererError(c, resp) {
+			cancel() // 显式释放 context
 			resp.Body.Close()
 			return nil, tokenInfo, fmt.Errorf("CodeWhisperer API error")
 		}
 
-		// 成功
+		// 成功 - 注意：成功时不调用 cancel()，因为 resp.Body 仍需使用 context
+		// cancel 会在调用方处理完 response 后由 context 的父级取消或超时自动清理
 		logger.Debug("上游响应成功",
 			addReqFields(c,
 				logger.String("direction", "upstream_response"),
@@ -258,8 +289,13 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 // execCWRequestWithRetry 供测试覆盖的带重试请求执行入口
 var execCWRequestWithRetry = executeCodeWhispererRequestWithRetry
 
-// buildCodeWhispererRequest 构建通用的CodeWhisperer请求
+// buildCodeWhispererRequest 构建通用的CodeWhisperer请求（向后兼容）
 func buildCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicRequest, tokenInfo types.TokenInfo, isStream bool) (*http.Request, error) {
+	return buildCodeWhispererRequestWithContext(c.Request.Context(), c, anthropicReq, tokenInfo, isStream)
+}
+
+// buildCodeWhispererRequestWithContext 构建带context的CodeWhisperer请求
+func buildCodeWhispererRequestWithContext(ctx context.Context, c *gin.Context, anthropicReq types.AnthropicRequest, tokenInfo types.TokenInfo, isStream bool) (*http.Request, error) {
 	cwReq, err := converter.BuildCodeWhispererRequest(anthropicReq, c)
 	if err != nil {
 		// 检查是否是模型未找到错误
@@ -307,7 +343,8 @@ func buildCodeWhispererRequest(c *gin.Context, anthropicReq types.AnthropicReque
 		c.Set("cw_request_body", cwReqBody)
 	}
 
-	req, err := http.NewRequest("POST", config.CodeWhispererURL, bytes.NewReader(cwReqBody))
+	// 使用带context的请求创建，支持超时控制
+	req, err := http.NewRequestWithContext(ctx, "POST", config.CodeWhispererURL, bytes.NewReader(cwReqBody))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}

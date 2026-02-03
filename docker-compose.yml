@@ -70,7 +70,7 @@ services:
       # 直接配置示例: http://user:pass@proxy1:8080,http://user:pass@proxy2:8080
       - KIRO_PROXY_POOL=${KIRO_PROXY_POOL:-}
 
-      # 健康检查URL（可选，默认 https://www.google.com）
+      # 健康检查URL（可选，默认 http://cp.cloudflare.com/generate_204）
       - KIRO_PROXY_HEALTH_CHECK_URL=${KIRO_PROXY_HEALTH_CHECK_URL:-}
 
       # 健康检查间隔（可选，默认 60s）

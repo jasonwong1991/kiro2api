@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"kiro2api/config"
@@ -11,6 +12,9 @@ import (
 	"net/http"
 	"time"
 )
+
+// refreshRequestTimeout 刷新请求超时时间
+const refreshRequestTimeout = 30 * time.Second
 
 // refreshSingleToken 刷新单个token（带代理切换重试）
 func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex int) (types.TokenInfo, error) {
@@ -103,7 +107,11 @@ func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenIn
 		return types.TokenInfo{}, fmt.Errorf("序列化请求失败: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", config.RefreshTokenURL, bytes.NewBuffer(reqBody))
+	// 创建带超时的context，防止请求无限等待导致锁死
+	ctx, cancel := context.WithTimeout(context.Background(), refreshRequestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", config.RefreshTokenURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return types.TokenInfo{}, fmt.Errorf("创建请求失败: %v", err)
 	}
@@ -204,7 +212,11 @@ func refreshIdCToken(authConfig AuthConfig, client *http.Client) (types.TokenInf
 	refreshURL := fmt.Sprintf(config.IdcRefreshTokenURLTemplate, region)
 	hostHeader := fmt.Sprintf("oidc.%s.amazonaws.com", region)
 
-	req, err := http.NewRequest("POST", refreshURL, bytes.NewBuffer(reqBody))
+	// 创建带超时的context，防止请求无限等待导致锁死
+	ctx, cancel := context.WithTimeout(context.Background(), refreshRequestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", refreshURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return types.TokenInfo{}, fmt.Errorf("创建IdC请求失败: %v", err)
 	}
