@@ -777,6 +777,8 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 
 	// 记录本轮发现的不健康账号，避免重复处理
 	unhealthyAccounts := make(map[int]bool)
+	// 记录本轮是否已经尝试过替换，避免频繁替换
+	hasTriedReplacement := false
 
 	for attempt := 0; attempt < poolSize; attempt++ {
 		relativeIndex := (startIndex + attempt) % poolSize
@@ -809,8 +811,46 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 					logger.Int("config_index", configIndex),
 					logger.Int("pool_index", relativeIndex),
 					logger.String("reason", reason))
+
+				// *** 新增：立即尝试替换不健康账号 ***
+				// 每轮只替换一次，避免频繁刷新
+				if !hasTriedReplacement {
+					hasTriedReplacement = true
+					logger.Info("立即尝试替换不健康账号",
+						logger.Int("config_index", configIndex))
+
+					replaced := tm.replaceUnhealthyAccount(configIndex)
+					if replaced {
+						// 替换成功，重新计算池大小并从头开始轮询
+						poolSize = len(tm.activePool)
+						if poolSize == 0 {
+							logger.Warn("替换后活跃池为空")
+							break
+						}
+						logger.Info("替换成功，从头重新开始轮询",
+							logger.Int("new_pool_size", poolSize))
+						// 重置attempt和startIndex，从头开始
+						attempt = -1 // 下次循环会+1变成0
+						startIndex = 0
+						unhealthyAccounts = make(map[int]bool)
+						continue
+					} else {
+						// 替换失败（可能已移除不健康账号），更新池大小
+						poolSize = len(tm.activePool)
+						if poolSize == 0 {
+							logger.Warn("移除不健康账号后活跃池为空")
+							break
+						}
+						logger.Warn("替换失败，继续轮询剩余账号",
+							logger.Int("remaining_pool_size", poolSize))
+						// 池已改变，从头重新开始轮询
+						attempt = -1
+						startIndex = 0
+						continue
+					}
+				}
 			}
-			// 继续下一次尝试，不立即替换
+			// 继续下一次尝试
 			continue
 		}
 
@@ -844,18 +884,21 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 		}
 	}
 
-	// 一轮结束后，批量处理不健康账号（只替换一个）
+	// 一轮结束后，兜底处理剩余的不健康账号（理论上不应该执行到这里）
+	// 因为我们已经在检测到不健康账号时立即替换了
+	// 这里作为兜底机制，处理可能遗漏的情况
 	if len(unhealthyAccounts) > 0 {
+		logger.Warn("轮询结束后仍有未处理的不健康账号（兜底处理）",
+			logger.Int("unhealthy_count", len(unhealthyAccounts)))
 		// 只替换第一个不健康账号，避免过度刷新
 		for unhealthyIndex := range unhealthyAccounts {
-			logger.Info("尝试替换不健康账号",
-				logger.Int("config_index", unhealthyIndex),
-				logger.Int("unhealthy_count", len(unhealthyAccounts)))
+			logger.Info("兜底：尝试替换不健康账号",
+				logger.Int("config_index", unhealthyIndex))
 
 			replaced := tm.replaceUnhealthyAccount(unhealthyIndex)
 			if !replaced {
 				// 如果找不到替换账号，只移除这一个不健康账号
-				logger.Warn("无可用替换账号，仅移除不健康账号",
+				logger.Warn("兜底：无可用替换账号，仅移除不健康账号",
 					logger.Int("removed_index", unhealthyIndex),
 					logger.Int("remaining_pool_size", len(tm.activePool)))
 			}
