@@ -306,9 +306,17 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 				logger.Int("tool_results_count", len(toolResults)),
 				logger.String("conversation_id", cwReq.ConversationState.ConversationId))
 
-			// 对于包含 tool_result 的请求，content 应该为空字符串（符合 req2.json 的格式）
-			cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = ""
-			logger.Debug("工具结果请求，设置 content 为空字符串")
+			// 如果原始 content 为空，使用占位符（API 不接受空 content）
+			if strings.TrimSpace(cwReq.ConversationState.CurrentMessage.UserInputMessage.Content) == "" {
+				cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = "Tool execution result"
+				logger.Debug("工具结果请求的 content 为空，使用占位符")
+			}
+
+			// API 不接受同时包含 tools 和 toolResults，清除 tools
+			if len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools) > 0 {
+				cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools = nil
+				logger.Debug("清除 tools 以避免与 toolResults 冲突")
+			}
 		}
 	}
 
@@ -480,8 +488,10 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 							mergedUserMsg.UserInputMessage.UserInputMessageContext = &types.MessageContext{}
 						}
 						mergedUserMsg.UserInputMessage.UserInputMessageContext.ToolResults = allToolResults
-						// 如果历史用户消息包含工具结果，也将 content 设置为空字符串
-						mergedUserMsg.UserInputMessage.Content = ""
+						// 如果历史用户消息的 content 为空，使用占位符
+						if strings.TrimSpace(mergedUserMsg.UserInputMessage.Content) == "" {
+							mergedUserMsg.UserInputMessage.Content = "Tool execution result"
+						}
 						// logger.Debug("历史用户消息包含工具结果",
 						// 	logger.Int("merged_messages", len(userMessagesBuffer)),
 						// 	logger.Int("tool_results_count", len(allToolResults)))
@@ -557,7 +567,10 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 					mergedOrphanUserMsg.UserInputMessage.UserInputMessageContext = &types.MessageContext{}
 				}
 				mergedOrphanUserMsg.UserInputMessage.UserInputMessageContext.ToolResults = allToolResults
-				mergedOrphanUserMsg.UserInputMessage.Content = ""
+				// 如果孤立用户消息的 content 为空，使用占位符
+				if strings.TrimSpace(mergedOrphanUserMsg.UserInputMessage.Content) == "" {
+					mergedOrphanUserMsg.UserInputMessage.Content = "Tool execution result"
+				}
 			}
 
 			mergedOrphanUserMsg.UserInputMessage.ModelId = modelId

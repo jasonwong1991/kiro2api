@@ -82,6 +82,13 @@ type HistoryAssistantMessage struct {
 	} `json:"assistantResponseMessage"`
 }
 
+// HistoryToolResultMessage 表示历史记录中的工具结果消息
+type HistoryToolResultMessage struct {
+	ToolResultMessage struct {
+		ToolResults []ToolResult `json:"toolResults"`
+	} `json:"toolResultMessage"`
+}
+
 // ToolUseEntry 表示工具使用条目
 type ToolUseEntry struct {
 	ToolUseId string         `json:"toolUseId"`
