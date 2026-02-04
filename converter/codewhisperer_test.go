@@ -357,14 +357,14 @@ func TestDetermineChatTriggerType(t *testing.T) {
 			expected: "MANUAL",
 		},
 		{
-			name: "有工具且tool_choice=any - AUTO",
+			name: "有工具且tool_choice=any - MANUAL",
 			req: types.AnthropicRequest{
 				Tools: []types.AnthropicTool{
 					{Name: "test_tool"},
 				},
 				ToolChoice: map[string]any{"type": "any"},
 			},
-			expected: "AUTO",
+			expected: "MANUAL",
 		},
 		{
 			name: "无工具，无历史 - MANUAL",

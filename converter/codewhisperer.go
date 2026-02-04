@@ -21,38 +21,8 @@ import (
 
 // determineChatTriggerType 智能确定聊天触发类型 (SOLID-SRP: 单一责任)
 func determineChatTriggerType(anthropicReq types.AnthropicRequest) string {
-	// 如果有工具调用，通常是自动触发的
-	// 注意：需要忽略上游不支持的工具（如 web_search），避免出现 AUTO 但无有效工具的格式错误
-	hasSupportedTools := false
-	for _, tool := range anthropicReq.Tools {
-		if tool.Name == "" {
-			continue
-		}
-		if tool.Name == "web_search" || tool.Name == "websearch" {
-			continue
-		}
-		hasSupportedTools = true
-		break
-	}
-
-	if hasSupportedTools {
-		// 检查tool_choice是否强制要求使用工具
-		if anthropicReq.ToolChoice != nil {
-			if tc, ok := anthropicReq.ToolChoice.(*types.ToolChoice); ok && tc != nil {
-				if tc.Type == "any" || tc.Type == "tool" {
-					return "AUTO" // 自动工具调用
-				}
-			} else if tcMap, ok := anthropicReq.ToolChoice.(map[string]any); ok {
-				if tcType, exists := tcMap["type"].(string); exists {
-					if tcType == "any" || tcType == "tool" {
-						return "AUTO" // 自动工具调用
-					}
-				}
-			}
-		}
-	}
-
-	// 默认为手动触发
+	// CodeWhisperer API 只支持 MANUAL 类型
+	// 不存在 AUTO 类型，所有请求都应该使用 MANUAL
 	return "MANUAL"
 }
 
@@ -386,13 +356,6 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 
 			// 验证并处理工具描述
 			description := strings.TrimSpace(tool.Description)
-			if description == "" {
-				// AWS CodeWhisperer API 不接受空描述，提供默认值
-				description = fmt.Sprintf("Tool: %s", tool.Name)
-				logger.Warn("工具描述为空，使用默认描述",
-					logger.String("tool_name", tool.Name),
-					logger.String("default_description", description))
-			}
 
 			// 限制 description 长度为 10000 字符
 			if len(description) > config.MaxToolDescriptionLength {

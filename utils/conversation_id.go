@@ -34,17 +34,17 @@ func (c *ConversationIDManager) GenerateConversationID(ctx *gin.Context) string 
 
 	// 向后兼容：缺失 context 时退化为随机（避免空指针）
 	if ctx == nil {
-		return fmt.Sprintf("conv-%s", GenerateRandomHex(8)) // 8 bytes -> 16 hex chars
+		return fmt.Sprintf("uuid64:%s", GenerateUUID())
 	}
 
-	// 以小时为窗口生成稳定 ID（conv- + 16 hex chars）
+	// 以小时为窗口生成稳定 ID（uuid64: + 标准UUID格式）
 	clientIP := ctx.ClientIP()
 	userAgent := ctx.GetHeader("User-Agent")
 	hourBucket := time.Now().UTC().Format("2006010215")
 	input := fmt.Sprintf("%s|%s|%s", clientIP, userAgent, hourBucket)
 
-	hash := md5.Sum([]byte(input))
-	return fmt.Sprintf("conv-%x", hash[:8])
+	uuid := generateDeterministicGUID(input, "conversation")
+	return fmt.Sprintf("uuid64:%s", uuid)
 }
 
 // GetOrCreateConversationID 获取或创建会话ID（向后兼容）
