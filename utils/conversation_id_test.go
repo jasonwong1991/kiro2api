@@ -192,10 +192,9 @@ func TestIDFormatValidity(t *testing.T) {
 	// 测试ConversationId格式
 	convID := manager.GenerateConversationID(c)
 	assert.NotEmpty(t, convID)
-	assert.Contains(t, convID, "uuid64:", "ConversationId应该以'uuid64:'开头")
-	assert.Len(t, convID, 43, "ConversationId应该是43个字符（uuid64: + 36个字符的UUID）")
-	assert.Regexp(t, `^uuid64:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
-		convID, "ConversationId应该是uuid64:前缀加标准UUID格式")
+	assert.Len(t, convID, 36, "ConversationId应该是36个字符的标准UUID")
+	assert.Regexp(t, `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+		convID, "ConversationId应该是标准UUID格式")
 
 	// 测试AgentContinuationId格式（UUID格式）
 	agentID := GenerateStableAgentContinuationID(c)

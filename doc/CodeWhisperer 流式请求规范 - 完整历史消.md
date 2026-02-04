@@ -8,7 +8,7 @@
 ```json
 {
     "conversationState": {
-        "conversationId": "uuid64:a6fd6c62-a966-4748-b34f-d61f33d9bbf2",
+        "conversationId": "a6fd6c62-a966-4748-b34f-d61f33d9bbf2",
         "currentMessage": {
             "userInputMessage": {
                 "content": "现在帮我优化这个函数的性能，并创建单元测试",
@@ -292,7 +292,7 @@
 ### 完整的多工具调用流式响应
 ```
 event: messageStart
-data: {"messageId": "msg-009", "conversationId": "uuid64:a6fd6c62-a966-4748-b34f-d61f33d9bbf2"}
+data: {"messageId": "msg-009", "conversationId": "a6fd6c62-a966-4748-b34f-d61f33d9bbf2"}
 
 event: contentBlockStart
 data: {"contentBlockIndex": 0, "contentBlock": {"text": ""}}
@@ -316,7 +316,7 @@ event: messageStop
 data: {"stopReason": "tool_use"}
 
 event: messageStart
-data: {"messageId": "msg-010", "conversationId": "uuid64:a6fd6c62-a966-4748-b34f-d61f33d9bbf2"}
+data: {"messageId": "msg-010", "conversationId": "a6fd6c62-a966-4748-b34f-d61f33d9bbf2"}
 
 event: contentBlockStart
 data: {"contentBlockIndex": 0, "contentBlock": {"text": ""}}
@@ -364,7 +364,7 @@ data: {"stopReason": "tool_use"}
 ```json
 {
  "conversationState": {
- "conversationId": "uuid64:a6fd6c62-a966-4748-b34f-d61f33d9bbf2",
+ "conversationId": "a6fd6c62-a966-4748-b34f-d61f33d9bbf2",
  "currentMessage": {
  "toolResultMessage": {
  "toolResults": [
