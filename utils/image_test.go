@@ -1,7 +1,14 @@
 package utils
 
 import (
+	"bytes"
+	"encoding/base64"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"testing"
+
+	"kiro2api/types"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -64,4 +71,54 @@ func TestSupportedImageFormats(t *testing.T) {
 
 func TestMaxImageSize(t *testing.T) {
 	assert.Equal(t, 20*1024*1024, MaxImageSize)
+}
+
+func TestParseDataURL_MediaTypeMismatch(t *testing.T) {
+	t.Setenv("CODEWHISPERER_MAX_IMAGE_BYTES", "0")
+
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 255, G: 0, B: 0, A: 255})
+
+	var buf bytes.Buffer
+	err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90})
+	assert.NoError(t, err)
+
+	// 声明为 PNG，但实际是 JPEG：应自动修正为 image/jpeg
+	dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+	mediaType, outB64, err := ParseDataURL(dataURL)
+	assert.NoError(t, err)
+	assert.Equal(t, "image/jpeg", mediaType)
+
+	outBytes, err := base64.StdEncoding.DecodeString(outB64)
+	assert.NoError(t, err)
+	detected, err := DetectImageFormat(outBytes)
+	assert.NoError(t, err)
+	assert.Equal(t, "image/jpeg", detected)
+}
+
+func TestValidateImageContent_MediaTypeMismatch(t *testing.T) {
+	t.Setenv("CODEWHISPERER_MAX_IMAGE_BYTES", "0")
+
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 0, G: 255, B: 0, A: 255})
+
+	var buf bytes.Buffer
+	err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90})
+	assert.NoError(t, err)
+
+	imageSource := &types.ImageSource{
+		Type:      "base64",
+		MediaType: "image/png",
+		Data:      base64.StdEncoding.EncodeToString(buf.Bytes()),
+	}
+
+	err = ValidateImageContent(imageSource)
+	assert.NoError(t, err)
+	assert.Equal(t, "image/jpeg", imageSource.MediaType)
+
+	outBytes, err := base64.StdEncoding.DecodeString(imageSource.Data)
+	assert.NoError(t, err)
+	detected, err := DetectImageFormat(outBytes)
+	assert.NoError(t, err)
+	assert.Equal(t, "image/jpeg", detected)
 }

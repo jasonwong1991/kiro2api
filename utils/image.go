@@ -9,8 +9,8 @@ import (
 	"image/jpeg"
 	"image/png"
 	"os"
-	"strconv"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"kiro2api/logger"
@@ -234,18 +234,37 @@ func CompressImageForCodeWhisperer(mediaType string, data []byte, maxBytes int) 
 // NormalizeImageData 通用图片规范化：解码后重新编码，清除非标准数据
 // 使用 Go 标准库解码验证图片有效性，然后重新编码为干净的格式
 // 这可以自动处理：JPEG 尾随字节、损坏的元数据、非标准编码等问题
-func NormalizeImageData(mediaType string, data []byte) ([]byte, error) {
+// 注意：如果声明的 mediaType 与实际图片不一致，会自动以实际图片格式为准并返回修正后的 mediaType。
+func NormalizeImageData(mediaType string, data []byte) (outMediaType string, out []byte, err error) {
 	if len(data) > MaxImageSize {
-		return nil, fmt.Errorf("图片数据过大: %d 字节，最大支持 %d 字节", len(data), MaxImageSize)
+		return "", nil, fmt.Errorf("图片数据过大: %d 字节，最大支持 %d 字节", len(data), MaxImageSize)
 	}
 
 	// 检测实际格式
 	detectedType, err := DetectImageFormat(data)
 	if err != nil {
-		return nil, fmt.Errorf("无法识别图片格式: %v", err)
+		return "", nil, fmt.Errorf("无法识别图片格式: %v", err)
 	}
-	if detectedType != mediaType {
-		return nil, fmt.Errorf("图片格式不匹配: 声明为 %s，实际为 %s", mediaType, detectedType)
+
+	outMediaType = strings.TrimSpace(mediaType)
+	if outMediaType == "" {
+		outMediaType = detectedType
+	}
+
+	// 如果声明格式不受支持，但实际格式可识别且受支持，则自动修正（提升兼容性）
+	if outMediaType != "" && !IsSupportedImageFormat(outMediaType) && IsSupportedImageFormat(detectedType) {
+		logger.Warn("图片格式声明不受支持，已根据实际数据修正",
+			logger.String("declared_media_type", outMediaType),
+			logger.String("detected_media_type", detectedType))
+		outMediaType = detectedType
+	}
+
+	// 声明与实际不一致：以实际为准（避免后续 media_type 与字节不匹配导致下游失败）
+	if detectedType != outMediaType {
+		logger.Warn("图片格式与声明不一致，已根据实际数据修正",
+			logger.String("declared_media_type", outMediaType),
+			logger.String("detected_media_type", detectedType))
+		outMediaType = detectedType
 	}
 
 	// 使用 Go 标准库解码图片（验证有效性）
@@ -254,9 +273,9 @@ func NormalizeImageData(mediaType string, data []byte) ([]byte, error) {
 	if err != nil {
 		// 解码失败，记录警告但返回原始数据（兼容不支持的子格式）
 		logger.Warn("图片解码失败，使用原始数据",
-			logger.String("media_type", mediaType),
+			logger.String("media_type", outMediaType),
 			logger.Err(err))
-		return data, nil
+		return outMediaType, data, nil
 	}
 
 	// 重新编码为干净的格式
@@ -264,22 +283,25 @@ func NormalizeImageData(mediaType string, data []byte) ([]byte, error) {
 	switch format {
 	case "jpeg":
 		err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95})
+		outMediaType = "image/jpeg"
 	case "png":
 		err = png.Encode(&buf, img)
+		outMediaType = "image/png"
 	case "gif":
 		err = gif.Encode(&buf, img, nil)
+		outMediaType = "image/gif"
 	default:
 		// 不支持重新编码的格式（webp/bmp），返回原始数据
 		logger.Debug("图片格式不支持重新编码，使用原始数据",
 			logger.String("format", format))
-		return data, nil
+		return outMediaType, data, nil
 	}
 
 	if err != nil {
 		logger.Warn("图片重新编码失败，使用原始数据",
 			logger.String("format", format),
 			logger.Err(err))
-		return data, nil
+		return outMediaType, data, nil
 	}
 
 	normalized := buf.Bytes()
@@ -291,7 +313,7 @@ func NormalizeImageData(mediaType string, data []byte) ([]byte, error) {
 			logger.String("format", format),
 			logger.Int("original_size", len(data)),
 			logger.Int("normalized_size", len(normalized)))
-		return data, nil
+		return outMediaType, data, nil
 	}
 
 	if len(normalized) != len(data) {
@@ -301,7 +323,7 @@ func NormalizeImageData(mediaType string, data []byte) ([]byte, error) {
 			logger.Int("normalized_size", len(normalized)))
 	}
 
-	return normalized, nil
+	return outMediaType, normalized, nil
 }
 
 // ParseImageFromContentBlock 从 ContentBlock 解析图片信息
@@ -315,10 +337,6 @@ func ValidateImageContent(imageSource *types.ImageSource) error {
 
 	if imageSource.Type != "base64" {
 		return fmt.Errorf("不支持的图片类型: %s", imageSource.Type)
-	}
-
-	if !IsSupportedImageFormat(imageSource.MediaType) {
-		return fmt.Errorf("不支持的图片格式: %s", imageSource.MediaType)
 	}
 
 	if imageSource.Data == "" {
@@ -336,14 +354,14 @@ func ValidateImageContent(imageSource *types.ImageSource) error {
 	}
 
 	// 规范化图片数据（解码后重新编码，清除非标准数据）
-	normalized, err := NormalizeImageData(imageSource.MediaType, decodedData)
+	normalizedType, normalized, err := NormalizeImageData(imageSource.MediaType, decodedData)
 	if err != nil {
 		return err
 	}
 
 	// 如果超过 CodeWhisperer 的图片上限，尝试进一步压缩/缩放（对齐 Kiro App 行为）
 	maxBytes := getCodeWhispererMaxImageBytes()
-	outMediaType, outBytes, _ := CompressImageForCodeWhisperer(imageSource.MediaType, normalized, maxBytes)
+	outMediaType, outBytes, _ := CompressImageForCodeWhisperer(normalizedType, normalized, maxBytes)
 	imageSource.MediaType = outMediaType
 	imageSource.Data = base64.StdEncoding.EncodeToString(outBytes)
 
@@ -381,14 +399,14 @@ func ParseDataURL(dataURL string) (mediaType, base64Data string, err error) {
 	}
 
 	// 规范化图片数据
-	normalized, err := NormalizeImageData(mediaType, decodedData)
+	normalizedType, normalized, err := NormalizeImageData(mediaType, decodedData)
 	if err != nil {
 		return "", "", err
 	}
 
 	// 对超大图片执行压缩/缩放（与 ValidateImageContent 一致）
 	maxBytes := getCodeWhispererMaxImageBytes()
-	outMediaType, outBytes, _ := CompressImageForCodeWhisperer(mediaType, normalized, maxBytes)
+	outMediaType, outBytes, _ := CompressImageForCodeWhisperer(normalizedType, normalized, maxBytes)
 
 	return outMediaType, base64.StdEncoding.EncodeToString(outBytes), nil
 }
