@@ -410,6 +410,8 @@ func RegisterAdminRoutes(r *gin.Engine, authService *auth.AuthService, adminToke
 	admin.GET("/ip/whitelist", HandleGetWhitelist)
 	admin.POST("/ip/whitelist", HandleAddWhitelist)
 	admin.DELETE("/ip/whitelist", HandleRemoveWhitelist)
+	admin.GET("/ip/ipv6-block", HandleGetIPv6BlockStatus)
+	admin.POST("/ip/ipv6-block", HandleSetIPv6Block)
 
 	logger.Info("管理 API 路由已注册")
 	logger.Info("  GET    /v1/admin/status                - 获取系统状态")

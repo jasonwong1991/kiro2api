@@ -484,7 +484,7 @@ func handleCodeWhispererError(c *gin.Context, resp *http.Response) bool {
 
 	// *** 新增：使用错误映射器处理错误，符合Claude API规范 ***
 	errorMapper := NewErrorMapper()
-	claudeError := errorMapper.MapCodeWhispererError(resp.StatusCode, body)
+	claudeError := errorMapper.MapCodeWhispererError(c, resp.StatusCode, body)
 
 	// 根据映射结果发送符合Claude规范的响应
 	if claudeError.ShouldTriggerCompaction {

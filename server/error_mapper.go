@@ -4,14 +4,32 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"kiro2api/logger"
 )
 
+// isClaudeCodeRequest 检测请求是否来自 Claude Code
+// 检测条件：URL 参数包含 beta=true 或 User-Agent 包含 claude-cli
+func isClaudeCodeRequest(c *gin.Context) bool {
+	// 检查 URL 参数 beta=true
+	if c.Query("beta") == "true" {
+		return true
+	}
+
+	// 检查 User-Agent 是否包含 claude-cli
+	userAgent := c.GetHeader("User-Agent")
+	if strings.Contains(strings.ToLower(userAgent), "claude-cli") {
+		return true
+	}
+
+	return false
+}
+
 // ErrorMappingStrategy 错误映射策略接口 (DIP原则)
 type ErrorMappingStrategy interface {
-	MapError(statusCode int, responseBody []byte) (*ClaudeErrorResponse, bool)
+	MapError(c *gin.Context, statusCode int, responseBody []byte) (*ClaudeErrorResponse, bool)
 	GetErrorType() string
 }
 
@@ -34,7 +52,7 @@ type CodeWhispererErrorBody struct {
 // ContentLengthExceedsStrategy 内容长度超限错误映射策略 (SRP原则)
 type ContentLengthExceedsStrategy struct{}
 
-func (s *ContentLengthExceedsStrategy) MapError(statusCode int, responseBody []byte) (*ClaudeErrorResponse, bool) {
+func (s *ContentLengthExceedsStrategy) MapError(c *gin.Context, statusCode int, responseBody []byte) (*ClaudeErrorResponse, bool) {
 	if statusCode != http.StatusBadRequest {
 		return nil, false
 	}
@@ -46,14 +64,32 @@ func (s *ContentLengthExceedsStrategy) MapError(statusCode int, responseBody []b
 
 	// 检查是否为内容长度超限错误
 	if errorBody.Reason == "CONTENT_LENGTH_EXCEEDS_THRESHOLD" {
-		// 返回一个成功响应，但设置高 input_tokens 来触发 Claude Code 自动压缩
-		// 原理：Claude Code 基于累计 input_tokens 监控上下文使用率
-		// 当 input_tokens 接近模型上限（200k）时，会自动触发 /compact
+		// 检测是否为 Claude Code 请求
+		if isClaudeCodeRequest(c) {
+			// Claude Code 请求：返回高 input_tokens 触发自动压缩
+			logger.Info("检测到 Claude Code 请求，启用自动压缩",
+				addReqFields(c,
+					logger.String("user_agent", c.GetHeader("User-Agent")),
+					logger.String("beta_param", c.Query("beta")))...)
+
+			return &ClaudeErrorResponse{
+				Type:                    "message",
+				Message:                 "Context limit reached. Auto-compacting conversation history...",
+				StopReason:              "end_turn",
+				ShouldTriggerCompaction: true,
+			}, true
+		}
+
+		// 非 Claude Code 请求：返回标准错误
+		logger.Info("检测到非 Claude Code 请求，返回标准错误",
+			addReqFields(c,
+				logger.String("user_agent", c.GetHeader("User-Agent")))...)
+
 		return &ClaudeErrorResponse{
-			Type:                    "message",
-			Message:                 "Context limit reached. Auto-compacting conversation history...",
-			StopReason:              "end_turn",
-			ShouldTriggerCompaction: true, // 标记需要返回触发压缩的成功响应
+			Type:      "error",
+			ErrorType: "invalid_request_error",
+			Message:   "Input is too long. Please reduce the length of your messages or conversation history.",
+			ShouldReturn400: true,
 		}, true
 	}
 
@@ -67,7 +103,7 @@ func (s *ContentLengthExceedsStrategy) GetErrorType() string {
 // DefaultErrorStrategy 默认错误映射策略 (YAGNI原则)
 type DefaultErrorStrategy struct{}
 
-func (s *DefaultErrorStrategy) MapError(statusCode int, responseBody []byte) (*ClaudeErrorResponse, bool) {
+func (s *DefaultErrorStrategy) MapError(c *gin.Context, statusCode int, responseBody []byte) (*ClaudeErrorResponse, bool) {
 	return &ClaudeErrorResponse{
 		Type:    "error",
 		Message: fmt.Sprintf("Upstream error: %s", string(responseBody)),
@@ -94,10 +130,10 @@ func NewErrorMapper() *ErrorMapper {
 }
 
 // MapCodeWhispererError 映射CodeWhisperer错误到Claude格式 (Template Method Pattern)
-func (em *ErrorMapper) MapCodeWhispererError(statusCode int, responseBody []byte) *ClaudeErrorResponse {
+func (em *ErrorMapper) MapCodeWhispererError(c *gin.Context, statusCode int, responseBody []byte) *ClaudeErrorResponse {
 	// 依次尝试各种映射策略
 	for _, strategy := range em.strategies {
-		if response, handled := strategy.MapError(statusCode, responseBody); handled {
+		if response, handled := strategy.MapError(c, statusCode, responseBody); handled {
 			logger.Debug("错误映射成功",
 				logger.String("strategy", strategy.GetErrorType()),
 				logger.Int("status_code", statusCode),

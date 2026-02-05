@@ -54,6 +54,7 @@ class TokenDashboard {
         // IP 监控
         document.getElementById('refreshIPStatsBtn')?.addEventListener('click', () => this.refreshIPStats());
         document.getElementById('addWhitelistBtn')?.addEventListener('click', () => this.openModal('addWhitelistModal'));
+        document.getElementById('ipv6BlockToggle')?.addEventListener('change', (e) => this.toggleIPv6Block(e.target.checked));
 
         // 添加 Token 表单
         document.getElementById('newTokenAuthType')?.addEventListener('change', (e) => {
@@ -1139,6 +1140,12 @@ class TokenDashboard {
         document.getElementById('maxConcurrent').textContent = data.max_concurrent || '-';
         document.getElementById('acquireTimeout').textContent = data.acquire_timeout || '-';
 
+        // 更新 IPv6 禁止开关状态
+        const ipv6Toggle = document.getElementById('ipv6BlockToggle');
+        if (ipv6Toggle) {
+            ipv6Toggle.checked = data.ipv6_block_enabled || false;
+        }
+
         if (ips.length === 0) {
             tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无活跃 IP</td></tr>';
             return;
@@ -1245,6 +1252,33 @@ class TokenDashboard {
             this.refreshIPStats();
         } catch (error) {
             this.showNotification('移除失败: ' + error.message, 'error');
+        }
+    }
+
+    async toggleIPv6Block(enabled) {
+        try {
+            const response = await fetch(`${this.adminApiBaseUrl}/ip/ipv6-block`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.adminToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ enabled })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || `HTTP ${response.status}`);
+            }
+
+            this.showNotification(enabled ? 'IPv6 已禁止' : 'IPv6 已允许', 'success');
+        } catch (error) {
+            this.showNotification('设置失败: ' + error.message, 'error');
+            // 恢复开关状态
+            const toggle = document.getElementById('ipv6BlockToggle');
+            if (toggle) {
+                toggle.checked = !enabled;
+            }
         }
     }
 }

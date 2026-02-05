@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -15,6 +16,42 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// IPv6BlockConfig IPv6 禁止配置
+type IPv6BlockConfig struct {
+	mu      sync.RWMutex
+	enabled bool
+}
+
+// globalIPv6BlockConfig 全局 IPv6 禁止配置
+var globalIPv6BlockConfig = &IPv6BlockConfig{
+	enabled: false, // 默认不禁止
+}
+
+// SetIPv6BlockEnabled 设置 IPv6 禁止状态
+func SetIPv6BlockEnabled(enabled bool) {
+	globalIPv6BlockConfig.mu.Lock()
+	defer globalIPv6BlockConfig.mu.Unlock()
+	globalIPv6BlockConfig.enabled = enabled
+	logger.Info("IPv6 禁止状态已更新", logger.Bool("enabled", enabled))
+}
+
+// IsIPv6BlockEnabled 获取 IPv6 禁止状态
+func IsIPv6BlockEnabled() bool {
+	globalIPv6BlockConfig.mu.RLock()
+	defer globalIPv6BlockConfig.mu.RUnlock()
+	return globalIPv6BlockConfig.enabled
+}
+
+// isIPv6 检测 IP 地址是否为 IPv6
+func isIPv6(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	// IPv4 地址可以用 To4() 转换，IPv6 不能
+	return ip.To4() == nil
+}
 
 // IP 并发限制器配置常量
 const (
@@ -194,6 +231,39 @@ func initIPLimiter() *IPConcurrencyLimiter {
 		logger.Int("max_concurrent_per_ip", maxConcurrent),
 		logger.Duration("acquire_timeout", acquireTimeout))
 	return globalIPLimiter
+}
+
+// IPv6BlockMiddleware IPv6 禁止中间件
+// 当启用时，拒绝所有 IPv6 请求
+func IPv6BlockMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 检查是否启用 IPv6 禁止
+		if !IsIPv6BlockEnabled() {
+			c.Next()
+			return
+		}
+
+		clientIP := c.ClientIP()
+
+		// 检查是否为 IPv6 地址
+		if isIPv6(clientIP) {
+			logger.Warn("拒绝 IPv6 请求",
+				logger.String("client_ip", clientIP),
+				logger.String("path", c.Request.URL.Path),
+				logger.String("user_agent", c.GetHeader("User-Agent")))
+
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": gin.H{
+					"type":    "ipv6_blocked",
+					"message": "IPv6 requests are currently blocked. Please use IPv4 to access this service.",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
 }
 
 // IPConcurrencyMiddleware 创建基于 IP 的并发限制中间件

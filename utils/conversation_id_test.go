@@ -279,3 +279,60 @@ func BenchmarkAgentContinuationIDGeneration(b *testing.B) {
 		_ = GenerateStableAgentContinuationID(c)
 	}
 }
+
+// TestCleanConversationID 测试 conversationId 清理功能
+func TestCleanConversationID(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "带uuid64前缀的ID",
+			input:    "uuid64:8a745136-710c-54ba-a4b2-e60434a5d600",
+			expected: "8a745136-710c-54ba-a4b2-e60434a5d600",
+		},
+		{
+			name:     "不带前缀的标准UUID",
+			input:    "8a745136-710c-54ba-a4b2-e60434a5d600",
+			expected: "8a745136-710c-54ba-a4b2-e60434a5d600",
+		},
+		{
+			name:     "空字符串",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "短字符串",
+			input:    "abc",
+			expected: "abc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := cleanConversationID(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestCustomConversationIDWithPrefix 测试通过HTTP头传入带前缀的conversationId
+func TestCustomConversationIDWithPrefix(t *testing.T) {
+	manager := NewConversationIDManager()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/messages", nil)
+	c.Request.Header.Set("User-Agent", "test-client")
+	c.Request.RemoteAddr = "192.168.1.100:12345"
+
+	// 模拟客户端传入带 uuid64: 前缀的 conversationId
+	c.Request.Header.Set("X-Conversation-ID", "uuid64:8a745136-710c-54ba-a4b2-e60434a5d600")
+
+	convID := manager.GenerateConversationID(c)
+
+	// 验证返回的ID已经移除了前缀
+	assert.Equal(t, "8a745136-710c-54ba-a4b2-e60434a5d600", convID)
+	assert.NotContains(t, convID, "uuid64:")
+}

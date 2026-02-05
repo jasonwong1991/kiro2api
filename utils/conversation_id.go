@@ -29,7 +29,7 @@ func NewConversationIDManager() *ConversationIDManager {
 func (c *ConversationIDManager) GenerateConversationID(ctx *gin.Context) string {
 	// 检查是否有自定义的会话ID头（优先级最高）
 	if customConvID := ctx.GetHeader("X-Conversation-ID"); customConvID != "" {
-		return customConvID
+		return cleanConversationID(customConvID)
 	}
 
 	// 向后兼容：缺失 context 时退化为随机（避免空指针）
@@ -103,6 +103,15 @@ func generateDeterministicGUID(input, namespace string) string {
 	// 格式化为标准GUID格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 	return fmt.Sprintf("%x-%x-%x-%x-%x",
 		hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
+}
+
+// cleanConversationID 清理 conversationId，移除可能的前缀
+func cleanConversationID(id string) string {
+	// 移除 "uuid64:" 前缀（防御性编程）
+	if len(id) > 7 && id[:7] == "uuid64:" {
+		return id[7:]
+	}
+	return id
 }
 
 // ExtractClientInfo 提取客户端信息用于调试和日志

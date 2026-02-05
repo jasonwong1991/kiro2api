@@ -100,6 +100,8 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 
 	// 添加中间件
 	r.Use(gin.Logger())
+	// IPv6 禁止检查必须在最前面，避免浪费资源
+	r.Use(IPv6BlockMiddleware())
 	// IP 并发限制必须在 Recovery 之前，确保 panic 时也能释放资源
 	r.Use(IPConcurrencyMiddleware())
 	r.Use(gin.Recovery())

@@ -26,10 +26,11 @@ func HandleGetIPStats(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"ip_stats":        stats,
-			"whitelist_count": whitelistCount,
-			"max_concurrent":  globalIPLimiter.maxConcurrent,
-			"acquire_timeout": globalIPLimiter.acquireTimeout.String(),
+			"ip_stats":         stats,
+			"whitelist_count":  whitelistCount,
+			"max_concurrent":   globalIPLimiter.maxConcurrent,
+			"acquire_timeout":  globalIPLimiter.acquireTimeout.String(),
+			"ipv6_block_enabled": IsIPv6BlockEnabled(),
 		},
 	})
 }
@@ -123,5 +124,45 @@ func HandleRemoveWhitelist(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "IP 已从白名单移除",
+	})
+}
+
+// HandleGetIPv6BlockStatus 获取 IPv6 禁止状态
+// GET /v1/admin/ip/ipv6-block
+func HandleGetIPv6BlockStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"enabled": IsIPv6BlockEnabled(),
+		},
+	})
+}
+
+// SetIPv6BlockRequest IPv6 禁止设置请求
+type SetIPv6BlockRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// HandleSetIPv6Block 设置 IPv6 禁止状态
+// POST /v1/admin/ip/ipv6-block
+func HandleSetIPv6Block(c *gin.Context) {
+	var req SetIPv6BlockRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "无效的请求体: %v", err)
+		return
+	}
+
+	SetIPv6BlockEnabled(req.Enabled)
+
+	logger.Info("IPv6 禁止状态已更新",
+		logger.Bool("enabled", req.Enabled),
+		logger.String("request_id", c.GetString("request_id")))
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "IPv6 禁止状态已更新",
+		"data": gin.H{
+			"enabled": req.Enabled,
+		},
 	})
 }
