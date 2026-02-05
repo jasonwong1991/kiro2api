@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -28,13 +29,6 @@ var globalIPv6BlockConfig = &IPv6BlockConfig{
 	enabled: false, // 默认不禁止
 }
 
-// SetIPv6BlockEnabled 设置 IPv6 禁止状态
-func SetIPv6BlockEnabled(enabled bool) {
-	globalIPv6BlockConfig.mu.Lock()
-	defer globalIPv6BlockConfig.mu.Unlock()
-	globalIPv6BlockConfig.enabled = enabled
-	logger.Info("IPv6 禁止状态已更新", logger.Bool("enabled", enabled))
-}
 
 // IsIPv6BlockEnabled 获取 IPv6 禁止状态
 func IsIPv6BlockEnabled() bool {
@@ -43,15 +37,94 @@ func IsIPv6BlockEnabled() bool {
 	return globalIPv6BlockConfig.enabled
 }
 
-// InitIPv6BlockFromEnv 从环境变量初始化 IPv6 禁止配置
+
+// IPv6 配置文件路径
+const IPv6ConfigPath = "ipv6_config.json"
+
+// IPv6ConfigFile IPv6 配置文件结构
+type IPv6ConfigFile struct {
+	Enabled bool `json:"enabled"`
+}
+
+// loadIPv6ConfigFromFile 从配置文件加载 IPv6 禁止配置
+func loadIPv6ConfigFromFile() (bool, error) {
+	data, err := os.ReadFile(IPv6ConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil // 文件不存在，返回默认值
+		}
+		return false, err
+	}
+
+	var config IPv6ConfigFile
+	if err := json.Unmarshal(data, &config); err != nil {
+		return false, err
+	}
+
+	return config.Enabled, nil
+}
+
+// saveIPv6ConfigToFile 保存 IPv6 禁止配置到文件
+func saveIPv6ConfigToFile(enabled bool) error {
+	config := IPv6ConfigFile{
+		Enabled: enabled,
+	}
+
+	data, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(IPv6ConfigPath, data, 0644)
+}
+
+// SetIPv6BlockEnabled 设置 IPv6 禁止状态（带持久化）
+func SetIPv6BlockEnabled(enabled bool) {
+	globalIPv6BlockConfig.mu.Lock()
+	defer globalIPv6BlockConfig.mu.Unlock()
+	globalIPv6BlockConfig.enabled = enabled
+
+	// 持久化到配置文件
+	if err := saveIPv6ConfigToFile(enabled); err != nil {
+		logger.Error("保存 IPv6 配置到文件失败", logger.Err(err))
+	} else {
+		logger.Info("IPv6 禁止状态已更新并持久化",
+			logger.Bool("enabled", enabled),
+			logger.String("config_file", IPv6ConfigPath))
+	}
+}
+
+// InitIPv6BlockFromEnv 从环境变量和配置文件初始化 IPv6 禁止配置
+// 优先级：配置文件 > 环境变量 > 默认值(false)
 func InitIPv6BlockFromEnv() {
+	// 1. 尝试从配置文件加载
+	if enabled, err := loadIPv6ConfigFromFile(); err == nil {
+		globalIPv6BlockConfig.mu.Lock()
+		globalIPv6BlockConfig.enabled = enabled
+		globalIPv6BlockConfig.mu.Unlock()
+		logger.Info("从配置文件初始化 IPv6 禁止配置",
+			logger.Bool("enabled", enabled),
+			logger.String("config_file", IPv6ConfigPath))
+		return
+	} else if !os.IsNotExist(err) {
+		logger.Warn("读取 IPv6 配置文件失败，将使用环境变量",
+			logger.Err(err))
+	}
+
+	// 2. 从环境变量加载
 	if envVal := os.Getenv("KIRO_IPV6_BLOCK_ENABLED"); envVal != "" {
 		enabled := strings.ToLower(envVal) == "true" || envVal == "1"
-		SetIPv6BlockEnabled(enabled)
+		globalIPv6BlockConfig.mu.Lock()
+		globalIPv6BlockConfig.enabled = enabled
+		globalIPv6BlockConfig.mu.Unlock()
 		logger.Info("从环境变量初始化 IPv6 禁止配置",
 			logger.Bool("enabled", enabled),
 			logger.String("env_value", envVal))
+		return
 	}
+
+	// 3. 使用默认值（已在 globalIPv6BlockConfig 中设置为 false）
+	logger.Info("使用默认 IPv6 禁止配置", logger.Bool("enabled", false))
 }
 
 // isIPv6 检测 IP 地址是否为 IPv6

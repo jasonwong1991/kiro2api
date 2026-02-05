@@ -89,6 +89,8 @@ services:
       - KIRO_IP_ACQUIRE_TIMEOUT=${KIRO_IP_ACQUIRE_TIMEOUT:-60s}
 
       # IPv6 禁止开关（默认 false，不禁止）
+      # 优先级：ipv6_config.json > 环境变量 > 默认值
+      # 通过 Dashboard 或 API 修改后会自动保存到 ipv6_config.json
       # 设置为 true 或 1 时，将拒绝所有 IPv6 请求
       # 注意：管理 API 的 IPv6 控制端点不受此限制，避免"自锁"
       - KIRO_IPV6_BLOCK_ENABLED=${KIRO_IPV6_BLOCK_ENABLED:-false}
@@ -114,6 +116,9 @@ services:
       # 注意：宿主机 tokens.json 若不存在，Docker 会创建同名"目录"。
       # 本项目会自动将真实配置写入到 ./tokens.json/tokens.json（仍可持久化，但位置会变化）。
       # 可选：首次启动前执行 `echo '[]' > tokens.json`，避免目录/文件混淆。
+
+      # IPv6 配置文件（可写，支持 WebUI 管理持久化）
+      - ./ipv6_config.json:/app/ipv6_config.json
       # 权限修复：容器启动时会自动修复文件权限（chown 1001:1001），无需手动干预。
       - ./tokens.json:/app/tokens.json
 
