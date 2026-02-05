@@ -587,6 +587,9 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 				logger.Int("orphan_messages", len(userMessagesBuffer)))
 		}
 
+
+		// 验证并修复 toolUses 和 toolResults 的配对关系
+		validateAndFixToolPairing(history)
 		cwReq.ConversationState.History = history
 	}
 
@@ -618,6 +621,14 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 						// 提取 name
 						if name, ok := block["name"].(string); ok {
 							toolUse.Name = name
+						}
+
+						// 验证必要字段：跳过无效的工具调用（toolUseId 或 name 为空）
+						if toolUse.ToolUseId == "" || toolUse.Name == "" {
+							logger.Debug("跳过无效的工具调用（缺少必要字段）",
+								logger.String("toolUseId", toolUse.ToolUseId),
+								logger.String("name", toolUse.Name))
+							continue
 						}
 
 						// 过滤不支持的工具：web_search (静默过滤)
@@ -653,6 +664,14 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 					toolUse.Name = *block.Name
 				}
 
+				// 验证必要字段：跳过无效的工具调用（toolUseId 或 name 为空）
+				if toolUse.ToolUseId == "" || toolUse.Name == "" {
+					logger.Debug("跳过无效的工具调用（缺少必要字段）",
+						logger.String("toolUseId", toolUse.ToolUseId),
+						logger.String("name", toolUse.Name))
+					continue
+				}
+
 				// 过滤不支持的工具：web_search (静默过滤)
 				if toolUse.Name == "web_search" || toolUse.Name == "websearch" {
 					continue
@@ -680,4 +699,106 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 	}
 
 	return toolUses
+}
+
+// validateAndFixToolPairing 验证并修复历史记录中 toolUses 和 toolResults 的配对关系
+func validateAndFixToolPairing(history []any) {
+	// 遍历历史记录，查找 assistant-user 配对
+	for i := 0; i < len(history)-1; i++ {
+		// 检查当前是否为 assistant 消息
+		assistantMsg, isAssistant := history[i].(types.HistoryAssistantMessage)
+		if !isAssistant {
+			continue
+		}
+
+		// 检查下一条是否为 user 消息
+		if i+1 >= len(history) {
+			break
+		}
+		userMsg, isUser := history[i+1].(types.HistoryUserMessage)
+		if !isUser {
+			continue
+		}
+
+		// 检查 user 消息是否有 toolResults
+		if userMsg.UserInputMessage.UserInputMessageContext == nil ||
+			len(userMsg.UserInputMessage.UserInputMessageContext.ToolResults) == 0 {
+			continue
+		}
+
+		toolResults := userMsg.UserInputMessage.UserInputMessageContext.ToolResults
+
+		// 如果 assistant 的 toolUses 为空，但 user 有 toolResults，需要重建 toolUses
+		if len(assistantMsg.AssistantResponseMessage.ToolUses) == 0 {
+			logger.Warn("检测到 toolUses 和 toolResults 不匹配，尝试从 toolResults 重建 toolUses",
+				logger.Int("history_index", i),
+				logger.Int("tool_results_count", len(toolResults)))
+
+			// 从 toolResults 重建 toolUses
+			var reconstructedToolUses []types.ToolUseEntry
+			for _, result := range toolResults {
+				if result.ToolUseId == "" {
+					continue
+				}
+
+				// 创建一个基本的 toolUse 条目
+				toolUse := types.ToolUseEntry{
+					ToolUseId: result.ToolUseId,
+					Name:      "unknown_tool", // 默认名称，因为 toolResult 中没有工具名称
+					Input:     map[string]any{},
+				}
+
+				reconstructedToolUses = append(reconstructedToolUses, toolUse)
+			}
+
+			// 更新 assistant 消息的 toolUses
+			assistantMsg.AssistantResponseMessage.ToolUses = reconstructedToolUses
+			history[i] = assistantMsg
+
+			logger.Debug("已重建 toolUses",
+				logger.Int("history_index", i),
+				logger.Int("reconstructed_count", len(reconstructedToolUses)))
+		} else {
+			// 验证 toolUses 和 toolResults 的 toolUseId 是否匹配
+			toolUseIds := make(map[string]bool)
+			for _, toolUse := range assistantMsg.AssistantResponseMessage.ToolUses {
+				toolUseIds[toolUse.ToolUseId] = true
+			}
+
+			toolResultIds := make(map[string]bool)
+			for _, result := range toolResults {
+				toolResultIds[result.ToolUseId] = true
+			}
+
+			// 检查是否有不匹配的 ID
+			var missingInToolUses []string
+			for id := range toolResultIds {
+				if !toolUseIds[id] {
+					missingInToolUses = append(missingInToolUses, id)
+				}
+			}
+
+			if len(missingInToolUses) > 0 {
+				logger.Warn("检测到 toolResults 中有 toolUseId 在 toolUses 中不存在",
+					logger.Int("history_index", i),
+					logger.Any("missing_ids", missingInToolUses))
+
+				// 为缺失的 toolUseId 添加占位 toolUse
+				for _, missingId := range missingInToolUses {
+					toolUse := types.ToolUseEntry{
+						ToolUseId: missingId,
+						Name:      "unknown_tool",
+						Input:     map[string]any{},
+					}
+					assistantMsg.AssistantResponseMessage.ToolUses = append(
+						assistantMsg.AssistantResponseMessage.ToolUses, toolUse)
+				}
+
+				history[i] = assistantMsg
+				logger.Debug("已添加缺失的 toolUses",
+					logger.Int("history_index", i),
+					logger.Int("added_count", len(missingInToolUses)))
+			}
+		}
+	}
 }
