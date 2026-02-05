@@ -55,6 +55,9 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 		logger.Error("初始化 IP 白名单失败", logger.Err(err))
 	}
 
+	// 初始化 IPv6 禁止配置
+	InitIPv6BlockFromEnv()
+
 	// 设置 gin 模式
 	ginMode := os.Getenv("GIN_MODE")
 	if ginMode == "" {

@@ -43,6 +43,17 @@ func IsIPv6BlockEnabled() bool {
 	return globalIPv6BlockConfig.enabled
 }
 
+// InitIPv6BlockFromEnv 从环境变量初始化 IPv6 禁止配置
+func InitIPv6BlockFromEnv() {
+	if envVal := os.Getenv("KIRO_IPV6_BLOCK_ENABLED"); envVal != "" {
+		enabled := strings.ToLower(envVal) == "true" || envVal == "1"
+		SetIPv6BlockEnabled(enabled)
+		logger.Info("从环境变量初始化 IPv6 禁止配置",
+			logger.Bool("enabled", enabled),
+			logger.String("env_value", envVal))
+	}
+}
+
 // isIPv6 检测 IP 地址是否为 IPv6
 func isIPv6(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
