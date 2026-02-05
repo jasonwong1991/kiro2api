@@ -247,6 +247,12 @@ func IPv6BlockMiddleware() gin.HandlerFunc {
 
 		// 检查是否为 IPv6 地址
 		if isIPv6(clientIP) {
+
+		// 豁免管理 API 的 IPv6 禁止控制端点，避免"自锁"
+		if c.Request.URL.Path == "/v1/admin/ip/ipv6-block" {
+			c.Next()
+			return
+		}
 			logger.Warn("拒绝 IPv6 请求",
 				logger.String("client_ip", clientIP),
 				logger.String("path", c.Request.URL.Path),
