@@ -590,6 +590,8 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 
 		// 验证并修复 toolUses 和 toolResults 的配对关系
 		validateAndFixToolPairing(history)
+		// 验证并修复空的 content
+		validateAndFixEmptyContent(history)
 		cwReq.ConversationState.History = history
 	}
 
@@ -798,6 +800,45 @@ func validateAndFixToolPairing(history []any) {
 				logger.Debug("已添加缺失的 toolUses",
 					logger.Int("history_index", i),
 					logger.Int("added_count", len(missingInToolUses)))
+			}
+		}
+	}
+}
+
+// validateAndFixEmptyContent 验证并修复历史记录中的空 content
+func validateAndFixEmptyContent(history []any) {
+	for i, item := range history {
+		switch msg := item.(type) {
+		case types.HistoryUserMessage:
+			if strings.TrimSpace(msg.UserInputMessage.Content) == "" {
+				// 检查是否有图片或工具结果
+				hasImages := len(msg.UserInputMessage.Images) > 0
+				hasToolResults := msg.UserInputMessage.UserInputMessageContext != nil &&
+					len(msg.UserInputMessage.UserInputMessageContext.ToolResults) > 0
+
+				// 如果既没有图片也没有工具结果，填充占位文本
+				if !hasImages && !hasToolResults {
+					msg.UserInputMessage.Content = "忽略这条空消息"
+					history[i] = msg
+					logger.Debug("修复历史记录中的空 user content",
+						logger.Int("history_index", i),
+						logger.String("placeholder", "忽略这条空消息"))
+				}
+			}
+
+		case types.HistoryAssistantMessage:
+			if strings.TrimSpace(msg.AssistantResponseMessage.Content) == "" {
+				// 检查是否有工具调用
+				hasToolUses := len(msg.AssistantResponseMessage.ToolUses) > 0
+
+				// 如果没有工具调用，填充占位文本
+				if !hasToolUses {
+					msg.AssistantResponseMessage.Content = "忽略这条空消息"
+					history[i] = msg
+					logger.Debug("修复历史记录中的空 assistant content",
+						logger.Int("history_index", i),
+						logger.String("placeholder", "忽略这条空消息"))
+				}
 			}
 		}
 	}

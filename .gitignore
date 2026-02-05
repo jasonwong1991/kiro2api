@@ -48,3 +48,5 @@ kiro.rs
 .vscode/
 ip_whitelist.json
 *.txt
+start.sh
+ipv6_config.json
