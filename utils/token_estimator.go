@@ -22,7 +22,7 @@ func NewTokenEstimator() *TokenEstimator {
 
 // EstimateTokens 估算消息的token数量
 // 算法说明：
-// - 基础估算: 英文平均4字符/token，中文平均1.5字符/token
+// - 基础估算: 英文约3.5-4字符/token，中文约1字符/token
 // - 固定开销: 消息角色标记、JSON结构等
 // - 工具开销: 每个工具定义约50-200 tokens
 //
@@ -34,14 +34,13 @@ func (e *TokenEstimator) EstimateTokens(req *types.CountTokensRequest) int {
 	for _, sysMsg := range req.System {
 		if sysMsg.Text != "" {
 			totalTokens += e.EstimateTextTokens(sysMsg.Text)
-			totalTokens += 2 // 系统提示的固定开销（P0优化：从3降至2）
+			totalTokens += 2 // 系统提示的固定开销（role/结构字段等）
 		}
 	}
 
 	// 2. 消息内容（messages）
 	for _, msg := range req.Messages {
 		// 角色标记开销（"user"/"assistant" + JSON结构）
-		// 优化：根据官方测试调整
 		totalTokens += 3
 
 		// 消息内容
@@ -60,9 +59,9 @@ func (e *TokenEstimator) EstimateTokens(req *types.CountTokensRequest) int {
 				totalTokens += e.estimateTypedContentBlock(block)
 			}
 		default:
-			// 其他格式：保守估算为JSON长度
+			// 其他格式：JSON/结构化内容的token密度通常高于自然语言
 			if jsonBytes, err := SafeMarshal(content); err == nil {
-				totalTokens += len(jsonBytes) / 4
+				totalTokens += e.EstimateTextTokens(string(jsonBytes))
 			}
 		}
 	}
@@ -105,14 +104,14 @@ func (e *TokenEstimator) EstimateTokens(req *types.CountTokensRequest) int {
 			if tool.InputSchema != nil {
 				if jsonBytes, err := SafeMarshal(tool.InputSchema); err == nil {
 					// Schema编码密度：根据工具数量自适应
-					// 优化：平衡编码密度
+					// JSON Schema 结构化内容 token 密度较高
 					var schemaCharsPerToken float64
 					if toolCount == 1 {
-						schemaCharsPerToken = 1.9 // 单工具平衡值
+						schemaCharsPerToken = 1.8 // 单工具：Schema通常偏结构化且字段重复，token更密集
 					} else if toolCount <= 5 {
-						schemaCharsPerToken = 2.2 // 少量工具
+						schemaCharsPerToken = 1.9 // 少量工具
 					} else {
-						schemaCharsPerToken = 2.5 // 大量工具
+						schemaCharsPerToken = 2.0 // 大量工具：共享结构存在，但JSON仍偏"费token"
 					}
 
 					schemaLen := len(jsonBytes)
@@ -146,7 +145,7 @@ func (e *TokenEstimator) EstimateTokens(req *types.CountTokensRequest) int {
 
 	// 4. 基础请求开销（API格式固定开销）
 	// 优化：根据官方测试调整
-	totalTokens += 4 // 调整至4以匹配官方
+	totalTokens += 3 // 调整至3以匹配官方
 
 	return totalTokens
 }
@@ -187,8 +186,8 @@ func (e *TokenEstimator) estimateToolName(name string) int {
 // EstimateTextTokens 估算纯文本的token数量
 // 混合语言处理：
 // - 检测中文字符比例
-// - 中文: 1.5字符/token（汉字信息密度高）
-// - 英文: 4字符/token（标准GPT tokenizer比率）
+// - 中文: 约 1 字符/token（纯中文短文本存在少量固定开销）
+// - 英文: 自然语言约 3.5-4 字符/token（Claude），结构化内容更"费token"
 func (e *TokenEstimator) EstimateTextTokens(text string) int {
 	if text == "" {
 		return 0
@@ -202,12 +201,18 @@ func (e *TokenEstimator) EstimateTextTokens(text string) int {
 		return 0
 	}
 
-	// 统计中文字符数（扫描全部字符）
+	// 统计中文字符数和中文标点数（扫描全部字符）
 	chineseChars := 0
+	chinesePunctuation := 0
 	for _, r := range runes {
 		// 中文字符范围（CJK统一汉字）
 		if r >= 0x4E00 && r <= 0x9FFF {
 			chineseChars++
+		}
+		// 中文标点符号范围
+		if (r >= 0x3000 && r <= 0x303F) || // CJK标点符号
+			(r >= 0xFF00 && r <= 0xFFEF) { // 全角ASCII和标点
+			chinesePunctuation++
 		}
 	}
 
@@ -217,39 +222,58 @@ func (e *TokenEstimator) EstimateTextTokens(text string) int {
 	// 混合: '你好hello'(2中+5英)→4tokens = 2中文 + 2英文
 	// 结论: 纯中文有基础开销，混合文本无额外开销
 
-	nonChineseChars := runeCount - chineseChars
+	nonChineseChars := runeCount - chineseChars - chinesePunctuation
 
 	// 判断是否为纯中文
 	isPureChinese := (nonChineseChars == 0)
 
-	// 中文token计算
+	// 中文token计算（包含中文标点）
 	chineseTokens := 0
 	if chineseChars > 0 {
 		if isPureChinese {
-			chineseTokens = 1 + chineseChars // 纯中文: 基础1 + 字符数
+			chineseTokens = 1 + chineseChars + chinesePunctuation // 纯中文: 基础1 + 字符数 + 标点数
 		} else {
-			chineseTokens = chineseChars // 混合文本: 仅字符数
+			chineseTokens = chineseChars + chinesePunctuation // 混合文本: 字符数 + 标点数
 		}
 	}
 
-	// 英文/数字字符密度优化
-	// 短期优化: 进一步调整以降低纯英文误差
+	// 非中文部分：区分自然语言 vs 结构化内容(JSON/代码/日志等)
+	// 经验规律（Claude）：
+	// - 自然语言平均约 3.5-4 字符/token，短文本更"费token"
+	// - 结构化内容标点/分隔符密集，token密度显著更高（更容易低估）
+	//
+	// 重要：不再对长文本做全局"压缩系数"处理。
+	// 长文本往往来自 tool_result / JSON / 代码块，其token密度不一定随长度降低，
+	// 之前的压缩会在这些场景产生系统性低估（可达 40%+）。
 	nonChineseTokens := 0
 	if nonChineseChars > 0 {
-		// 根据文本长度动态调整字符密度
+		isStructured := looksLikeStructuredText(text)
+
 		var charsPerToken float64
-		if nonChineseChars < 50 {
-			// 超短文本(1-50字符): 密度低(分词多)
-			charsPerToken = 2.8
-		} else if nonChineseChars < 100 {
-			// 短文本(50-100字符): 标准密度
-			charsPerToken = 2.6
+
+		if isStructured {
+			// JSON/代码/日志：更"费token"，使用更保守的字符密度
+			if nonChineseChars < 200 {
+				charsPerToken = 2.0
+			} else if nonChineseChars < 2000 {
+				charsPerToken = 2.2
+			} else {
+				charsPerToken = 2.4
+			}
 		} else {
-			// 中长文本(100+字符): 密度高(更多常见词)
-			charsPerToken = 2.5
+			// 自然语言：更接近 Claude 的常见密度
+			if nonChineseChars < 50 {
+				charsPerToken = 4.0
+			} else if nonChineseChars < 200 {
+				charsPerToken = 4.2
+			} else if nonChineseChars < 2000 {
+				charsPerToken = 4.5
+			} else {
+				charsPerToken = 4.6
+			}
 		}
 
-		nonChineseTokens = int(math.Ceil(float64(nonChineseChars) / charsPerToken))  // 进一法
+		nonChineseTokens = int(math.Ceil(float64(nonChineseChars) / charsPerToken)) // 进一法
 		if nonChineseTokens < 1 {
 			nonChineseTokens = 1 // 至少1 token
 		}
@@ -257,35 +281,61 @@ func (e *TokenEstimator) EstimateTextTokens(text string) int {
 
 	tokens := chineseTokens + nonChineseTokens
 
-	// 长文本压缩系数 (短期优化: 细化阈值)
-	// 原因: BPE编码的token密度随文本长度增长而提高
-	// 新增分段: 50/100/200/300/500/1000字符
-	if runeCount >= config.LongTextThreshold {
-		// 超长文本(1000+字符): 压缩40%
-		tokens = int(float64(tokens) * 0.60)
-	} else if runeCount >= 500 {
-		// 长文本(500-1000字符): 压缩30%
-		tokens = int(float64(tokens) * 0.70)
-	} else if runeCount >= 300 {
-		// 中长文本(300-500字符): 压缩20%
-		tokens = int(float64(tokens) * 0.80)
-	} else if runeCount >= 200 {
-		// 中等文本(200-300字符): 压缩15%
-		tokens = int(float64(tokens) * 0.85)
-	} else if runeCount >= config.ShortTextThreshold {
-		// 较长文本(100-200字符): 压缩10%
-		tokens = int(float64(tokens) * 0.90)
-	} else if runeCount >= 50 {
-		// 普通文本(50-100字符): 压缩5%
-		tokens = int(float64(tokens) * 0.95)
-	}
-	// <50字符: 不压缩
-
 	if tokens < 1 {
 		tokens = 1 // 最少1个token
 	}
 
 	return tokens
+}
+
+// looksLikeStructuredText 判断文本是否更像结构化内容（JSON/代码/日志）。
+// 该判断用于选择更保守的字符密度，避免对 tool_result / Schema 等场景系统性低估。
+func looksLikeStructuredText(text string) bool {
+	if text == "" {
+		return false
+	}
+
+	// 代码块通常 token 密度更高
+	if strings.Contains(text, "```") {
+		return true
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+
+	// JSON 常见特征：以 {/[ 开头且包含冒号
+	first := trimmed[0]
+	if (first == '{' || first == '[') && strings.Contains(trimmed, ":") {
+		return true
+	}
+
+	// 标点/分隔符密度：结构化文本通常包含大量括号、引号、冒号、逗号、反斜杠、下划线等
+	total := 0
+	structural := 0
+	for _, r := range trimmed {
+		// 中文汉字不参与结构密度判定（避免中文长文被误判为结构化）
+		if r >= 0x4E00 && r <= 0x9FFF {
+			total++
+			continue
+		}
+
+		total++
+		switch r {
+		case '{', '}', '[', ']', ':', ',', '"', '\\', '=', '<', '>', '(', ')', ';', '_':
+			structural++
+		case '\n', '\r', '\t':
+			structural++
+		}
+	}
+
+	// 过短文本用密度判断容易误判，保守起见仅对足够长的文本生效
+	if total < 80 {
+		return false
+	}
+
+	return float64(structural)/float64(total) >= 0.12
 }
 
 // EstimateToolUseTokens 精确估算工具调用的token数量
@@ -346,8 +396,8 @@ func (e *TokenEstimator) EstimateToolUseTokens(toolName string, toolInput map[st
 // estimateContentBlock 估算单个内容块的token数量（通用map格式）
 // 支持的内容类型：
 // - text: 文本块
-// - image: 图片（固定1500 tokens估算）
-// - document: 文档（根据大小估算）
+// - image: 图片（基于尺寸动态计算）
+// - document: 文档（根据内容估算）
 func (e *TokenEstimator) estimateContentBlock(block any) int {
 	blockMap, ok := block.(map[string]any)
 	if !ok {
@@ -365,13 +415,43 @@ func (e *TokenEstimator) estimateContentBlock(block any) int {
 		return 10
 
 	case "image":
-		// 图片：官方文档显示约1000-2000 tokens
-		// 参考: https://docs.anthropic.com/en/docs/build-with-claude/vision
-		return 1500
+		// 图片 token 计算公式（Claude 3）：tokens = 85 + 170 × tiles
+		// tiles = ceil(width/512) × ceil(height/512)
+		// 由于无法获取实际尺寸，使用基于 base64 数据大小的估算
+		if source, ok := blockMap["source"].(map[string]any); ok {
+			if data, ok := source["data"].(string); ok && len(data) > 0 {
+				// base64 数据大小粗略估算图片尺寸
+				// 典型压缩比：JPEG ~10:1, PNG ~3:1
+				// 假设平均 5:1，每像素 3 字节
+				rawBytes := len(data) * 3 / 4 // base64 解码后大小
+				estimatedPixels := rawBytes * 5 / 3
+				// 假设正方形图片
+				side := int(math.Sqrt(float64(estimatedPixels)))
+				tiles := ((side + 511) / 512) * ((side + 511) / 512)
+				if tiles < 1 {
+					tiles = 1
+				}
+				if tiles > 16 {
+					tiles = 16 // 最大 4x4 tiles
+				}
+				return 85 + 170*tiles
+			}
+		}
+		// 无法获取数据时使用默认值（中等尺寸图片）
+		return 1105 // 85 + 170*6 (约 1500x1500 像素)
 
 	case "document":
-		// 文档：根据大小估算（简化处理）
-		return 500
+		// 文档：根据 base64 数据大小估算
+		if source, ok := blockMap["source"].(map[string]any); ok {
+			if data, ok := source["data"].(string); ok && len(data) > 0 {
+				// 文档通常是文本密集型，估算提取后的文本 token
+				rawBytes := len(data) * 3 / 4
+				// PDF/Word 文档平均每字节约 0.3-0.5 个可提取字符
+				estimatedChars := rawBytes * 4 / 10
+				return e.EstimateTextTokens(strings.Repeat("x", estimatedChars))
+			}
+		}
+		return 500 // 默认值
 
 	case "tool_use":
 		// 工具调用（在历史消息中的 assistant 消息可能包含）
@@ -381,24 +461,39 @@ func (e *TokenEstimator) estimateContentBlock(block any) int {
 
 	case "tool_result":
 		// 工具执行结果
+		// 注意：tool_result 外层的 JSON 结构本身也会消耗 token
+		overhead := 8 // type/content 等基础字段
+		if toolUseID, ok := blockMap["tool_use_id"].(string); ok && toolUseID != "" {
+			overhead += e.EstimateTextTokens(toolUseID)
+		} else {
+			overhead += 4 // 缺省的 tool_use_id 开销
+		}
+		if isErr, ok := blockMap["is_error"].(bool); ok && isErr {
+			overhead += 1
+		}
+
 		content := blockMap["content"]
 		switch c := content.(type) {
 		case string:
-			return e.EstimateTextTokens(c)
+			return overhead + e.EstimateTextTokens(c)
 		case []any:
-			total := 0
+			total := overhead
 			for _, item := range c {
 				total += e.estimateContentBlock(item)
 			}
 			return total
 		default:
-			return 50
+			// content 可能是 map/list 等结构化数据
+			if jsonBytes, err := SafeMarshal(content); err == nil {
+				return overhead + e.EstimateTextTokens(string(jsonBytes))
+			}
+			return overhead + 50
 		}
 
 	default:
-		// 未知类型：JSON长度估算
+		// 未知类型：使用 EstimateTextTokens 处理 JSON
 		if jsonBytes, err := SafeMarshal(block); err == nil {
-			return len(jsonBytes) / 4
+			return e.EstimateTextTokens(string(jsonBytes))
 		}
 		return 10
 	}
@@ -414,8 +509,22 @@ func (e *TokenEstimator) estimateTypedContentBlock(block types.ContentBlock) int
 		return 10
 
 	case "image":
-		// 图片：官方文档显示约1000-2000 tokens
-		return 1500
+		// 图片 token 计算公式（Claude 3）：tokens = 85 + 170 × tiles
+		// 对于类型化内容块，尝试从 Source 获取数据大小
+		if block.Source != nil && block.Source.Data != "" {
+			rawBytes := len(block.Source.Data) * 3 / 4
+			estimatedPixels := rawBytes * 5 / 3
+			side := int(math.Sqrt(float64(estimatedPixels)))
+			tiles := ((side + 511) / 512) * ((side + 511) / 512)
+			if tiles < 1 {
+				tiles = 1
+			}
+			if tiles > 16 {
+				tiles = 16
+			}
+			return 85 + 170*tiles
+		}
+		return 1105 // 默认值
 
 	case "tool_use":
 		// 工具调用（在历史消息中的 assistant 消息可能包含）
@@ -433,23 +542,161 @@ func (e *TokenEstimator) estimateTypedContentBlock(block types.ContentBlock) int
 
 	case "tool_result":
 		// 工具执行结果
+		// 注意：tool_result 外层结构也会消耗 token
+		overhead := 8
+		if block.ToolUseId != nil && *block.ToolUseId != "" {
+			overhead += e.EstimateTextTokens(*block.ToolUseId)
+		} else {
+			overhead += 4
+		}
+		if block.IsError != nil && *block.IsError {
+			overhead += 1
+		}
+
 		switch content := block.Content.(type) {
 		case string:
-			return e.EstimateTextTokens(content)
+			return overhead + e.EstimateTextTokens(content)
 		case []any:
-			total := 0
+			total := overhead
 			for _, item := range content {
 				total += e.estimateContentBlock(item)
 			}
 			return total
+		case []types.ContentBlock:
+			total := overhead
+			for _, item := range content {
+				total += e.estimateTypedContentBlock(item)
+			}
+			return total
 		default:
-			return 50
+			// content 可能是 map/list 等结构化数据
+			if jsonBytes, err := SafeMarshal(content); err == nil {
+				return overhead + e.EstimateTextTokens(string(jsonBytes))
+			}
+			return overhead + 50
 		}
 
 	default:
 		// 未知类型
 		return 10
 	}
+}
+
+// EstimateOpenAITokens 估算 OpenAI 格式请求的 token 数量
+// 将 OpenAI 格式转换为内部计算逻辑
+func (e *TokenEstimator) EstimateOpenAITokens(req *types.OpenAIRequest) int {
+	totalTokens := 0
+
+	// 1. 消息内容
+	for _, msg := range req.Messages {
+		// 角色标记开销
+		totalTokens += 3
+
+		// 系统消息额外开销
+		if msg.Role == "system" {
+			totalTokens += 2
+		}
+
+		// 消息内容
+		switch content := msg.Content.(type) {
+		case string:
+			totalTokens += e.EstimateTextTokens(content)
+		case []any:
+			// OpenAI 多模态内容块
+			for _, block := range content {
+				totalTokens += e.estimateContentBlock(block)
+			}
+		default:
+			if jsonBytes, err := SafeMarshal(content); err == nil {
+				totalTokens += e.EstimateTextTokens(string(jsonBytes))
+			}
+		}
+
+		// 工具调用 (assistant 消息中的 tool_calls)
+		for _, toolCall := range msg.ToolCalls {
+			// 工具调用结构开销
+			totalTokens += 10 // type, id, function 关键字
+
+			// 工具名称
+			totalTokens += e.estimateToolName(toolCall.Function.Name)
+
+			// 工具参数 (JSON 字符串)
+			if toolCall.Function.Arguments != "" {
+				totalTokens += e.EstimateTextTokens(toolCall.Function.Arguments)
+			}
+		}
+	}
+
+	// 2. 工具定义
+	toolCount := len(req.Tools)
+	if toolCount > 0 {
+		var baseToolsOverhead int
+		var perToolOverhead int
+
+		if toolCount == 1 {
+			baseToolsOverhead = 0
+			perToolOverhead = 320
+		} else if toolCount <= 5 {
+			baseToolsOverhead = 100
+			perToolOverhead = 120
+		} else {
+			baseToolsOverhead = 180
+			perToolOverhead = 60
+		}
+
+		totalTokens += baseToolsOverhead
+
+		for _, tool := range req.Tools {
+			// 工具名称
+			nameTokens := e.estimateToolName(tool.Function.Name)
+			totalTokens += nameTokens
+
+			// 工具描述
+			totalTokens += e.EstimateTextTokens(tool.Function.Description)
+
+			// 工具参数 schema
+			if tool.Function.Parameters != nil {
+				if jsonBytes, err := SafeMarshal(tool.Function.Parameters); err == nil {
+					var schemaCharsPerToken float64
+					if toolCount == 1 {
+						schemaCharsPerToken = 1.8
+					} else if toolCount <= 5 {
+						schemaCharsPerToken = 1.9
+					} else {
+						schemaCharsPerToken = 2.0
+					}
+
+					schemaLen := len(jsonBytes)
+					schemaTokens := int(math.Ceil(float64(schemaLen) / schemaCharsPerToken))
+
+					if strings.Contains(string(jsonBytes), "$schema") {
+						if toolCount == 1 {
+							schemaTokens += 10
+						} else {
+							schemaTokens += 5
+						}
+					}
+
+					minSchemaTokens := 50
+					if toolCount > 5 {
+						minSchemaTokens = 30
+					}
+					if schemaTokens < minSchemaTokens {
+						schemaTokens = minSchemaTokens
+					}
+
+					totalTokens += schemaTokens
+				}
+			}
+
+			totalTokens += perToolOverhead
+		}
+	}
+
+	// 3. 基础请求开销
+	totalTokens += 3
+
+	return totalTokens
 }
 
 // IsValidClaudeModel 验证是否为有效的Claude模型

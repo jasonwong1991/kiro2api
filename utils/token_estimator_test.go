@@ -232,15 +232,17 @@ factors like character density, language type (Chinese vs English), and structur
 								Source: &types.ImageSource{
 									Type:      "base64",
 									MediaType: "image/jpeg",
-									Data:      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+									// 1x1 pixel PNG: 85 + 170*1 = 255 tokens (Claude 3 formula)
+									Data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
 								},
 							},
 						},
 					},
 				},
 			},
-			Expected:    1515,
-			Description: "混合内容块（文本+图片）",
+			// 计算: 文本(~7) + 图片(255) + 消息开销(4) ≈ 266
+			Expected:    266,
+			Description: "混合内容块（文本+1x1像素图片）",
 		},
 	}
 

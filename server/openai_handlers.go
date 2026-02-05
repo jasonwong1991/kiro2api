@@ -91,7 +91,35 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 	}
 
 	// 构建Anthropic响应
-	inputContent, _ := utils.GetMessageContent(anthropicReq.Messages[0].Content)
+	// 使用 TokenEstimator 正确计算 token 数量
+	estimator := utils.NewTokenEstimator()
+	countReq := &types.CountTokensRequest{
+		Model:    anthropicReq.Model,
+		System:   anthropicReq.System,
+		Messages: anthropicReq.Messages,
+		Tools:    anthropicReq.Tools,
+	}
+	inputTokens := estimator.EstimateTokens(countReq)
+
+	// 计算 output tokens
+	outputTokens := 0
+	for _, contentBlock := range contexts {
+		blockType, _ := contentBlock["type"].(string)
+		switch blockType {
+		case "text":
+			if text, ok := contentBlock["text"].(string); ok {
+				outputTokens += estimator.EstimateTextTokens(text)
+			}
+		case "tool_use":
+			toolName, _ := contentBlock["name"].(string)
+			toolInput, _ := contentBlock["input"].(map[string]any)
+			outputTokens += estimator.EstimateToolUseTokens(toolName, toolInput)
+		}
+	}
+	if outputTokens < 1 && len(contexts) > 0 {
+		outputTokens = 1
+	}
+
 	stopReason := func() string {
 		if sawToolUse {
 			return "tool_use"
@@ -106,8 +134,8 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 		"stop_sequence": nil,
 		"type":          "message",
 		"usage": map[string]any{
-			"input_tokens":  len(inputContent),
-			"output_tokens": len(allContent),
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
 		},
 	}
 

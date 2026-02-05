@@ -50,3 +50,17 @@ ip_whitelist.json
 *.txt
 start.sh
 ipv6_config.json
+# OMC 相关文件
+.omc/
+
+# 测试和调试文件
+debug_logs/
+test_results/
+test_token_accuracy
+run_token_test.sh
+tool_hash_mapping.json
+tool_name_hash_mapper.py
+tool_name_processor.py
+
+# 文档草稿
+IMPLEMENTATION_SUMMARY.md
