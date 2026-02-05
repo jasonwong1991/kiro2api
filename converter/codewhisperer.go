@@ -595,6 +595,22 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 		cwReq.ConversationState.History = history
 	}
 
+	// 验证并修复 currentMessage 的空 content
+	if strings.TrimSpace(cwReq.ConversationState.CurrentMessage.UserInputMessage.Content) == "" {
+		hasImages := len(cwReq.ConversationState.CurrentMessage.UserInputMessage.Images) > 0
+		hasToolResults := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext != nil &&
+			len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults) > 0
+		hasTools := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext != nil &&
+			len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools) > 0
+
+		// 如果既没有图片、工具结果，也没有工具，填充占位文本
+		if !hasImages && !hasToolResults && !hasTools {
+			cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = "忽略这条空消息"
+			logger.Debug("修复 currentMessage 的空 content",
+				logger.String("placeholder", "忽略这条空消息"))
+		}
+	}
+
 	// 最终验证请求完整性 (KISS: 简化验证逻辑)
 	if err := validateCodeWhispererRequest(&cwReq); err != nil {
 		return cwReq, fmt.Errorf("请求验证失败: %v", err)
