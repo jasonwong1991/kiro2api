@@ -79,10 +79,13 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 
 	// 添加工具调用
 	for _, tool := range result.GetToolCalls() {
+		// 还原工具名称：如果是 hash 值则还原为原始名称
+		toolName := converter.RestoreToolName(tool.Name)
+
 		contexts = append(contexts, map[string]any{
 			"type":  "tool_use",
 			"id":    tool.ID,
-			"name":  tool.Name,
+			"name":  toolName,
 			"input": tool.Arguments,
 		})
 	}
@@ -344,6 +347,10 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 									if blockType, _ := blockMap["type"].(string); blockType == "tool_use" {
 										toolUseId, _ := blockMap["id"].(string)
 										toolName, _ := blockMap["name"].(string)
+
+										// 还原工具名称：如果是 hash 值则还原为原始名称
+										toolName = converter.RestoreToolName(toolName)
+
 										// 获取内容块索引
 										toolBlockIndex := 0
 										if idxAny, ok := dataMap["index"]; ok {

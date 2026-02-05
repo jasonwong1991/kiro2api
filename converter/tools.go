@@ -1,12 +1,130 @@
 package converter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 
 	"kiro2api/types"
 	"kiro2api/utils"
 )
+
+const (
+	// MaxToolNameLength Kiro IDE 工具名称最大长度限制
+	MaxToolNameLength = 64
+	// MaxToolDescriptionLength Kiro IDE 工具描述最大长度限制
+	MaxToolDescriptionLength = 1024
+	// ToolNameMapContextKey gin.Context 中存储工具名称映射表的 key
+	ToolNameMapContextKey = "tool_name_map"
+)
+
+// ToolNameMapper 工具名称映射器（请求级）
+type ToolNameMapper struct {
+	mapping map[string]string
+	mu      sync.RWMutex
+}
+
+// NewToolNameMapper 创建新的工具名称映射器
+func NewToolNameMapper() *ToolNameMapper {
+	return &ToolNameMapper{
+		mapping: make(map[string]string),
+	}
+}
+
+// Register 注册工具名称映射
+func (m *ToolNameMapper) Register(hashedName, originalName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mapping[hashedName] = originalName
+}
+
+// Restore 还原工具名称
+func (m *ToolNameMapper) Restore(toolName string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if originalName, exists := m.mapping[toolName]; exists {
+		return originalName
+	}
+	return toolName
+}
+
+// 全局工具名称映射表：hash -> 原始名称（向后兼容，逐步废弃）
+var (
+	toolNameMap      = make(map[string]string)
+	toolNameMapMutex sync.RWMutex
+)
+
+// GenerateToolNameHash 为超长工具名称生成64字符的 SHA256 hash
+func GenerateToolNameHash(toolName string) string {
+	hash := sha256.Sum256([]byte(toolName))
+	// 返回前64个十六进制字符（32字节 = 64个十六进制字符）
+	return hex.EncodeToString(hash[:])[:MaxToolNameLength]
+}
+
+// NormalizeToolName 标准化工具名称：如果超过最大长度则进行 hash 处理
+// mapper: 可选的请求级映射器，如果为 nil 则使用全局映射（向后兼容）
+func NormalizeToolName(toolName string) string {
+	return NormalizeToolNameWithMapper(toolName, nil)
+}
+
+// NormalizeToolNameWithMapper 标准化工具名称并使用指定的映射器
+func NormalizeToolNameWithMapper(toolName string, mapper *ToolNameMapper) string {
+	if len(toolName) > MaxToolNameLength {
+		hashedName := GenerateToolNameHash(toolName)
+		// 注册映射关系
+		if mapper != nil {
+			mapper.Register(hashedName, toolName)
+		} else {
+			// 向后兼容：使用全局映射
+			RegisterToolNameMapping(hashedName, toolName)
+		}
+		return hashedName
+	}
+	return toolName
+}
+
+// RegisterToolNameMapping 注册工具名称映射（全局，向后兼容）
+func RegisterToolNameMapping(hashedName, originalName string) {
+	toolNameMapMutex.Lock()
+	defer toolNameMapMutex.Unlock()
+	toolNameMap[hashedName] = originalName
+}
+
+// RestoreToolName 还原工具名称：如果是 hash 值则还原为原始名称
+// 优先使用全局映射（向后兼容）
+func RestoreToolName(toolName string) string {
+	return RestoreToolNameWithMapper(toolName, nil)
+}
+
+// RestoreToolNameWithMapper 使用指定的映射器还原工具名称
+func RestoreToolNameWithMapper(toolName string, mapper *ToolNameMapper) string {
+	// 优先使用请求级映射器
+	if mapper != nil {
+		if restored := mapper.Restore(toolName); restored != toolName {
+			return restored
+		}
+	}
+
+	// 回退到全局映射（向后兼容）
+	toolNameMapMutex.RLock()
+	defer toolNameMapMutex.RUnlock()
+
+	if originalName, exists := toolNameMap[toolName]; exists {
+		return originalName
+	}
+	return toolName
+}
+
+// TruncateToolDescription 截断工具描述：如果超过最大长度则截断并添加省略号
+func TruncateToolDescription(description string) string {
+	if len(description) <= MaxToolDescriptionLength {
+		return description
+	}
+	// 截断到最大长度-3，然后添加省略号
+	return description[:MaxToolDescriptionLength-3] + "..."
+}
 
 // 工具处理器
 
@@ -50,9 +168,20 @@ func validateAndProcessTools(tools []types.OpenAITool) ([]types.AnthropicTool, e
 			continue
 		}
 
+		// 处理超长工具名称：使用 SHA256 hash
+		toolName := NormalizeToolName(tool.Function.Name)
+
+		// 调试日志：记录名称转换
+		if len(tool.Function.Name) > MaxToolNameLength {
+			fmt.Printf("[DEBUG] Tool name too long: %s (%d chars) -> %s\n", tool.Function.Name, len(tool.Function.Name), toolName)
+		}
+
+		// 处理超长工具描述：截断到最大长度
+		toolDescription := TruncateToolDescription(tool.Function.Description)
+
 		anthropicTool := types.AnthropicTool{
-			Name:        tool.Function.Name,
-			Description: tool.Function.Description,
+			Name:        toolName,
+			Description: toolDescription,
 			InputSchema: cleanedParams,
 		}
 		anthropicTools = append(anthropicTools, anthropicTool)
@@ -197,9 +326,11 @@ func convertOpenAIToolChoiceToAnthropic(openaiToolChoice any) any {
 		if choiceType, ok := choice["type"].(string); ok && choiceType == "function" {
 			if functionObj, ok := choice["function"].(map[string]any); ok {
 				if name, ok := functionObj["name"].(string); ok {
+					// 标准化工具名称：如果超过最大长度则进行 hash 处理
+					normalizedName := NormalizeToolName(name)
 					return &types.ToolChoice{
 						Type: "tool",
-						Name: name,
+						Name: normalizedName,
 					}
 				}
 			}
@@ -210,9 +341,11 @@ func convertOpenAIToolChoiceToAnthropic(openaiToolChoice any) any {
 	case types.OpenAIToolChoice:
 		// 处理结构化的OpenAIToolChoice类型
 		if choice.Type == "function" && choice.Function != nil {
+			// 标准化工具名称：如果超过最大长度则进行 hash 处理
+			normalizedName := NormalizeToolName(choice.Function.Name)
 			return &types.ToolChoice{
 				Type: "tool",
-				Name: choice.Function.Name,
+				Name: normalizedName,
 			}
 		}
 		return &types.ToolChoice{Type: "auto"}

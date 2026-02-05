@@ -212,6 +212,17 @@ func (ctx *StreamProcessorContext) processToolUseStart(dataMap map[string]any) {
 		return
 	}
 
+	// 还原工具名称：如果是 hash 值则还原为原始名称
+	if toolName, ok := cb["name"].(string); ok && toolName != "" {
+		originalName := converter.RestoreToolName(toolName)
+		if originalName != toolName {
+			cb["name"] = originalName
+			logger.Debug("还原工具名称",
+				logger.String("hashed_name", toolName),
+				logger.String("original_name", originalName))
+		}
+	}
+
 	// 记录索引到tool_use_id的映射
 	ctx.toolUseIdByBlockIndex[idx] = id
 

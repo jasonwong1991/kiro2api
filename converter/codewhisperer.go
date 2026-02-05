@@ -360,7 +360,8 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 
 			// 根据req.json的实际结构，确保JSON Schema完整性
 			cwTool := types.CodeWhispererTool{}
-			cwTool.ToolSpecification.Name = tool.Name
+			// 标准化工具名称：如果超过64字符则进行hash处理
+			cwTool.ToolSpecification.Name = NormalizeToolName(tool.Name)
 
 			// 验证并处理工具描述
 			description := strings.TrimSpace(tool.Description)
@@ -636,9 +637,9 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 							toolUse.ToolUseId = id
 						}
 
-						// 提取 name
+						// 提取 name 并标准化（处理超长名称）
 						if name, ok := block["name"].(string); ok {
-							toolUse.Name = name
+							toolUse.Name = NormalizeToolName(name)
 						}
 
 						// 验证必要字段：跳过无效的工具调用（toolUseId 或 name 为空）
@@ -679,7 +680,7 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 				}
 
 				if block.Name != nil {
-					toolUse.Name = *block.Name
+					toolUse.Name = NormalizeToolName(*block.Name)
 				}
 
 				// 验证必要字段：跳过无效的工具调用（toolUseId 或 name 为空）

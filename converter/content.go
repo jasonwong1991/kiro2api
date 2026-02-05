@@ -252,7 +252,8 @@ func parseContentBlock(block map[string]any) (types.ContentBlock, error) {
 			contentBlock.ID = &id
 		}
 		if name, ok := block["name"].(string); ok {
-			contentBlock.Name = &name
+			normalizedName := NormalizeToolName(name)
+			contentBlock.Name = &normalizedName
 		}
 		if input, ok := block["input"]; ok {
 			contentBlock.Input = &input
