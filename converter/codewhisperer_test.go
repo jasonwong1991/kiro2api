@@ -671,6 +671,115 @@ func TestBuildCodeWhispererRequest_NoToolsDefinition_ShouldStripStructuredToolDa
 	assert.Len(t, assistantEntry.AssistantResponseMessage.ToolUses, 0)
 }
 
+func TestBuildCodeWhispererRequest_CurrentToolResultsWithoutLatestAssistantToolUses(t *testing.T) {
+	toolUseID := "tool_abc123"
+	isError := false
+
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "first",
+			},
+			{
+				Role: "assistant",
+				Content: []types.ContentBlock{
+					{
+						Type: "text",
+						Text: func() *string {
+							s := "no tool use"
+							return &s
+						}(),
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []types.ContentBlock{
+					{
+						Type:      "tool_result",
+						ToolUseId: &toolUseID,
+						Content:   "result",
+						IsError:   &isError,
+					},
+				},
+			},
+		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "dummy_tool",
+				Description: "dummy",
+				InputSchema: map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+
+	ctx := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	require.NotNil(t, ctx)
+	assert.Len(t, ctx.ToolResults, 0)
+	assert.Len(t, ctx.Tools, 1)
+}
+
+func TestBuildCodeWhispererRequest_CurrentToolResultsShouldBeKeptWhenLatestAssistantMatches(t *testing.T) {
+	toolUseID := "tool_abc123"
+	toolName := "dummy_tool"
+	toolInput := any(map[string]any{"x": 1})
+	isError := false
+
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "first",
+			},
+			{
+				Role: "assistant",
+				Content: []types.ContentBlock{
+					{
+						Type:  "tool_use",
+						ID:    &toolUseID,
+						Name:  &toolName,
+						Input: &toolInput,
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []types.ContentBlock{
+					{
+						Type:      "tool_result",
+						ToolUseId: &toolUseID,
+						Content:   "result",
+						IsError:   &isError,
+					},
+				},
+			},
+		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "dummy_tool",
+				Description: "dummy",
+				InputSchema: map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+
+	ctx := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	require.NotNil(t, ctx)
+	assert.Len(t, ctx.ToolResults, 1)
+	assert.Equal(t, "tool_abc123", ctx.ToolResults[0].ToolUseId)
+}
+
 func TestValidateCodeWhispererRequest(t *testing.T) {
 	t.Run("有效请求", func(t *testing.T) {
 		cwReq := &types.CodeWhispererRequest{}

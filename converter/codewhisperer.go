@@ -96,6 +96,66 @@ func normalizeToolUseID(rawID string) string {
 	return builder.String()
 }
 
+func findLatestAssistantToolUseIDs(history []any) (map[string]struct{}, bool) {
+	for index := len(history) - 1; index >= 0; index-- {
+		switch assistantMsg := history[index].(type) {
+		case types.HistoryAssistantMessage:
+			ids := make(map[string]struct{}, len(assistantMsg.AssistantResponseMessage.ToolUses))
+			for _, toolUse := range assistantMsg.AssistantResponseMessage.ToolUses {
+				if toolUse.ToolUseId != "" {
+					ids[toolUse.ToolUseId] = struct{}{}
+				}
+			}
+			return ids, true
+		}
+	}
+
+	return map[string]struct{}{}, false
+}
+
+func validateAndFixCurrentMessageToolResults(cwReq *types.CodeWhispererRequest) {
+	ctx := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if ctx == nil || len(ctx.ToolResults) == 0 {
+		return
+	}
+
+	validToolUseIDs, hasAssistantHistory := findLatestAssistantToolUseIDs(cwReq.ConversationState.History)
+	if !hasAssistantHistory {
+		return
+	}
+
+	if len(validToolUseIDs) == 0 {
+		logger.Warn("currentMessage 包含 toolResults，但历史最后 assistant 没有 toolUses，已清理当前 toolResults",
+			logger.String("conversation_id", cwReq.ConversationState.ConversationId),
+			logger.Int("tool_results_count", len(ctx.ToolResults)))
+		ctx.ToolResults = nil
+		if len(ctx.Tools) == 0 {
+			cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = nil
+		}
+		return
+	}
+
+	originalCount := len(ctx.ToolResults)
+	filteredResults := make([]types.ToolResult, 0, originalCount)
+	for _, toolResult := range ctx.ToolResults {
+		if _, exists := validToolUseIDs[toolResult.ToolUseId]; exists {
+			filteredResults = append(filteredResults, toolResult)
+		}
+	}
+
+	if len(filteredResults) != originalCount {
+		logger.Warn("currentMessage 的部分 toolResults 未匹配到最后 assistant 的 toolUses，已过滤",
+			logger.String("conversation_id", cwReq.ConversationState.ConversationId),
+			logger.Int("original_tool_results_count", originalCount),
+			logger.Int("filtered_tool_results_count", len(filteredResults)))
+	}
+
+	ctx.ToolResults = filteredResults
+	if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
+		cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = nil
+	}
+}
+
 func isJSONNumber(value any) bool {
 	switch value.(type) {
 	case int, int8, int16, int32, int64,
@@ -757,6 +817,8 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 			}
 		}
 	}
+
+	validateAndFixCurrentMessageToolResults(&cwReq)
 
 	// 最终验证请求完整性 (KISS: 简化验证逻辑)
 	if err := validateCodeWhispererRequest(&cwReq); err != nil {
