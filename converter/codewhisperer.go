@@ -96,49 +96,70 @@ func normalizeToolUseID(rawID string) string {
 	return builder.String()
 }
 
-func findLatestAssistantToolUseIDs(history []any) (map[string]struct{}, bool) {
+func findLatestAssistantMessage(history []any) (types.HistoryAssistantMessage, int, bool) {
 	for index := len(history) - 1; index >= 0; index-- {
 		switch assistantMsg := history[index].(type) {
 		case types.HistoryAssistantMessage:
-			ids := make(map[string]struct{}, len(assistantMsg.AssistantResponseMessage.ToolUses))
-			for _, toolUse := range assistantMsg.AssistantResponseMessage.ToolUses {
-				if toolUse.ToolUseId != "" {
-					ids[toolUse.ToolUseId] = struct{}{}
-				}
-			}
-			return ids, true
+			return assistantMsg, index, true
 		}
 	}
 
-	return map[string]struct{}{}, false
+	return types.HistoryAssistantMessage{}, -1, false
 }
 
 func validateAndFixCurrentMessageToolResults(cwReq *types.CodeWhispererRequest) {
-	ctx := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
-	if ctx == nil || len(ctx.ToolResults) == 0 {
-		return
-	}
-
-	validToolUseIDs, hasAssistantHistory := findLatestAssistantToolUseIDs(cwReq.ConversationState.History)
+	latestAssistant, latestAssistantIndex, hasAssistantHistory := findLatestAssistantMessage(cwReq.ConversationState.History)
 	if !hasAssistantHistory {
 		return
 	}
 
-	if len(validToolUseIDs) == 0 {
+	ctx := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	currentToolResults := []types.ToolResult{}
+	if ctx != nil && len(ctx.ToolResults) > 0 {
+		currentToolResults = ctx.ToolResults
+	}
+
+	assistantToolUseIDs := make(map[string]struct{}, len(latestAssistant.AssistantResponseMessage.ToolUses))
+	for _, toolUse := range latestAssistant.AssistantResponseMessage.ToolUses {
+		if toolUse.ToolUseId != "" {
+			assistantToolUseIDs[toolUse.ToolUseId] = struct{}{}
+		}
+	}
+
+	currentToolResultIDs := make(map[string]struct{}, len(currentToolResults))
+	for _, result := range currentToolResults {
+		if result.ToolUseId != "" {
+			currentToolResultIDs[result.ToolUseId] = struct{}{}
+		}
+	}
+
+	if len(currentToolResultIDs) == 0 && len(latestAssistant.AssistantResponseMessage.ToolUses) > 0 {
+		logger.Warn("最后 assistant 存在 toolUses，但 currentMessage 没有 toolResults，已清理最后 assistant 的 toolUses",
+			logger.String("conversation_id", cwReq.ConversationState.ConversationId),
+			logger.Int("assistant_tool_uses_count", len(latestAssistant.AssistantResponseMessage.ToolUses)))
+
+		latestAssistant.AssistantResponseMessage.ToolUses = []types.ToolUseEntry{}
+		cwReq.ConversationState.History[latestAssistantIndex] = latestAssistant
+		return
+	}
+
+	if len(assistantToolUseIDs) == 0 {
 		logger.Warn("currentMessage 包含 toolResults，但历史最后 assistant 没有 toolUses，已清理当前 toolResults",
 			logger.String("conversation_id", cwReq.ConversationState.ConversationId),
-			logger.Int("tool_results_count", len(ctx.ToolResults)))
-		ctx.ToolResults = nil
-		if len(ctx.Tools) == 0 {
-			cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = nil
+			logger.Int("tool_results_count", len(currentToolResults)))
+		if ctx != nil {
+			ctx.ToolResults = nil
+			if len(ctx.Tools) == 0 {
+				cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = nil
+			}
 		}
 		return
 	}
 
-	originalCount := len(ctx.ToolResults)
+	originalCount := len(currentToolResults)
 	filteredResults := make([]types.ToolResult, 0, originalCount)
-	for _, toolResult := range ctx.ToolResults {
-		if _, exists := validToolUseIDs[toolResult.ToolUseId]; exists {
+	for _, toolResult := range currentToolResults {
+		if _, exists := assistantToolUseIDs[toolResult.ToolUseId]; exists {
 			filteredResults = append(filteredResults, toolResult)
 		}
 	}
@@ -150,9 +171,29 @@ func validateAndFixCurrentMessageToolResults(cwReq *types.CodeWhispererRequest) 
 			logger.Int("filtered_tool_results_count", len(filteredResults)))
 	}
 
-	ctx.ToolResults = filteredResults
-	if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
-		cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = nil
+	if ctx != nil {
+		ctx.ToolResults = filteredResults
+		if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
+			cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = nil
+		}
+	}
+
+	originalToolUsesCount := len(latestAssistant.AssistantResponseMessage.ToolUses)
+	filteredToolUses := make([]types.ToolUseEntry, 0, originalToolUsesCount)
+	for _, toolUse := range latestAssistant.AssistantResponseMessage.ToolUses {
+		if _, exists := currentToolResultIDs[toolUse.ToolUseId]; exists {
+			filteredToolUses = append(filteredToolUses, toolUse)
+		}
+	}
+
+	if len(filteredToolUses) != originalToolUsesCount {
+		logger.Warn("最后 assistant 的部分 toolUses 未匹配到 currentMessage.toolResults，已过滤",
+			logger.String("conversation_id", cwReq.ConversationState.ConversationId),
+			logger.Int("original_tool_uses_count", originalToolUsesCount),
+			logger.Int("filtered_tool_uses_count", len(filteredToolUses)))
+
+		latestAssistant.AssistantResponseMessage.ToolUses = filteredToolUses
+		cwReq.ConversationState.History[latestAssistantIndex] = latestAssistant
 	}
 }
 
