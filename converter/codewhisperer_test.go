@@ -560,6 +560,72 @@ func TestExtractToolResultsFromMessage(t *testing.T) {
 	})
 }
 
+func TestNormalizeToolInputSchema_ExclusiveMinimumBoolean(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"sources": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":             "integer",
+					"minimum":          0,
+					"exclusiveMinimum": true,
+				},
+			},
+		},
+	}
+
+	normalized := normalizeToolInputSchema(schema)
+	items := normalized["properties"].(map[string]any)["sources"].(map[string]any)["items"].(map[string]any)
+
+	value, exists := items["exclusiveMinimum"]
+	require.True(t, exists)
+	assert.Equal(t, 0, value)
+	_, hasMinimum := items["minimum"]
+	assert.False(t, hasMinimum)
+}
+
+func TestBuildCodeWhispererRequest_NormalizeLegacySchemaBounds(t *testing.T) {
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "hello",
+			},
+		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "read_pdf",
+				Description: "read pdf",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"page": map[string]any{
+							"type":             "integer",
+							"minimum":          0,
+							"exclusiveMinimum": true,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+
+	require.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
+	require.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools, 1)
+
+	schema := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools[0].ToolSpecification.InputSchema.Json
+	page := schema["properties"].(map[string]any)["page"].(map[string]any)
+	assert.Equal(t, 0, page["exclusiveMinimum"])
+	_, hasMinimum := page["minimum"]
+	assert.False(t, hasMinimum)
+}
+
 func TestBuildCodeWhispererRequest_NoToolsDefinition_ShouldStripStructuredToolData(t *testing.T) {
 	toolID := "Bash:1"
 	textContent := "checking"

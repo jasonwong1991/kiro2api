@@ -96,6 +96,78 @@ func normalizeToolUseID(rawID string) string {
 	return builder.String()
 }
 
+func isJSONNumber(value any) bool {
+	switch value.(type) {
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeExclusiveBound(schema map[string]any, exclusiveKey, boundKey string) {
+	rawExclusive, exists := schema[exclusiveKey]
+	if !exists {
+		return
+	}
+
+	exclusiveBool, ok := rawExclusive.(bool)
+	if !ok {
+		return
+	}
+
+	if !exclusiveBool {
+		delete(schema, exclusiveKey)
+		return
+	}
+
+	rawBound, hasBound := schema[boundKey]
+	if !hasBound || !isJSONNumber(rawBound) {
+		delete(schema, exclusiveKey)
+		return
+	}
+
+	schema[exclusiveKey] = rawBound
+	delete(schema, boundKey)
+}
+
+func normalizeToolSchemaValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		normalized := make(map[string]any, len(typed))
+		for key, child := range typed {
+			normalized[key] = normalizeToolSchemaValue(child)
+		}
+
+		normalizeExclusiveBound(normalized, "exclusiveMinimum", "minimum")
+		normalizeExclusiveBound(normalized, "exclusiveMaximum", "maximum")
+		return normalized
+	case []any:
+		normalized := make([]any, len(typed))
+		for index, item := range typed {
+			normalized[index] = normalizeToolSchemaValue(item)
+		}
+		return normalized
+	default:
+		return value
+	}
+}
+
+func normalizeToolInputSchema(schema map[string]any) map[string]any {
+	if schema == nil {
+		return nil
+	}
+
+	normalized, ok := normalizeToolSchemaValue(schema).(map[string]any)
+	if !ok {
+		return schema
+	}
+
+	return normalized
+}
+
 // extractToolResultsFromMessage 从消息内容中提取工具结果
 func extractToolResultsFromMessage(content any) []types.ToolResult {
 	var toolResults []types.ToolResult
@@ -394,7 +466,7 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 
 			// 直接使用原始的InputSchema，避免过度处理 (恢复v0.4兼容性)
 			cwTool.ToolSpecification.InputSchema = types.InputSchema{
-				Json: tool.InputSchema,
+				Json: normalizeToolInputSchema(tool.InputSchema),
 			}
 			tools = append(tools, cwTool)
 		}
