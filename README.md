@@ -411,6 +411,7 @@ curl -N -X POST http://localhost:8080/v1/messages \
 
 | 公开模型名称 | 内部 CodeWhisperer 模型 ID |
 |-------------|---------------------------|
+| `claude-opus-4-6` | `CLAUDE_OPUS_4_6_V1_0` |
 | `claude-sonnet-4-5-20250929` | `CLAUDE_SONNET_4_5_20250929_V1_0` |
 | `claude-sonnet-4-20250514` | `CLAUDE_SONNET_4_20250514_V1_0` |
 | `claude-3-7-sonnet-20250219` | `CLAUDE_3_7_SONNET_20250219_V1_0` |

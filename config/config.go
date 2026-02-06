@@ -7,6 +7,7 @@ import (
 
 // ModelMap 模型映射表 (Anthropic model -> Kiro modelId)
 var ModelMap = map[string]string{
+	"claude-opus-4-6":            "claude-opus-4.6",
 	"claude-opus-4-5-20251101":   "claude-opus-4.5",
 	"claude-opus-4-5":            "claude-opus-4.5",
 	"claude-sonnet-4-5":          "claude-sonnet-4.5",
@@ -16,6 +17,7 @@ var ModelMap = map[string]string{
 	"claude-3-5-haiku-20241022":  "auto",
 	"claude-haiku-4-5-20251001":  "auto",
 	// Thinking 模式模型别名（自动启用 thinking 模式）
+	"claude-opus-4-6-thinking":            "claude-opus-4.6",
 	"claude-opus-4-5-20251101-thinking":   "claude-opus-4.5",
 	"claude-opus-4-5-thinking":            "claude-opus-4.5",
 	"claude-sonnet-4-5-thinking":          "claude-sonnet-4.5",
