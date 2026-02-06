@@ -279,6 +279,13 @@ func TestBuildCodeWhispererRequest_WithToolResults(t *testing.T) {
 				},
 			},
 		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "get_weather",
+				Description: "Get weather information",
+				InputSchema: map[string]any{"type": "object"},
+			},
+		},
 	}
 
 	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
@@ -287,8 +294,45 @@ func TestBuildCodeWhispererRequest_WithToolResults(t *testing.T) {
 	require.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
 	assert.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults, 1)
 	assert.Equal(t, "tool_123", cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults[0].ToolUseId)
-	// 包含 tool_result 的请求，content 应该为空
-	assert.Equal(t, "", cwReq.ConversationState.CurrentMessage.UserInputMessage.Content)
+	assert.Equal(t, "Temperature is 25°C", cwReq.ConversationState.CurrentMessage.UserInputMessage.Content)
+}
+
+func TestBuildCodeWhispererRequest_WithToolResults_ShouldKeepToolsWhenProvided(t *testing.T) {
+	toolUseID := "tool_123"
+	isError := false
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role: "user",
+				Content: []types.ContentBlock{
+					{
+						Type:      "tool_result",
+						ToolUseId: &toolUseID,
+						Content:   "Temperature is 25°C",
+						IsError:   &isError,
+					},
+				},
+			},
+		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "get_weather",
+				Description: "Get weather information",
+				InputSchema: map[string]any{
+					"type": "object",
+				},
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+
+	require.NoError(t, err)
+	require.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
+	assert.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults, 1)
+	assert.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools, 1)
 }
 
 func TestBuildCodeWhispererRequest_WithHistory(t *testing.T) {
@@ -399,7 +443,7 @@ func TestDetermineChatTriggerType(t *testing.T) {
 func TestExtractToolUsesFromMessage(t *testing.T) {
 	t.Run("提取工具调用", func(t *testing.T) {
 		textContent := "Let me check that."
-		toolID := "tool_abc123"
+		toolID := "tool:abc123"
 		toolName := "get_weather"
 		toolInput := any(map[string]any{"location": "Tokyo"})
 
@@ -441,7 +485,7 @@ func TestExtractToolUsesFromMessage(t *testing.T) {
 
 func TestExtractToolResultsFromMessage(t *testing.T) {
 	t.Run("提取工具结果", func(t *testing.T) {
-		toolUseID := "tool_123"
+		toolUseID := "tool:123"
 		isError := false
 		content := []types.ContentBlock{
 			{
@@ -514,6 +558,51 @@ func TestExtractToolResultsFromMessage(t *testing.T) {
 		// 没有 ID 的工具结果应该被跳过
 		assert.Len(t, toolResults, 0)
 	})
+}
+
+func TestBuildCodeWhispererRequest_NoToolsDefinition_ShouldStripStructuredToolData(t *testing.T) {
+	toolID := "Bash:1"
+	textContent := "checking"
+	toolName := "Bash"
+	toolInput := any(map[string]any{"command": "echo hi"})
+	isError := false
+
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "start",
+			},
+			{
+				Role: "assistant",
+				Content: []types.ContentBlock{
+					{Type: "text", Text: &textContent},
+					{Type: "tool_use", ID: &toolID, Name: &toolName, Input: &toolInput},
+				},
+			},
+			{
+				Role: "user",
+				Content: []types.ContentBlock{
+					{Type: "tool_result", ToolUseId: &toolID, Content: "ok", IsError: &isError},
+				},
+			},
+		},
+		Tools: nil,
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+
+	if cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext != nil {
+		assert.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults, 0)
+	}
+
+	require.GreaterOrEqual(t, len(cwReq.ConversationState.History), 2)
+	assistantEntry, ok := cwReq.ConversationState.History[1].(types.HistoryAssistantMessage)
+	require.True(t, ok)
+	assert.Len(t, assistantEntry.AssistantResponseMessage.ToolUses, 0)
 }
 
 func TestValidateCodeWhispererRequest(t *testing.T) {

@@ -3,6 +3,7 @@ package converter
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"kiro2api/config"
 	"kiro2api/logger"
@@ -75,6 +76,26 @@ func validateCodeWhispererRequest(cwReq *types.CodeWhispererRequest) error {
 	return nil
 }
 
+func normalizeToolUseID(rawID string) string {
+	rawID = strings.TrimSpace(rawID)
+	if rawID == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(rawID))
+
+	for _, char := range rawID {
+		if unicode.IsLetter(char) || unicode.IsDigit(char) || char == '_' || char == '-' {
+			builder.WriteRune(char)
+		} else {
+			builder.WriteRune('_')
+		}
+	}
+
+	return builder.String()
+}
+
 // extractToolResultsFromMessage 从消息内容中提取工具结果
 func extractToolResultsFromMessage(content any) []types.ToolResult {
 	var toolResults []types.ToolResult
@@ -89,7 +110,7 @@ func extractToolResultsFromMessage(content any) []types.ToolResult {
 
 						// 提取 tool_use_id
 						if toolUseId, ok := block["tool_use_id"].(string); ok {
-							toolResult.ToolUseId = toolUseId
+							toolResult.ToolUseId = normalizeToolUseID(toolUseId)
 						}
 
 						// 提取 content - 转换为数组格式
@@ -162,7 +183,7 @@ func extractToolResultsFromMessage(content any) []types.ToolResult {
 				toolResult := types.ToolResult{}
 
 				if block.ToolUseId != nil {
-					toolResult.ToolUseId = *block.ToolUseId
+					toolResult.ToolUseId = normalizeToolUseID(*block.ToolUseId)
 				}
 
 				// 处理 content
@@ -310,12 +331,6 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 			if strings.TrimSpace(cwReq.ConversationState.CurrentMessage.UserInputMessage.Content) == "" {
 				cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = "Tool execution result"
 				logger.Debug("工具结果请求的 content 为空，使用占位符")
-			}
-
-			// API 不接受同时包含 tools 和 toolResults，清除 tools
-			if len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools) > 0 {
-				cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools = nil
-				logger.Debug("清除 tools 以避免与 toolResults 冲突")
 			}
 		}
 	}
@@ -588,7 +603,6 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 				logger.Int("orphan_messages", len(userMessagesBuffer)))
 		}
 
-
 		// 验证并修复 toolUses 和 toolResults 的配对关系
 		validateAndFixToolPairing(history)
 		// 验证并修复空的 content
@@ -609,6 +623,66 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 			cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = "忽略这条空消息"
 			logger.Debug("修复 currentMessage 的空 content",
 				logger.String("placeholder", "忽略这条空消息"))
+		}
+	}
+
+	// 兼容性兜底：若请求中包含结构化工具调用/结果，但当前消息未携带工具定义，则移除结构化工具字段
+	// 避免上游因工具定义缺失而返回 Improperly formed request
+	hasToolDefinitions := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext != nil &&
+		len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools) > 0
+
+	hasStructuredToolData := false
+	if cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext != nil &&
+		len(cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
+		hasStructuredToolData = true
+	}
+
+	if !hasStructuredToolData {
+		for _, item := range cwReq.ConversationState.History {
+			switch msg := item.(type) {
+			case types.HistoryAssistantMessage:
+				if len(msg.AssistantResponseMessage.ToolUses) > 0 {
+					hasStructuredToolData = true
+				}
+			case types.HistoryUserMessage:
+				if msg.UserInputMessage.UserInputMessageContext != nil && len(msg.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
+					hasStructuredToolData = true
+				}
+			}
+
+			if hasStructuredToolData {
+				break
+			}
+		}
+	}
+
+	if hasStructuredToolData && !hasToolDefinitions {
+		logger.Warn("检测到结构化工具数据但缺少工具定义，已降级移除工具调用/结果字段",
+			logger.String("conversation_id", cwReq.ConversationState.ConversationId))
+
+		if ctx := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext; ctx != nil {
+			ctx.ToolResults = nil
+			if len(ctx.Tools) == 0 {
+				cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = nil
+			}
+		}
+
+		for i, item := range cwReq.ConversationState.History {
+			switch msg := item.(type) {
+			case types.HistoryAssistantMessage:
+				if len(msg.AssistantResponseMessage.ToolUses) > 0 {
+					msg.AssistantResponseMessage.ToolUses = []types.ToolUseEntry{}
+					cwReq.ConversationState.History[i] = msg
+				}
+			case types.HistoryUserMessage:
+				if msg.UserInputMessage.UserInputMessageContext != nil {
+					msg.UserInputMessage.UserInputMessageContext.ToolResults = nil
+					if len(msg.UserInputMessage.UserInputMessageContext.Tools) == 0 {
+						msg.UserInputMessage.UserInputMessageContext = nil
+					}
+					cwReq.ConversationState.History[i] = msg
+				}
+			}
 		}
 	}
 
@@ -634,7 +708,7 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 
 						// 提取 id 作为 ToolUseId
 						if id, ok := block["id"].(string); ok {
-							toolUse.ToolUseId = id
+							toolUse.ToolUseId = normalizeToolUseID(id)
 						}
 
 						// 提取 name 并标准化（处理超长名称）
@@ -676,7 +750,7 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 				toolUse := types.ToolUseEntry{}
 
 				if block.ID != nil {
-					toolUse.ToolUseId = *block.ID
+					toolUse.ToolUseId = normalizeToolUseID(*block.ID)
 				}
 
 				if block.Name != nil {
