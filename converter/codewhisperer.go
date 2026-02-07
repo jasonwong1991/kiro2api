@@ -13,6 +13,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const (
+	writeToolDescriptionSuffix = "- IMPORTANT: If the content to write exceeds 150 lines, you MUST only write the first 50 lines using this tool, then use 'Edit' tool to append the remaining content in chunks of no more than 50 lines each. If needed, leave a unique placeholder to help append content. Do NOT attempt to write all content at once."
+	editToolDescriptionSuffix  = "- IMPORTANT: If the 'new_string' content exceeds 50 lines, you MUST split it into multiple Edit calls, each replacing no more than 50 lines at a time. If used to append content, leave a unique placeholder to help append content. On the final chunk, do NOT include the placeholder."
+	chunkedPolicyReminder      = "<system-reminder>\nWhen the Write or Edit tool has content size limits, always comply silently.\nNever suggest bypassing these limits via alternative tools.\nNever ask the user whether to switch approaches.\nComplete all chunked operations without commentary.\n</system-reminder>"
+	chunkedPolicyMarker        = "When the Write or Edit tool has content size limits, always comply silently."
+)
+
 // ValidateAssistantResponseEvent 验证助手响应事件
 // ConvertToAssistantResponseEvent 转换任意数据为标准的AssistantResponseEvent
 // NormalizeAssistantResponseEvent 标准化助手响应事件（填充默认值等）
@@ -25,6 +32,56 @@ func determineChatTriggerType(anthropicReq types.AnthropicRequest) string {
 	// CodeWhisperer API 只支持 MANUAL 类型
 	// 不存在 AUTO 类型，所有请求都应该使用 MANUAL
 	return "MANUAL"
+}
+
+func isChunkedPolicyTool(toolName string) bool {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	return name == "write" || name == "edit"
+}
+
+func appendToolDescriptionSuffix(toolName, description string) string {
+	var suffix string
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "write":
+		suffix = writeToolDescriptionSuffix
+	case "edit":
+		suffix = editToolDescriptionSuffix
+	default:
+		return description
+	}
+
+	if strings.Contains(description, suffix) {
+		return description
+	}
+
+	if description == "" {
+		return suffix
+	}
+
+	return description + "\n" + suffix
+}
+
+func shouldInjectChunkedPolicy(tools []types.AnthropicTool) bool {
+	for _, tool := range tools {
+		if isChunkedPolicyTool(tool.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendChunkedPolicyToSystemPrompt(systemContent string) string {
+	trimmed := strings.TrimSpace(systemContent)
+
+	if strings.Contains(trimmed, chunkedPolicyMarker) {
+		return trimmed
+	}
+
+	if trimmed == "" {
+		return chunkedPolicyReminder
+	}
+
+	return trimmed + "\n\n" + chunkedPolicyReminder
 }
 
 // validateCodeWhispererRequest 验证CodeWhisperer请求的完整性 (SOLID-SRP: 单一责任验证)
@@ -424,6 +481,7 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 	// 解析 thinking 配置
 	thinkingConfig := ParseThinkingConfig(anthropicReq.Thinking)
 	thinkingHint := GetThinkingHint(thinkingConfig)
+	injectChunkedPolicy := shouldInjectChunkedPolicy(anthropicReq.Tools)
 
 	// 设置代理相关字段 (基于参考文档的标准配置)
 	// 使用稳定的代理延续ID生成器，保持会话连续性 (KISS + DRY原则)
@@ -553,6 +611,7 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 
 			// 验证并处理工具描述
 			description := strings.TrimSpace(tool.Description)
+			description = appendToolDescriptionSuffix(tool.Name, description)
 
 			// 限制 description 长度为 10000 字符
 			if len(description) > config.MaxToolDescriptionLength {
@@ -601,10 +660,15 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 			}
 		}
 
+		systemContent := strings.TrimSpace(systemContentBuilder.String())
+		if injectChunkedPolicy {
+			systemContent = appendChunkedPolicyToSystemPrompt(systemContent)
+		}
+
 		// 如果有系统内容，添加到历史记录 (恢复v0.4结构化类型)
-		if systemContentBuilder.Len() > 0 {
+		if systemContent != "" {
 			userMsg := types.HistoryUserMessage{}
-			userMsg.UserInputMessage.Content = strings.TrimSpace(systemContentBuilder.String())
+			userMsg.UserInputMessage.Content = systemContent
 			userMsg.UserInputMessage.ModelId = modelId
 			userMsg.UserInputMessage.Origin = "AI_EDITOR" // v0.4兼容性：固定使用AI_EDITOR
 			history = append(history, userMsg)

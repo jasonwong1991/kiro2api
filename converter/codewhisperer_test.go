@@ -2,6 +2,7 @@ package converter
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -220,6 +221,157 @@ func TestBuildCodeWhispererRequest_WithTools(t *testing.T) {
 	require.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
 	assert.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools, 1)
 	assert.Equal(t, "get_weather", cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools[0].ToolSpecification.Name)
+}
+
+func TestBuildCodeWhispererRequest_AppendWriteEditToolDescriptionSuffixes(t *testing.T) {
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "Please edit files",
+			},
+		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "Write",
+				Description: "Write content to a file",
+				InputSchema: map[string]any{"type": "object"},
+			},
+			{
+				Name:        "Edit",
+				Description: "Edit content in a file",
+				InputSchema: map[string]any{"type": "object"},
+			},
+			{
+				Name:        "Read",
+				Description: "Read content from a file",
+				InputSchema: map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
+
+	var writeDescription string
+	var editDescription string
+	var readDescription string
+
+	for _, tool := range cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools {
+		switch strings.ToLower(tool.ToolSpecification.Name) {
+		case "write":
+			writeDescription = tool.ToolSpecification.Description
+		case "edit":
+			editDescription = tool.ToolSpecification.Description
+		case "read":
+			readDescription = tool.ToolSpecification.Description
+		}
+	}
+
+	assert.Contains(t, writeDescription, writeToolDescriptionSuffix)
+	assert.Contains(t, editDescription, editToolDescriptionSuffix)
+	assert.Equal(t, "Read content from a file", readDescription)
+}
+
+func TestBuildCodeWhispererRequest_AppendWriteEditToolDescriptionSuffixNoDuplicate(t *testing.T) {
+	existingWriteDescription := "Write content to a file\n" + writeToolDescriptionSuffix
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "Please write files",
+			},
+		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "Write",
+				Description: existingWriteDescription,
+				InputSchema: map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext)
+	require.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools, 1)
+
+	description := cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools[0].ToolSpecification.Description
+	assert.Equal(t, 1, strings.Count(description, writeToolDescriptionSuffix))
+}
+
+func TestBuildCodeWhispererRequest_AppendChunkedPolicyToSystemPrompt(t *testing.T) {
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		System: []types.AnthropicSystemMessage{
+			{
+				Type: "text",
+				Text: "You are a helpful assistant.",
+			},
+		},
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "Hello!",
+			},
+		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "Write",
+				Description: "Write file",
+				InputSchema: map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cwReq.ConversationState.History)
+	require.Greater(t, len(cwReq.ConversationState.History), 0)
+
+	firstUserMsg, ok := cwReq.ConversationState.History[0].(types.HistoryUserMessage)
+	require.True(t, ok)
+
+	content := firstUserMsg.UserInputMessage.Content
+	assert.Contains(t, content, "You are a helpful assistant.")
+	assert.Contains(t, content, chunkedPolicyMarker)
+	assert.Contains(t, content, "<system-reminder>")
+	assert.True(t, strings.HasSuffix(content, "</system-reminder>"))
+}
+
+func TestBuildCodeWhispererRequest_InjectChunkedPolicyWhenNoSystemPrompt(t *testing.T) {
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "Hello!",
+			},
+		},
+		Tools: []types.AnthropicTool{
+			{
+				Name:        "Edit",
+				Description: "Edit file",
+				InputSchema: map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cwReq.ConversationState.History)
+	require.Len(t, cwReq.ConversationState.History, 2)
+
+	firstUserMsg, ok := cwReq.ConversationState.History[0].(types.HistoryUserMessage)
+	require.True(t, ok)
+	assert.Equal(t, chunkedPolicyReminder, firstUserMsg.UserInputMessage.Content)
 }
 
 func TestBuildCodeWhispererRequest_FilterWebSearchTool(t *testing.T) {
