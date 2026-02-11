@@ -23,8 +23,8 @@ const (
 )
 
 // MinAvailableThreshold 最小可用余额阈值
-// 余额 <= 此值视为耗尽（即只有 > 0.5 才可用）
-const MinAvailableThreshold = 0.5
+// 余额 < 1 视为耗尽（即只有 >= 1 才可用）
+const MinAvailableThreshold = 1.0
 
 // TokenManager 简化的token管理器
 type TokenManager struct {
@@ -381,7 +381,7 @@ func (tm *TokenManager) GetBestTokenWithUsage() (*types.TokenWithUsage, error) {
 		UsageLimits:     bestToken.UsageInfo,
 		AvailableCount:  available, // 使用扣减后的余额
 		LastUsageCheck:  bestToken.LastUsed,
-		IsUsageExceeded: available <= 0,
+		IsUsageExceeded: available < MinAvailableThreshold,
 	}
 
 	logger.Debug("返回TokenWithUsage",
@@ -560,8 +560,8 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
 	if cached, exists := tm.cache.tokens[cacheKey]; exists {
 		// 注意：不检查 token 是否过期，因为过期的 token 可以刷新
-		// 只检查余额是否足够（> 阈值才可用，<= 阈值视为耗尽）
-		return cached.Available > MinAvailableThreshold
+		// 只检查余额是否足够（>= 阈值才可用，< 阈值视为耗尽）
+		return cached.Available >= MinAvailableThreshold
 	}
 
 	// 如果没有缓存且需要强制刷新
@@ -615,8 +615,8 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 				logger.Int("index", index),
 				logger.Float64("available", available))
 
-			// 返回健康状态（> 阈值才可用）
-			return available > MinAvailableThreshold
+			// 返回健康状态（>= 阈值才可用）
+			return available >= MinAvailableThreshold
 		} else {
 			logger.Debug("检查使用限制失败", logger.Int("index", index), logger.Err(checkErr))
 			// 如果是 token 失效错误，标记为失效
@@ -798,11 +798,9 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 					reason = "账号已失效"
 				} else if cached, exists := tm.cache.tokens[currentKey]; exists {
 					// 不再检查过期时间，因为过期的 token 会在使用时刷新
-					// 注意：先检查是否已耗尽（<=0），再检查是否快耗尽（< 阈值）
-					if cached.Available <= 0 {
-						reason = fmt.Sprintf("余额已耗尽 (当前: %.2f)", cached.Available)
-					} else if cached.Available < MinAvailableThreshold {
-						reason = fmt.Sprintf("余额不足 (当前: %.2f, 阈值: %.2f)", cached.Available, MinAvailableThreshold)
+					// 小于阈值视为已耗尽
+					if cached.Available < MinAvailableThreshold {
+						reason = fmt.Sprintf("余额已耗尽 (当前: %.2f, 阈值: %.2f)", cached.Available, MinAvailableThreshold)
 					}
 				} else {
 					reason = "缓存不存在"
@@ -870,8 +868,8 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 				continue
 			}
 
-			// 检查 token 是否可用（余额 > 阈值才可用）
-			if cached.Available > MinAvailableThreshold {
+			// 检查 token 是否可用（余额 >= 阈值才可用）
+			if cached.Available >= MinAvailableThreshold {
 				// 移动到下一个位置
 				tm.poolRoundRobin = (relativeIndex + 1) % poolSize
 
@@ -1074,8 +1072,8 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		// 优化：检查是否额度耗尽且未到重置日期
 		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
 		if cached, exists := tm.cache.tokens[cacheKey]; exists {
-			// 如果额度耗尽（available <= 0）且重置日期未到（在未来）
-			if cached.Available <= 0 && !cached.NextResetTime.IsZero() && time.Now().Before(cached.NextResetTime) {
+			// 如果额度耗尽（available < 阈值）且重置日期未到（在未来）
+			if cached.Available < MinAvailableThreshold && !cached.NextResetTime.IsZero() && time.Now().Before(cached.NextResetTime) {
 				logger.Info("跳过刷新：额度耗尽且未到重置日期",
 					logger.Int("config_index", i),
 					logger.String("auth_type", cfg.AuthType),
@@ -1184,8 +1182,8 @@ func (ct *CachedToken) IsUsable() bool {
 		return false
 	}
 
-	// 检查可用次数是否大于阈值（> 阈值才可用，<= 阈值视为耗尽）
-	return ct.Available > MinAvailableThreshold
+	// 检查可用次数是否达到阈值（>= 阈值才可用，< 阈值视为耗尽）
+	return ct.Available >= MinAvailableThreshold
 }
 
 // *** 已删除 set 和 updateLastUsed 方法 ***
@@ -1818,7 +1816,7 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 		nextResetTime time.Time
 		err           error
 		isInvalid     bool
-		isHealthy     bool // available > MinAvailableThreshold
+		isHealthy     bool // available >= MinAvailableThreshold
 	}
 
 	// 分批并发刷新，直到找到足够的健康账号
@@ -1863,7 +1861,7 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 						result.usageInfo = usage
 						result.available = CalculateAvailableCount(usage)
 						result.nextResetTime = GetNextResetTime(usage)
-						result.isHealthy = result.available > MinAvailableThreshold
+						result.isHealthy = result.available >= MinAvailableThreshold
 					} else if types.IsTokenInvalidError(checkErr) {
 						result.err = checkErr
 						result.isInvalid = true
@@ -1923,7 +1921,7 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 					logger.Int("index", result.index),
 					logger.Float64("available", result.available))
 			} else {
-				logger.Warn("初始化token但余额为0",
+				logger.Warn("初始化token但余额不足",
 					logger.Int("index", result.index),
 					logger.Float64("available", result.available))
 			}
@@ -1949,7 +1947,7 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 		logger.Int("total_configs", len(tm.configs)))
 
 	if successCount == 0 {
-		return fmt.Errorf("没有成功初始化任何健康token（余额>0）")
+		return fmt.Errorf("没有成功初始化任何健康token（余额>=1）")
 	}
 
 	return nil

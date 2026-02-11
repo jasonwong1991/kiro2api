@@ -19,6 +19,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const exhaustedThreshold = 1.0
+
 // extractRelevantHeaders 提取相关的请求头信息
 func extractRelevantHeaders(c *gin.Context) map[string]string {
 	relevantHeaders := map[string]string{}
@@ -569,7 +571,7 @@ func handleTokenPoolAPI(c *gin.Context) {
 			} else {
 				tokenData["error"] = "Token已失效"
 			}
-		} else if status.Available <= 0 {
+		} else if status.Available < exhaustedThreshold {
 			tokenData["status"] = "exhausted"
 		} else {
 			tokenData["status"] = "active"
@@ -596,7 +598,7 @@ func handleTokenPoolAPI(c *gin.Context) {
 					tokenData["usage_limits"] = map[string]any{
 						"total_limit":   totalLimit,
 						"current_usage": totalUsed,
-						"is_exceeded":   status.Available <= 0,
+						"is_exceeded":   status.Available < exhaustedThreshold,
 					}
 					break
 				}

@@ -281,7 +281,7 @@ class TokenDashboard {
 
     updateStatusBar(tokens) {
         const total = tokens.length;
-        const active = tokens.filter(t => !t.is_invalid && !t.disabled && t.available > 0).length;
+        const active = tokens.filter(t => !t.is_invalid && !t.disabled && t.available >= 1).length;
 
         document.getElementById('totalTokens').textContent = total;
         document.getElementById('activeTokens').textContent = active;
@@ -298,7 +298,7 @@ class TokenDashboard {
         if (token.disabled) return 'status-exhausted';
 
         const available = token.available || 0;
-        if (available === 0) return 'status-exhausted';
+        if (available < 1) return 'status-exhausted';
         if (available <= 5) return 'status-low';
         return 'status-active';
     }
@@ -309,7 +309,7 @@ class TokenDashboard {
         if (token.disabled) return '已禁用';
 
         const available = token.available || 0;
-        if (available === 0) return '已耗尽';
+        if (available < 1) return '已耗尽';
         if (available <= 5) return '即将耗尽';
         return '正常';
     }
