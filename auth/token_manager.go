@@ -578,7 +578,7 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 			logger.Debug("刷新账号失败", logger.Int("index", index), logger.Err(err))
 			// 如果是 token 失效错误，标记为失效
 			if types.IsTokenInvalidError(err) {
-				tm.invalidated[index] = time.Now()
+				tm.markTokenInvalidUnlocked(index, "health_check_refresh", err)
 			}
 			return false
 		}
@@ -621,7 +621,7 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 			logger.Debug("检查使用限制失败", logger.Int("index", index), logger.Err(checkErr))
 			// 如果是 token 失效错误，标记为失效
 			if types.IsTokenInvalidError(checkErr) {
-				tm.invalidated[index] = time.Now()
+				tm.markTokenInvalidUnlocked(index, "health_check_usage", checkErr)
 			}
 			return false
 		}
@@ -1062,6 +1062,8 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 	logger.Debug("刷新所有有效token",
 		logger.Int("refresh_count", len(refreshIndices)))
 
+	invalidDetected := false
+
 	// 刷新指定索引的 token
 	for _, i := range refreshIndices {
 		cfg := tm.configs[i]
@@ -1103,8 +1105,8 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 					logger.Int("config_index", i),
 					logger.String("auth_type", cfg.AuthType),
 					logger.Err(err))
-				// 记录失效时间
-				tm.invalidated[i] = time.Now()
+				tm.markTokenInvalidUnlocked(i, "refresh_cache_refresh", err)
+				invalidDetected = true
 			} else {
 				logger.Warn("刷新单个token失败",
 					logger.Int("config_index", i),
@@ -1133,8 +1135,8 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 					logger.Int("config_index", i),
 					logger.String("auth_type", cfg.AuthType),
 					logger.Err(checkErr))
-				// 记录失效时间
-				tm.invalidated[i] = time.Now()
+				tm.markTokenInvalidUnlocked(i, "refresh_cache_usage", checkErr)
+				invalidDetected = true
 			} else {
 				logger.Warn("检查使用限制失败", logger.Err(checkErr))
 			}
@@ -1159,16 +1161,9 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 			logger.String("next_reset", nextResetTime.Format(time.RFC3339)))
 	}
 
-	// 自动删除失效的账号（如果启用）
-	if tm.autoRemoveInvalid && len(tm.invalidated) > 0 {
-		removed, err := tm.removeInvalidTokensUnlocked()
-		if err != nil {
-			logger.Warn("自动删除失效账号失败", logger.Err(err))
-		} else if removed > 0 {
-			logger.Info("自动删除失效账号成功",
-				logger.Int("removed_count", removed),
-				logger.Int("remaining_count", len(tm.configs)))
-		}
+	// 刷新中检测到失效账号时，立即删除，避免占用轮询池
+	if invalidDetected {
+		tm.removeInvalidTokensImmediatelyUnlocked("refresh_cache")
 	}
 
 	tm.lastRefresh = time.Now()
@@ -1494,6 +1489,90 @@ func (tm *TokenManager) rebuildCacheAfterDeletion() {
 		logger.Int("new_cache_size", len(newCache)))
 }
 
+// removeFromActivePoolUnlocked 从活跃池移除指定账号（内部方法，调用者必须持有锁）
+func (tm *TokenManager) removeFromActivePoolUnlocked(index int) bool {
+	if len(tm.activePool) == 0 {
+		return false
+	}
+
+	for i, poolIndex := range tm.activePool {
+		if poolIndex != index {
+			continue
+		}
+
+		tm.activePool = append(tm.activePool[:i], tm.activePool[i+1:]...)
+		if len(tm.activePool) == 0 {
+			tm.poolRoundRobin = 0
+		} else if tm.poolRoundRobin >= len(tm.activePool) {
+			tm.poolRoundRobin = tm.poolRoundRobin % len(tm.activePool)
+		}
+
+		logger.Info("从活跃池中移除失效token",
+			logger.Int("index", index),
+			logger.Int("remaining_pool_size", len(tm.activePool)))
+		return true
+	}
+
+	return false
+}
+
+// markTokenInvalidUnlocked 标记 token 失效并移出活跃池（内部方法，调用者必须持有锁）
+func (tm *TokenManager) markTokenInvalidUnlocked(index int, source string, err error) bool {
+	if index < 0 || index >= len(tm.configs) {
+		logger.Warn("尝试标记无效索引的token为失效",
+			logger.Int("index", index),
+			logger.Int("configs_len", len(tm.configs)),
+			logger.String("source", source))
+		return false
+	}
+
+	if _, exists := tm.invalidated[index]; exists {
+		// 即使已标记失效，也确保不占用活跃池
+		tm.removeFromActivePoolUnlocked(index)
+		return false
+	}
+
+	tm.invalidated[index] = time.Now()
+	tm.removeFromActivePoolUnlocked(index)
+
+	if err != nil {
+		logger.Warn("标记token为失效",
+			logger.Int("index", index),
+			logger.String("auth_type", tm.configs[index].AuthType),
+			logger.String("source", source),
+			logger.Err(err))
+	} else {
+		logger.Warn("标记token为失效",
+			logger.Int("index", index),
+			logger.String("auth_type", tm.configs[index].AuthType),
+			logger.String("source", source))
+	}
+
+	return true
+}
+
+// removeInvalidTokensImmediatelyUnlocked 立即删除所有失效 token（内部方法，调用者必须持有锁）
+func (tm *TokenManager) removeInvalidTokensImmediatelyUnlocked(trigger string) {
+	if len(tm.invalidated) == 0 {
+		return
+	}
+
+	removed, err := tm.removeInvalidTokensUnlocked()
+	if err != nil {
+		logger.Warn("立即删除失效账号失败",
+			logger.String("trigger", trigger),
+			logger.Err(err))
+		return
+	}
+
+	if removed > 0 {
+		logger.Info("立即删除失效账号完成",
+			logger.String("trigger", trigger),
+			logger.Int("removed_count", removed),
+			logger.Int("remaining_count", len(tm.configs)))
+	}
+}
+
 // MarkTokenInvalid 标记指定索引的token为失效
 // 用于在请求时检测到token失效（如401/403错误）时立即标记
 // 这样可以避免后续请求继续使用已失效的token
@@ -1501,40 +1580,8 @@ func (tm *TokenManager) MarkTokenInvalid(index int) {
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
 
-	if index < 0 || index >= len(tm.configs) {
-		logger.Warn("尝试标记无效索引的token为失效",
-			logger.Int("index", index),
-			logger.Int("configs_len", len(tm.configs)))
-		return
-	}
-
-	// 检查是否已经标记为失效
-	if _, exists := tm.invalidated[index]; exists {
-		logger.Debug("token已经标记为失效，跳过",
-			logger.Int("index", index))
-		return
-	}
-
-	// 标记为失效
-	tm.invalidated[index] = time.Now()
-
-	logger.Warn("标记token为失效",
-		logger.Int("index", index),
-		logger.String("auth_type", tm.configs[index].AuthType))
-
-	// 如果使用活跃池策略，尝试从活跃池中移除该token
-	if tm.batchSize > 0 {
-		for i, poolIndex := range tm.activePool {
-			if poolIndex == index {
-				// 从活跃池中移除
-				tm.activePool = append(tm.activePool[:i], tm.activePool[i+1:]...)
-				logger.Info("从活跃池中移除失效token",
-					logger.Int("index", index),
-					logger.Int("remaining_pool_size", len(tm.activePool)))
-				break
-			}
-		}
-	}
+	tm.markTokenInvalidUnlocked(index, "request_invalid", nil)
+	tm.removeInvalidTokensImmediatelyUnlocked("request_invalid")
 }
 
 // RemoveToken 删除单个 token（仅失效的可删除）
@@ -1821,7 +1868,8 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 
 	// 分批并发刷新，直到找到足够的健康账号
 	successCount := 0
-	healthyIndices := make([]int, 0, initCount)
+	healthyTokenSet := make(map[string]bool, initCount)
+	invalidDetected := false
 	taskOffset := 0
 
 	for successCount < initCount && taskOffset < len(tasks) {
@@ -1890,7 +1938,8 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 					logger.Warn("初始化时检测到token失效",
 						logger.Int("index", result.index),
 						logger.Err(result.err))
-					tm.invalidated[result.index] = time.Now()
+					tm.markTokenInvalidUnlocked(result.index, "initialize_batch", result.err)
+					invalidDetected = true
 				} else {
 					logger.Warn("初始化刷新token失败",
 						logger.Int("index", result.index),
@@ -1914,9 +1963,7 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 
 			if result.isHealthy {
 				successCount++
-				if tm.batchSize > 0 {
-					healthyIndices = append(healthyIndices, result.index)
-				}
+				healthyTokenSet[result.token.RefreshToken] = true
 				logger.Info("成功初始化健康token",
 					logger.Int("index", result.index),
 					logger.Float64("available", result.available))
@@ -1936,6 +1983,22 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 
 	// 更新活跃池
 	tm.mutex.Lock()
+	if invalidDetected {
+		tm.removeInvalidTokensImmediatelyUnlocked("initialize_batch")
+	}
+
+	healthyIndices := make([]int, 0, initCount)
+	if tm.batchSize > 0 {
+		for i, cfg := range tm.configs {
+			if healthyTokenSet[cfg.RefreshToken] {
+				healthyIndices = append(healthyIndices, i)
+				if len(healthyIndices) >= tm.batchSize {
+					break
+				}
+			}
+		}
+	}
+
 	tm.activePool = healthyIndices
 	tm.lastRefresh = time.Now()
 	tm.mutex.Unlock()
@@ -1983,7 +2046,8 @@ func (tm *TokenManager) verifyLowBalanceToken(index int) {
 			logger.Err(err))
 		if types.IsTokenInvalidError(err) {
 			tm.mutex.Lock()
-			tm.invalidated[index] = time.Now()
+			tm.markTokenInvalidUnlocked(index, "low_balance_refresh", err)
+			tm.removeInvalidTokensImmediatelyUnlocked("low_balance_refresh")
 			tm.mutex.Unlock()
 		}
 		return
@@ -1997,7 +2061,8 @@ func (tm *TokenManager) verifyLowBalanceToken(index int) {
 			logger.Err(checkErr))
 		if types.IsTokenInvalidError(checkErr) {
 			tm.mutex.Lock()
-			tm.invalidated[index] = time.Now()
+			tm.markTokenInvalidUnlocked(index, "low_balance_usage", checkErr)
+			tm.removeInvalidTokensImmediatelyUnlocked("low_balance_usage")
 			tm.mutex.Unlock()
 		}
 		return
@@ -2102,7 +2167,8 @@ func (tm *TokenManager) asyncRefreshToken(index int) {
 				logger.Err(err))
 			if types.IsTokenInvalidError(err) {
 				tm.mutex.Lock()
-				tm.invalidated[index] = time.Now()
+				tm.markTokenInvalidUnlocked(index, "async_refresh", err)
+				tm.removeInvalidTokensImmediatelyUnlocked("async_refresh")
 				tm.mutex.Unlock()
 			}
 			tm.refreshManager.CompleteRefresh(index, nil, err)
@@ -2117,7 +2183,8 @@ func (tm *TokenManager) asyncRefreshToken(index int) {
 				logger.Err(checkErr))
 			if types.IsTokenInvalidError(checkErr) {
 				tm.mutex.Lock()
-				tm.invalidated[index] = time.Now()
+				tm.markTokenInvalidUnlocked(index, "async_refresh_usage", checkErr)
+				tm.removeInvalidTokensImmediatelyUnlocked("async_refresh_usage")
 				tm.mutex.Unlock()
 			}
 			tm.refreshManager.CompleteRefresh(index, nil, checkErr)
@@ -2196,8 +2263,8 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 				logger.Int("index", index),
 				logger.String("auth_type", cfg.AuthType),
 				logger.Err(err))
-			// 记录失效时间
-			tm.invalidated[index] = time.Now()
+			tm.markTokenInvalidUnlocked(index, "refresh_token", err)
+			tm.removeInvalidTokensImmediatelyUnlocked("refresh_token")
 		}
 
 		return &RefreshResult{
@@ -2226,8 +2293,8 @@ func (tm *TokenManager) RefreshToken(index int) (*RefreshResult, error) {
 				logger.Int("index", index),
 				logger.String("auth_type", cfg.AuthType),
 				logger.Err(checkErr))
-			// 记录失效时间
-			tm.invalidated[index] = time.Now()
+			tm.markTokenInvalidUnlocked(index, "refresh_token_usage", checkErr)
+			tm.removeInvalidTokensImmediatelyUnlocked("refresh_token_usage")
 
 			return &RefreshResult{
 				Index:   index,
@@ -2399,6 +2466,7 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 
 	results := make([]RefreshResult, 0, len(invalidResults)+len(taskResults))
 	results = append(results, invalidResults...)
+	invalidDetected := false
 
 	tm.mutex.Lock()
 	for _, tr := range taskResults {
@@ -2407,7 +2475,8 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 				logger.Warn("刷新时检测到token失效",
 					logger.Int("index", tr.index),
 					logger.Err(tr.err))
-				tm.invalidated[tr.index] = time.Now()
+				tm.markTokenInvalidUnlocked(tr.index, "refresh_tokens", tr.err)
+				invalidDetected = true
 			}
 
 			results = append(results, RefreshResult{
@@ -2448,6 +2517,12 @@ func (tm *TokenManager) RefreshTokens(indices []int) ([]RefreshResult, error) {
 		})
 	}
 	tm.mutex.Unlock()
+
+	if invalidDetected {
+		tm.mutex.Lock()
+		tm.removeInvalidTokensImmediatelyUnlocked("refresh_tokens")
+		tm.mutex.Unlock()
+	}
 
 	successCount := 0
 	for _, r := range results {
@@ -2648,6 +2723,7 @@ func (tm *TokenManager) refreshActivePoolTokens() {
 
 	// 收集结果并持锁更新缓存
 	refreshCount := 0
+	invalidDetected := false
 	tm.mutex.Lock()
 	for result := range resultChan {
 		if result.err != nil {
@@ -2655,7 +2731,8 @@ func (tm *TokenManager) refreshActivePoolTokens() {
 				logger.Int("config_index", result.index),
 				logger.Err(result.err))
 			if types.IsTokenInvalidError(result.err) {
-				tm.invalidated[result.index] = time.Now()
+				tm.markTokenInvalidUnlocked(result.index, "periodic_refresh", result.err)
+				invalidDetected = true
 			}
 			continue
 		}
@@ -2682,6 +2759,12 @@ func (tm *TokenManager) refreshActivePoolTokens() {
 			logger.Float64("available", result.available))
 	}
 	tm.mutex.Unlock()
+
+	if invalidDetected {
+		tm.mutex.Lock()
+		tm.removeInvalidTokensImmediatelyUnlocked("periodic_refresh")
+		tm.mutex.Unlock()
+	}
 
 	if refreshCount > 0 {
 		logger.Info("活跃池定时刷新完成",
