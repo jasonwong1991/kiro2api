@@ -18,6 +18,18 @@ func TestModelMap_ClaudeSonnet45(t *testing.T) {
 	assert.Equal(t, "claude-sonnet-4.5", model)
 }
 
+func TestModelMap_ClaudeSonnet46(t *testing.T) {
+	model, exists := ModelMap["claude-sonnet-4-6"]
+	assert.True(t, exists)
+	assert.Equal(t, "claude-sonnet-4.6", model)
+}
+
+func TestModelMap_ClaudeSonnet46Thinking(t *testing.T) {
+	model, exists := ModelMap["claude-sonnet-4-6-thinking"]
+	assert.True(t, exists)
+	assert.Equal(t, "claude-sonnet-4.6", model)
+}
+
 func TestModelMap_ClaudeSonnet4(t *testing.T) {
 	model, exists := ModelMap["claude-sonnet-4-20250514"]
 	assert.True(t, exists)
@@ -45,6 +57,7 @@ func TestModelMap_AllModelsHaveMapping(t *testing.T) {
 	// 确保所有模型都有对应的映射
 	expectedModels := []string{
 		"claude-opus-4-6",
+		"claude-sonnet-4-6",
 		"claude-sonnet-4-5-20250929",
 		"claude-sonnet-4-20250514",
 		"claude-3-7-sonnet-20250219",
