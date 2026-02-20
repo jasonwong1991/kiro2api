@@ -160,6 +160,62 @@ func TestRequestContext_GetTokenAndBody(t *testing.T) {
 	}
 }
 
+func TestRequestContext_GetBody(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/test", bytes.NewBufferString(`{"hello":"world"}`))
+
+	reqCtx := &RequestContext{
+		GinContext:  c,
+		RequestType: "openai",
+	}
+
+	body, err := reqCtx.GetBody()
+	assert.NoError(t, err)
+	assert.Equal(t, `{"hello":"world"}`, string(body))
+}
+
+func TestIsTokenInvalidUpstreamError(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		expected   bool
+	}{
+		{
+			name:       "400 + temporarily is suspended 文本",
+			statusCode: http.StatusBadRequest,
+			body:       `{"message":"Your User ID temporarily is suspended."}`,
+			expected:   true,
+		},
+		{
+			name:       "400 + TEMPORARILY_SUSPENDED 代码",
+			statusCode: http.StatusBadRequest,
+			body:       `{"reason":"TEMPORARILY_SUSPENDED"}`,
+			expected:   true,
+		},
+		{
+			name:       "400 普通错误不应判定为token失效",
+			statusCode: http.StatusBadRequest,
+			body:       `{"message":"invalid request body"}`,
+			expected:   false,
+		},
+		{
+			name:       "200 即使包含关键词也不是token失效",
+			statusCode: http.StatusOK,
+			body:       `{"message":"temporarily is suspended"}`,
+			expected:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := isTokenInvalidUpstreamError(tt.statusCode, []byte(tt.body))
+			assert.Equal(t, tt.expected, actual)
+		})
+	}
+}
+
 func TestHandleRequestBuildError(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

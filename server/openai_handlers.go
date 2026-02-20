@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"kiro2api/auth"
 	"kiro2api/config"
 	"kiro2api/converter"
 	"kiro2api/logger"
@@ -19,8 +20,8 @@ import (
 )
 
 // handleOpenAINonStreamRequest 处理OpenAI非流式请求
-func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, token types.TokenInfo) {
-	resp, err := executeCodeWhispererRequest(c, anthropicReq, token, false)
+func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, authService *auth.AuthService) {
+	resp, _, err := execCWRequestWithRetry(c, anthropicReq, authService, false)
 	if err != nil {
 		return
 	}
@@ -164,7 +165,7 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 }
 
 // handleOpenAIStreamRequest 处理OpenAI流式请求
-func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, token types.TokenInfo) {
+func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, authService *auth.AuthService) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -174,7 +175,7 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 	// 注入 message_id，便于统一日志会话标识
 	c.Set("message_id", messageId)
 
-	resp, err := executeCodeWhispererRequest(c, anthropicReq, token, true)
+	resp, _, err := execCWRequestWithRetry(c, anthropicReq, authService, true)
 	if err != nil {
 		return
 	}

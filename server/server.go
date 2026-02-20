@@ -290,9 +290,9 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 			RequestType: "OpenAI",
 		}
 
-		tokenInfo, body, err := reqCtx.GetTokenAndBody()
+		body, err := reqCtx.GetBody()
 		if err != nil {
-			return // 错误已在GetTokenAndBody中处理
+			return // 错误已在GetBody中处理
 		}
 
 		var openaiReq types.OpenAIRequest
@@ -316,10 +316,10 @@ func StartServer(port string, clientToken string, adminToken string, isDefaultCl
 		anthropicReq := converter.ConvertOpenAIToAnthropic(openaiReq)
 
 		if anthropicReq.Stream {
-			handleOpenAIStreamRequest(c, anthropicReq, tokenInfo)
+			handleOpenAIStreamRequest(c, anthropicReq, authService)
 			return
 		}
-		handleOpenAINonStreamRequest(c, anthropicReq, tokenInfo)
+		handleOpenAINonStreamRequest(c, anthropicReq, authService)
 	})
 
 	r.NoRoute(func(c *gin.Context) {

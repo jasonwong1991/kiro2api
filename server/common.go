@@ -215,6 +215,50 @@ func isRetryableStatusCode(statusCode int) bool {
 	return false
 }
 
+// isTokenInvalidUpstreamError 判断上游错误是否属于 token 失效场景
+// 支持 401/403 以及包含失效关键词的其它 4xx/5xx 响应。
+func isTokenInvalidUpstreamError(statusCode int, responseBody []byte) bool {
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return true
+	}
+	if statusCode < http.StatusBadRequest {
+		return false
+	}
+
+	body := strings.ToLower(string(responseBody))
+	patterns := []string{
+		"invalid_grant",
+		"invalid_token",
+		"token expired",
+		"token has expired",
+		"token is expired",
+		"token is invalid",
+		"expiredtoken",
+		"invalidtoken",
+		"bad credentials",
+		"unrecognizedclient",
+		"unauthorizedclient",
+		"unauthorized",
+		"forbidden",
+		"access denied",
+		"permission denied",
+		"temporarily is suspended",
+		"temporarily suspended",
+		"permanently is suspended",
+		"permanently suspended",
+		"temporarily_suspended",
+		"permanently_suspended",
+		"suspended",
+		"security token included in the request is invalid",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(body, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 // executeCodeWhispererRequestWithRetry 带重试的请求执行（换 token 重试）
 // 返回: response, 使用的tokenInfo, error
 func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.AnthropicRequest, authService *auth.AuthService, isStream bool) (*http.Response, types.TokenInfo, error) {
@@ -313,14 +357,13 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 			return nil, tokenInfo, err
 		}
 
-		// 检查是否可重试的错误状态码
-		if isRetryableStatusCode(resp.StatusCode) && attempt < config.RetryMaxAttempts {
+		// 请求失败时，优先处理 token 失效换 token 重试（不局限于 RetryableStatusCodes）
+		if resp.StatusCode != http.StatusOK && attempt < config.RetryMaxAttempts {
 			cancel() // 显式释放 context
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 
-			// *** 新增：检测401/403错误，标记token为失效 ***
-			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			if isTokenInvalidUpstreamError(resp.StatusCode, body) {
 				logger.Warn("检测到token失效错误，标记token为失效并换token重试",
 					addReqFields(c,
 						logger.Int("attempt", attempt),
@@ -329,26 +372,40 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 						logger.String("response_body", string(body)),
 					)...)
 				authService.GetTokenManager().MarkTokenInvalid(tokenInfo.ConfigIndex)
-			} else {
+				time.Sleep(config.RetryDelay)
+				continue
+			}
+
+			if isRetryableStatusCode(resp.StatusCode) {
 				logger.Warn("收到可重试错误，换token重试",
 					addReqFields(c,
 						logger.Int("attempt", attempt),
 						logger.Int("status_code", resp.StatusCode),
 						logger.String("response_body", string(body)),
 					)...)
+				time.Sleep(config.RetryDelay)
+				continue
 			}
 
-			time.Sleep(config.RetryDelay)
-			continue
+			// 不可重试错误：恢复响应体，交给统一错误处理
+			resp.Body = io.NopCloser(bytes.NewReader(body))
 		}
 
 		// 不可重试或已达最大重试次数，检查错误
+		isTokenInvalidFinal := false
+		if resp.StatusCode != http.StatusOK && attempt == config.RetryMaxAttempts {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			isTokenInvalidFinal = isTokenInvalidUpstreamError(resp.StatusCode, body)
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+		}
+
 		if handleCodeWhispererError(c, resp) {
 			cancel() // 显式释放 context
 			resp.Body.Close()
 
-			// *** 新增：如果是401/403错误且未重试，也标记token为失效 ***
-			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			// 终态如果确认是 token 失效，也标记失效（便于管理页可见）
+			if isTokenInvalidFinal || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				logger.Warn("最终错误为token失效，标记token为失效",
 					addReqFields(c,
 						logger.Int("attempt", attempt),
@@ -670,6 +727,44 @@ type RequestContext struct {
 	RequestType string // "anthropic" 或 "openai"
 }
 
+// readBodyAndLog 读取请求体并记录统一日志。
+func (rc *RequestContext) readBodyAndLog(extraFields ...logger.Field) ([]byte, error) {
+	// 读取请求体
+	body, err := rc.GinContext.GetRawData()
+	if err != nil {
+		// 区分客户端断开连接和其他错误
+		if err == io.EOF || err.Error() == "unexpected EOF" || strings.Contains(err.Error(), "connection reset") {
+			logger.Warn("客户端连接中断", logger.Err(err), logger.String("client_ip", rc.GinContext.ClientIP()))
+		} else {
+			logger.Error("读取请求体失败", logger.Err(err))
+		}
+		respondError(rc.GinContext, http.StatusBadRequest, "读取请求体失败: %v", err)
+		return nil, err
+	}
+
+	fields := []logger.Field{
+		logger.String("direction", "client_request"),
+		logger.String("body", string(body)),
+		logger.Int("body_size", len(body)),
+		logger.String("remote_addr", rc.GinContext.ClientIP()),
+		logger.String("user_agent", rc.GinContext.GetHeader("User-Agent")),
+	}
+	if len(extraFields) > 0 {
+		fields = append(fields, extraFields...)
+	}
+
+	// 记录请求日志
+	logger.Debug(fmt.Sprintf("收到%s请求", rc.RequestType),
+		addReqFields(rc.GinContext, fields...)...)
+
+	return body, nil
+}
+
+// GetBody 通用请求体读取（不预先获取 token，适用于请求内部自行重试换 token 的场景）。
+func (rc *RequestContext) GetBody() ([]byte, error) {
+	return rc.readBodyAndLog()
+}
+
 // GetTokenAndBody 通用的token获取和请求体读取
 // 返回: tokenInfo, requestBody, error
 func (rc *RequestContext) GetTokenAndBody() (types.TokenInfo, []byte, error) {
@@ -681,28 +776,10 @@ func (rc *RequestContext) GetTokenAndBody() (types.TokenInfo, []byte, error) {
 		return types.TokenInfo{}, nil, err
 	}
 
-	// 读取请求体
-	body, err := rc.GinContext.GetRawData()
+	body, err := rc.readBodyAndLog()
 	if err != nil {
-		// 区分客户端断开连接和其他错误
-		if err == io.EOF || err.Error() == "unexpected EOF" || strings.Contains(err.Error(), "connection reset") {
-			logger.Warn("客户端连接中断", logger.Err(err), logger.String("client_ip", rc.GinContext.ClientIP()))
-		} else {
-			logger.Error("读取请求体失败", logger.Err(err))
-		}
-		respondError(rc.GinContext, http.StatusBadRequest, "读取请求体失败: %v", err)
 		return types.TokenInfo{}, nil, err
 	}
-
-	// 记录请求日志
-	logger.Debug(fmt.Sprintf("收到%s请求", rc.RequestType),
-		addReqFields(rc.GinContext,
-			logger.String("direction", "client_request"),
-			logger.String("body", string(body)),
-			logger.Int("body_size", len(body)),
-			logger.String("remote_addr", rc.GinContext.ClientIP()),
-			logger.String("user_agent", rc.GinContext.GetHeader("User-Agent")),
-		)...)
 
 	return tokenInfo, body, nil
 }
@@ -718,29 +795,10 @@ func (rc *RequestContext) GetTokenWithUsageAndBody() (*types.TokenWithUsage, []b
 		return nil, nil, err
 	}
 
-	// 读取请求体
-	body, err := rc.GinContext.GetRawData()
+	body, err := rc.readBodyAndLog(logger.Float64("available_count", tokenWithUsage.AvailableCount))
 	if err != nil {
-		// 区分客户端断开连接和其他错误
-		if err == io.EOF || err.Error() == "unexpected EOF" || strings.Contains(err.Error(), "connection reset") {
-			logger.Warn("客户端连接中断", logger.Err(err), logger.String("client_ip", rc.GinContext.ClientIP()))
-		} else {
-			logger.Error("读取请求体失败", logger.Err(err))
-		}
-		respondError(rc.GinContext, http.StatusBadRequest, "读取请求体失败: %v", err)
 		return nil, nil, err
 	}
-
-	// 记录请求日志
-	logger.Debug(fmt.Sprintf("收到%s请求", rc.RequestType),
-		addReqFields(rc.GinContext,
-			logger.String("direction", "client_request"),
-			logger.String("body", string(body)),
-			logger.Int("body_size", len(body)),
-			logger.String("remote_addr", rc.GinContext.ClientIP()),
-			logger.String("user_agent", rc.GinContext.GetHeader("User-Agent")),
-			logger.Float64("available_count", tokenWithUsage.AvailableCount),
-		)...)
 
 	return tokenWithUsage, body, nil
 }

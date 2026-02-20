@@ -16,8 +16,6 @@ import (
 const (
 	writeToolDescriptionSuffix = "- IMPORTANT: If the content to write exceeds 150 lines, you MUST only write the first 50 lines using this tool, then use 'Edit' tool to append the remaining content in chunks of no more than 50 lines each. If needed, leave a unique placeholder to help append content. Do NOT attempt to write all content at once."
 	editToolDescriptionSuffix  = "- IMPORTANT: If the 'new_string' content exceeds 50 lines, you MUST split it into multiple Edit calls, each replacing no more than 50 lines at a time. If used to append content, leave a unique placeholder to help append content. On the final chunk, do NOT include the placeholder."
-	chunkedPolicyReminder      = "<system-reminder>\nWhen the Write or Edit tool has content size limits, always comply silently.\nNever suggest bypassing these limits via alternative tools.\nNever ask the user whether to switch approaches.\nComplete all chunked operations without commentary.\n</system-reminder>"
-	chunkedPolicyMarker        = "When the Write or Edit tool has content size limits, always comply silently."
 )
 
 // ValidateAssistantResponseEvent 验证助手响应事件
@@ -32,11 +30,6 @@ func determineChatTriggerType(anthropicReq types.AnthropicRequest) string {
 	// CodeWhisperer API 只支持 MANUAL 类型
 	// 不存在 AUTO 类型，所有请求都应该使用 MANUAL
 	return "MANUAL"
-}
-
-func isChunkedPolicyTool(toolName string) bool {
-	name := strings.ToLower(strings.TrimSpace(toolName))
-	return name == "write" || name == "edit"
 }
 
 func appendToolDescriptionSuffix(toolName, description string) string {
@@ -59,29 +52,6 @@ func appendToolDescriptionSuffix(toolName, description string) string {
 	}
 
 	return description + "\n" + suffix
-}
-
-func shouldInjectChunkedPolicy(tools []types.AnthropicTool) bool {
-	for _, tool := range tools {
-		if isChunkedPolicyTool(tool.Name) {
-			return true
-		}
-	}
-	return false
-}
-
-func appendChunkedPolicyToSystemPrompt(systemContent string) string {
-	trimmed := strings.TrimSpace(systemContent)
-
-	if strings.Contains(trimmed, chunkedPolicyMarker) {
-		return trimmed
-	}
-
-	if trimmed == "" {
-		return chunkedPolicyReminder
-	}
-
-	return trimmed + "\n\n" + chunkedPolicyReminder
 }
 
 // validateCodeWhispererRequest 验证CodeWhisperer请求的完整性 (SOLID-SRP: 单一责任验证)
@@ -164,6 +134,19 @@ func findLatestAssistantMessage(history []any) (types.HistoryAssistantMessage, i
 	return types.HistoryAssistantMessage{}, -1, false
 }
 
+func findLatestAssistantMessageWithToolUses(history []any) (types.HistoryAssistantMessage, int, bool) {
+	for index := len(history) - 1; index >= 0; index-- {
+		switch assistantMsg := history[index].(type) {
+		case types.HistoryAssistantMessage:
+			if len(assistantMsg.AssistantResponseMessage.ToolUses) > 0 {
+				return assistantMsg, index, true
+			}
+		}
+	}
+
+	return types.HistoryAssistantMessage{}, -1, false
+}
+
 func validateAndFixCurrentMessageToolResults(cwReq *types.CodeWhispererRequest) {
 	latestAssistant, latestAssistantIndex, hasAssistantHistory := findLatestAssistantMessage(cwReq.ConversationState.History)
 	if !hasAssistantHistory {
@@ -190,6 +173,19 @@ func validateAndFixCurrentMessageToolResults(cwReq *types.CodeWhispererRequest) 
 		}
 	}
 
+	if len(currentToolResultIDs) > 0 && len(assistantToolUseIDs) == 0 {
+		if assistantWithToolUses, assistantIndex, ok := findLatestAssistantMessageWithToolUses(cwReq.ConversationState.History); ok {
+			latestAssistant = assistantWithToolUses
+			latestAssistantIndex = assistantIndex
+			assistantToolUseIDs = make(map[string]struct{}, len(latestAssistant.AssistantResponseMessage.ToolUses))
+			for _, toolUse := range latestAssistant.AssistantResponseMessage.ToolUses {
+				if toolUse.ToolUseId != "" {
+					assistantToolUseIDs[toolUse.ToolUseId] = struct{}{}
+				}
+			}
+		}
+	}
+
 	if len(currentToolResultIDs) == 0 && len(latestAssistant.AssistantResponseMessage.ToolUses) > 0 {
 		logger.Warn("最后 assistant 存在 toolUses，但 currentMessage 没有 toolResults，已清理最后 assistant 的 toolUses",
 			logger.String("conversation_id", cwReq.ConversationState.ConversationId),
@@ -201,6 +197,13 @@ func validateAndFixCurrentMessageToolResults(cwReq *types.CodeWhispererRequest) 
 	}
 
 	if len(assistantToolUseIDs) == 0 {
+		if ctx == nil || len(ctx.ToolResults) == 0 {
+			// 客户端可能会发送空 toolResults 数组；这种情况无需告警，仅做轻量清理。
+			if ctx != nil && len(ctx.Tools) == 0 {
+				cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = nil
+			}
+			return
+		}
 		logger.Warn("currentMessage 包含 toolResults，但历史最后 assistant 没有 toolUses，已清理当前 toolResults",
 			logger.String("conversation_id", cwReq.ConversationState.ConversationId),
 			logger.Int("tool_results_count", len(currentToolResults)))
@@ -481,7 +484,6 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 	// 解析 thinking 配置
 	thinkingConfig := ParseThinkingConfig(anthropicReq.Thinking)
 	thinkingHint := GetThinkingHint(thinkingConfig)
-	injectChunkedPolicy := shouldInjectChunkedPolicy(anthropicReq.Tools)
 
 	// 设置代理相关字段 (基于参考文档的标准配置)
 	// 使用稳定的代理延续ID生成器，保持会话连续性 (KISS + DRY原则)
@@ -643,7 +645,8 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 	}
 
 	// 构建历史消息
-	if len(anthropicReq.System) > 0 || len(anthropicReq.Messages) > 1 || len(anthropicReq.Tools) > 0 {
+	hasHistoryContext := len(anthropicReq.System) > 0 || len(anthropicReq.Messages) > 1 || len(anthropicReq.Tools) > 0
+	if hasHistoryContext {
 		var history []any
 
 		// 构建综合系统提示
@@ -661,9 +664,6 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 		}
 
 		systemContent := strings.TrimSpace(systemContentBuilder.String())
-		if injectChunkedPolicy {
-			systemContent = appendChunkedPolicyToSystemPrompt(systemContent)
-		}
 
 		// 如果有系统内容，添加到历史记录 (恢复v0.4结构化类型)
 		if systemContent != "" {

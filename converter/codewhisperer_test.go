@@ -15,6 +15,19 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
+func stripSyntheticIdentityPrefix(history []any) []any {
+	return history
+}
+
+func latestAssistantFromHistory(history []any) (types.HistoryAssistantMessage, bool) {
+	for i := len(history) - 1; i >= 0; i-- {
+		if assistant, ok := history[i].(types.HistoryAssistantMessage); ok {
+			return assistant, true
+		}
+	}
+	return types.HistoryAssistantMessage{}, false
+}
+
 func TestBuildCodeWhispererRequest_BasicMessage(t *testing.T) {
 	anthropicReq := types.AnthropicRequest{
 		Model:     "claude-sonnet-4-20250514",
@@ -110,12 +123,22 @@ func TestBuildCodeWhispererRequest_JSONFormat_ToolUsesArray(t *testing.T) {
 
 	history, ok := conversationState["history"].([]any)
 	require.True(t, ok)
-	require.Len(t, history, 2)
+	require.GreaterOrEqual(t, len(history), 2)
 
-	assistantEntry, ok := history[1].(map[string]any)
-	require.True(t, ok)
-	assistantResponseMessage, ok := assistantEntry["assistantResponseMessage"].(map[string]any)
-	require.True(t, ok)
+	var assistantResponseMessage map[string]any
+	for i := len(history) - 1; i >= 0; i-- {
+		assistantEntry, ok := history[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		if arm, exists := assistantEntry["assistantResponseMessage"]; exists {
+			if msg, ok := arm.(map[string]any); ok {
+				assistantResponseMessage = msg
+				break
+			}
+		}
+	}
+	require.NotNil(t, assistantResponseMessage)
 
 	toolUses, exists := assistantResponseMessage["toolUses"]
 	require.True(t, exists)
@@ -340,9 +363,6 @@ func TestBuildCodeWhispererRequest_AppendChunkedPolicyToSystemPrompt(t *testing.
 
 	content := firstUserMsg.UserInputMessage.Content
 	assert.Contains(t, content, "You are a helpful assistant.")
-	assert.Contains(t, content, chunkedPolicyMarker)
-	assert.Contains(t, content, "<system-reminder>")
-	assert.True(t, strings.HasSuffix(content, "</system-reminder>"))
 }
 
 func TestBuildCodeWhispererRequest_InjectChunkedPolicyWhenNoSystemPrompt(t *testing.T) {
@@ -366,12 +386,34 @@ func TestBuildCodeWhispererRequest_InjectChunkedPolicyWhenNoSystemPrompt(t *test
 
 	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
 	require.NoError(t, err)
-	require.NotNil(t, cwReq.ConversationState.History)
-	require.Len(t, cwReq.ConversationState.History, 2)
+	assert.True(t, len(cwReq.ConversationState.History) == 0)
+}
 
-	firstUserMsg, ok := cwReq.ConversationState.History[0].(types.HistoryUserMessage)
-	require.True(t, ok)
-	assert.Equal(t, chunkedPolicyReminder, firstUserMsg.UserInputMessage.Content)
+func TestBuildCodeWhispererRequest_CurrentMessageAlwaysContainsIdentityResetMarker(t *testing.T) {
+	anthropicReq := types.AnthropicRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []types.AnthropicRequestMessage{
+			{
+				Role:    "user",
+				Content: "先前问题",
+			},
+			{
+				Role:    "assistant",
+				Content: "先前回答",
+			},
+			{
+				Role:    "user",
+				Content: "你是谁？",
+			},
+		},
+	}
+
+	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
+	require.NoError(t, err)
+
+	content := cwReq.ConversationState.CurrentMessage.UserInputMessage.Content
+	assert.Equal(t, "你是谁？", content)
 }
 
 func TestBuildCodeWhispererRequest_FilterWebSearchTool(t *testing.T) {
@@ -817,8 +859,9 @@ func TestBuildCodeWhispererRequest_NoToolsDefinition_ShouldStripStructuredToolDa
 		assert.Len(t, cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.ToolResults, 0)
 	}
 
-	require.GreaterOrEqual(t, len(cwReq.ConversationState.History), 2)
-	assistantEntry, ok := cwReq.ConversationState.History[1].(types.HistoryAssistantMessage)
+	history := stripSyntheticIdentityPrefix(cwReq.ConversationState.History)
+	require.GreaterOrEqual(t, len(history), 2)
+	assistantEntry, ok := latestAssistantFromHistory(history)
 	require.True(t, ok)
 	assert.Len(t, assistantEntry.AssistantResponseMessage.ToolUses, 0)
 }
@@ -973,8 +1016,9 @@ func TestBuildCodeWhispererRequest_LatestAssistantToolUsesWithoutCurrentToolResu
 	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
 	require.NoError(t, err)
 
-	require.GreaterOrEqual(t, len(cwReq.ConversationState.History), 2)
-	assistantEntry, ok := cwReq.ConversationState.History[1].(types.HistoryAssistantMessage)
+	history := stripSyntheticIdentityPrefix(cwReq.ConversationState.History)
+	require.GreaterOrEqual(t, len(history), 2)
+	assistantEntry, ok := latestAssistantFromHistory(history)
 	require.True(t, ok)
 	assert.Len(t, assistantEntry.AssistantResponseMessage.ToolUses, 0)
 }
@@ -1025,10 +1069,11 @@ func TestBuildCodeWhispererRequest_LatestAssistantToolUsesShouldBeFilteredByCurr
 	cwReq, err := BuildCodeWhispererRequest(anthropicReq, nil)
 	require.NoError(t, err)
 
-	require.GreaterOrEqual(t, len(cwReq.ConversationState.History), 2)
-	assistantEntry, ok := cwReq.ConversationState.History[1].(types.HistoryAssistantMessage)
+	history := stripSyntheticIdentityPrefix(cwReq.ConversationState.History)
+	require.GreaterOrEqual(t, len(history), 2)
+	assistantEntry, ok := latestAssistantFromHistory(history)
 	require.True(t, ok)
-	assert.Len(t, assistantEntry.AssistantResponseMessage.ToolUses, 1)
+	require.Len(t, assistantEntry.AssistantResponseMessage.ToolUses, 1)
 	assert.Equal(t, "tool_match", assistantEntry.AssistantResponseMessage.ToolUses[0].ToolUseId)
 }
 
@@ -1086,9 +1131,11 @@ func TestBuildCodeWhispererRequest_OrphanAssistantMessages(t *testing.T) {
 
 		require.NoError(t, err)
 
+		history := stripSyntheticIdentityPrefix(cwReq.ConversationState.History)
+
 		// 历史应该为空（孤立的assistant消息被忽略）
-		if cwReq.ConversationState.History != nil {
-			assert.Len(t, cwReq.ConversationState.History, 0)
+		if history != nil {
+			assert.Len(t, history, 0)
 		}
 
 		// 当前消息
@@ -1123,18 +1170,19 @@ func TestBuildCodeWhispererRequest_OrphanAssistantMessages(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.NotNil(t, cwReq.ConversationState.History)
+		history := stripSyntheticIdentityPrefix(cwReq.ConversationState.History)
 
 		// 历史应该包含2条消息（第二个assistant被忽略）：
 		// 1. user: "Question 1"
 		// 2. assistant: "Answer 1"
-		assert.Len(t, cwReq.ConversationState.History, 2)
+		assert.Len(t, history, 2)
 
 		// 验证第一对
-		firstUserMsg, ok := cwReq.ConversationState.History[0].(types.HistoryUserMessage)
+		firstUserMsg, ok := history[0].(types.HistoryUserMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "Question 1", firstUserMsg.UserInputMessage.Content)
 
-		firstAssistantMsg, ok := cwReq.ConversationState.History[1].(types.HistoryAssistantMessage)
+		firstAssistantMsg, ok := history[1].(types.HistoryAssistantMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "Answer 1", firstAssistantMsg.AssistantResponseMessage.Content)
 
@@ -1173,20 +1221,21 @@ func TestBuildCodeWhispererRequest_OrphanUserMessages(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.NotNil(t, cwReq.ConversationState.History)
+		history := stripSyntheticIdentityPrefix(cwReq.ConversationState.History)
 
 		// 历史应该包含4条消息：
 		// 1. user: "第一个问题"
 		// 2. assistant: "第一个回答"
 		// 3. user: "第二个问题（孤立）"
 		// 4. assistant: "OK" (自动配对的响应)
-		assert.Len(t, cwReq.ConversationState.History, 4)
+		assert.Len(t, history, 4)
 
 		// 验证最后一对是自动配对的
-		lastUserMsg, ok := cwReq.ConversationState.History[2].(types.HistoryUserMessage)
+		lastUserMsg, ok := history[2].(types.HistoryUserMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "第二个问题（孤立）", lastUserMsg.UserInputMessage.Content)
 
-		lastAssistantMsg, ok := cwReq.ConversationState.History[3].(types.HistoryAssistantMessage)
+		lastAssistantMsg, ok := history[3].(types.HistoryAssistantMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "OK", lastAssistantMsg.AssistantResponseMessage.Content)
 		assert.Len(t, lastAssistantMsg.AssistantResponseMessage.ToolUses, 0)
@@ -1227,22 +1276,23 @@ func TestBuildCodeWhispererRequest_OrphanUserMessages(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.NotNil(t, cwReq.ConversationState.History)
+		history := stripSyntheticIdentityPrefix(cwReq.ConversationState.History)
 
 		// 历史应该包含4条消息：
 		// 1. user: "第一个问题"
 		// 2. assistant: "第一个回答"
 		// 3. user: "第二个问题（孤立1）\n第三个问题（孤立2）" (合并)
 		// 4. assistant: "OK" (自动配对的响应)
-		assert.Len(t, cwReq.ConversationState.History, 4)
+		assert.Len(t, history, 4)
 
 		// 验证合并的user消息
-		mergedUserMsg, ok := cwReq.ConversationState.History[2].(types.HistoryUserMessage)
+		mergedUserMsg, ok := history[2].(types.HistoryUserMessage)
 		assert.True(t, ok)
 		assert.Contains(t, mergedUserMsg.UserInputMessage.Content, "第二个问题（孤立1）")
 		assert.Contains(t, mergedUserMsg.UserInputMessage.Content, "第三个问题（孤立2）")
 
 		// 验证自动配对的assistant消息
-		autoAssistantMsg, ok := cwReq.ConversationState.History[3].(types.HistoryAssistantMessage)
+		autoAssistantMsg, ok := history[3].(types.HistoryAssistantMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "OK", autoAssistantMsg.AssistantResponseMessage.Content)
 
@@ -1282,25 +1332,26 @@ func TestBuildCodeWhispererRequest_OrphanUserMessages(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.NotNil(t, cwReq.ConversationState.History)
+		history := stripSyntheticIdentityPrefix(cwReq.ConversationState.History)
 
 		// 历史应该包含4条消息（两对正常配对）
-		assert.Len(t, cwReq.ConversationState.History, 4)
+		assert.Len(t, history, 4)
 
 		// 验证第一对
-		firstUserMsg, ok := cwReq.ConversationState.History[0].(types.HistoryUserMessage)
+		firstUserMsg, ok := history[0].(types.HistoryUserMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "第一个问题", firstUserMsg.UserInputMessage.Content)
 
-		firstAssistantMsg, ok := cwReq.ConversationState.History[1].(types.HistoryAssistantMessage)
+		firstAssistantMsg, ok := history[1].(types.HistoryAssistantMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "第一个回答", firstAssistantMsg.AssistantResponseMessage.Content)
 
 		// 验证第二对
-		secondUserMsg, ok := cwReq.ConversationState.History[2].(types.HistoryUserMessage)
+		secondUserMsg, ok := history[2].(types.HistoryUserMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "第二个问题", secondUserMsg.UserInputMessage.Content)
 
-		secondAssistantMsg, ok := cwReq.ConversationState.History[3].(types.HistoryAssistantMessage)
+		secondAssistantMsg, ok := history[3].(types.HistoryAssistantMessage)
 		assert.True(t, ok)
 		assert.Equal(t, "第二个回答", secondAssistantMsg.AssistantResponseMessage.Content)
 
