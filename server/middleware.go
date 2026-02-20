@@ -29,12 +29,14 @@ var globalIPv6BlockConfig = &IPv6BlockConfig{
 	enabled: false, // 默认不禁止
 }
 
+
 // IsIPv6BlockEnabled 获取 IPv6 禁止状态
 func IsIPv6BlockEnabled() bool {
 	globalIPv6BlockConfig.mu.RLock()
 	defer globalIPv6BlockConfig.mu.RUnlock()
 	return globalIPv6BlockConfig.enabled
 }
+
 
 // IPv6 配置文件路径
 const IPv6ConfigPath = "ipv6_config.json"
@@ -137,17 +139,9 @@ func isIPv6(ipStr string) bool {
 
 // IP 并发限制器配置常量
 const (
-	defaultMaxConcurrentPerIP = 5               // 默认每个 IP 最大并发请求数
-	defaultMaxWaitingPerIP    = 8               // 默认每个 IP 最大排队请求数
-	defaultAcquireTimeout     = 8 * time.Second // 默认排队等待超时时间（避免长时间卡住）
-	ipCleanupInterval         = 10 * time.Minute
-)
-
-const (
-	acquireReasonSuccess   = "success"
-	acquireReasonTimeout   = "timeout"
-	acquireReasonCanceled  = "canceled"
-	acquireReasonQueueFull = "queue_full"
+	defaultMaxConcurrentPerIP = 5                // 默认每个 IP 最大并发请求数
+	defaultAcquireTimeout     = 60 * time.Second // 默认排队等待超时时间
+	ipCleanupInterval         = 10 * time.Minute // IP 信号量清理间隔
 )
 
 // ipSemaphore 单个 IP 的信号量
@@ -159,16 +153,14 @@ type ipSemaphore struct {
 // IPConcurrencyLimiter IP 并发限制器（基于信号量，支持排队等待）
 type IPConcurrencyLimiter struct {
 	maxConcurrent  int
-	maxWaiting     int
 	acquireTimeout time.Duration
 	semaphores     sync.Map // map[string]*ipSemaphore
 }
 
 // NewIPConcurrencyLimiter 创建 IP 并发限制器
-func NewIPConcurrencyLimiter(maxConcurrent int, maxWaiting int, acquireTimeout time.Duration) *IPConcurrencyLimiter {
+func NewIPConcurrencyLimiter(maxConcurrent int, acquireTimeout time.Duration) *IPConcurrencyLimiter {
 	l := &IPConcurrencyLimiter{
 		maxConcurrent:  maxConcurrent,
-		maxWaiting:     maxWaiting,
 		acquireTimeout: acquireTimeout,
 	}
 	go l.cleanupLoop()
@@ -208,22 +200,17 @@ func (l *IPConcurrencyLimiter) getOrCreateSemaphore(ip string) *ipSemaphore {
 }
 
 // Acquire 尝试获取并发槽位（支持排队等待）
-// 返回: 是否成功, 等待时间, 失败原因
-func (l *IPConcurrencyLimiter) Acquire(ctx context.Context, ip string) (bool, time.Duration, string) {
+// 返回: 是否成功, 等待时间
+func (l *IPConcurrencyLimiter) Acquire(ctx context.Context, ip string) (bool, time.Duration) {
 	sem := l.getOrCreateSemaphore(ip)
 	startTime := time.Now()
 
 	// 先尝试非阻塞获取
 	select {
 	case <-sem.ch:
-		return true, 0, acquireReasonSuccess
+		return true, 0
 	default:
 		// 需要排队等待
-	}
-
-	// 排队已满时快速失败，避免长期堆积导致"卡死"
-	if atomic.LoadInt64(&sem.waiting) >= int64(l.maxWaiting) {
-		return false, 0, acquireReasonQueueFull
 	}
 
 	// 记录等待状态
@@ -236,12 +223,9 @@ func (l *IPConcurrencyLimiter) Acquire(ctx context.Context, ip string) (bool, ti
 
 	select {
 	case <-sem.ch:
-		return true, time.Since(startTime), acquireReasonSuccess
+		return true, time.Since(startTime)
 	case <-timeoutCtx.Done():
-		if timeoutCtx.Err() == context.DeadlineExceeded {
-			return false, time.Since(startTime), acquireReasonTimeout
-		}
-		return false, time.Since(startTime), acquireReasonCanceled
+		return false, time.Since(startTime)
 	}
 }
 
@@ -326,17 +310,9 @@ func initIPLimiter() *IPConcurrencyLimiter {
 		}
 	}
 
-	maxWaiting := defaultMaxWaitingPerIP
-	if envVal := os.Getenv("KIRO_MAX_WAITING_PER_IP"); envVal != "" {
-		if val, err := strconv.Atoi(envVal); err == nil && val >= 0 {
-			maxWaiting = val
-		}
-	}
-
-	globalIPLimiter = NewIPConcurrencyLimiter(maxConcurrent, maxWaiting, acquireTimeout)
+	globalIPLimiter = NewIPConcurrencyLimiter(maxConcurrent, acquireTimeout)
 	logger.Info("IP 并发限制器已初始化",
 		logger.Int("max_concurrent_per_ip", maxConcurrent),
-		logger.Int("max_waiting_per_ip", maxWaiting),
 		logger.Duration("acquire_timeout", acquireTimeout))
 	return globalIPLimiter
 }
@@ -356,11 +332,11 @@ func IPv6BlockMiddleware() gin.HandlerFunc {
 		// 检查是否为 IPv6 地址
 		if isIPv6(clientIP) {
 
-			// 豁免管理 API 的 IPv6 禁止控制端点，避免"自锁"
-			if c.Request.URL.Path == "/v1/admin/ip/ipv6-block" {
-				c.Next()
-				return
-			}
+		// 豁免管理 API 的 IPv6 禁止控制端点，避免"自锁"
+		if c.Request.URL.Path == "/v1/admin/ip/ipv6-block" {
+			c.Next()
+			return
+		}
 			logger.Warn("拒绝 IPv6 请求",
 				logger.String("client_ip", clientIP),
 				logger.String("path", c.Request.URL.Path),
@@ -387,12 +363,6 @@ func IPConcurrencyMiddleware() gin.HandlerFunc {
 	limiter := initIPLimiter()
 
 	return func(c *gin.Context) {
-		path := c.Request.URL.Path
-		if !shouldApplyIPConcurrencyLimit(path, c.Request.Method) {
-			c.Next()
-			return
-		}
-
 		clientIP := c.ClientIP()
 
 		// 检查是否在白名单中
@@ -410,43 +380,26 @@ func IPConcurrencyMiddleware() gin.HandlerFunc {
 			logger.String("x_forwarded_for", c.GetHeader("X-Forwarded-For")),
 			logger.String("x_real_ip", c.GetHeader("X-Real-IP")),
 			logger.String("remote_addr", c.Request.RemoteAddr),
-			logger.String("path", path),
 			logger.Int("current_active", limiter.GetCurrentCount(clientIP)),
 			logger.Int64("current_waiting", limiter.GetWaitingCount(clientIP)))
 
 		// 尝试获取并发槽位（支持排队等待）
-		acquired, waitTime, reason := limiter.Acquire(c.Request.Context(), clientIP)
+		acquired, waitTime := limiter.Acquire(c.Request.Context(), clientIP)
 		if !acquired {
-			logMsg := "IP 并发请求被拒绝"
-			if reason == acquireReasonTimeout {
-				logMsg = "IP 并发请求排队超时"
-			} else if reason == acquireReasonQueueFull {
-				logMsg = "IP 并发请求排队已满"
-			}
-
-			logger.Warn(logMsg,
+			logger.Warn("IP 并发请求排队超时",
 				logger.String("client_ip", clientIP),
 				logger.String("x_forwarded_for", c.GetHeader("X-Forwarded-For")),
 				logger.String("x_real_ip", c.GetHeader("X-Real-IP")),
 				logger.String("remote_addr", c.Request.RemoteAddr),
-				logger.String("path", path),
 				logger.Int("current_count", limiter.GetCurrentCount(clientIP)),
 				logger.Int64("waiting_count", limiter.GetWaitingCount(clientIP)),
-				logger.String("reason", reason),
 				logger.Duration("wait_time", waitTime),
 				logger.Duration("timeout", limiter.acquireTimeout))
 
-			errorMessage := "Too many concurrent requests from your IP. Queue timeout exceeded."
-			if reason == acquireReasonQueueFull {
-				errorMessage = "Too many queued requests from your IP. Please retry later."
-			}
-
-			c.Header("Retry-After", "1")
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error": gin.H{
-					"message": errorMessage,
+					"message": "Too many concurrent requests from your IP. Queue timeout exceeded.",
 					"code":    "rate_limited",
-					"reason":  reason,
 				},
 			})
 			c.Abort()
@@ -477,22 +430,9 @@ func GetIPLimiterStats() map[string]interface{} {
 	return map[string]interface{}{
 		"enabled":         true,
 		"max_concurrent":  globalIPLimiter.maxConcurrent,
-		"max_waiting":     globalIPLimiter.maxWaiting,
 		"acquire_timeout": globalIPLimiter.acquireTimeout.String(),
 		"active_ips":      globalIPLimiter.GetStats(),
 	}
-}
-
-func shouldApplyIPConcurrencyLimit(path, method string) bool {
-	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
-		return false
-	}
-
-	if path == "/v1/messages" || path == "/v1/chat/completions" {
-		return true
-	}
-
-	return false
 }
 
 // PathBasedAuthMiddleware 创建基于路径的API密钥验证中间件
