@@ -177,6 +177,9 @@ func (ssm *SSEStateManager) handleContentBlockStart(c *gin.Context, sender Strea
 
 				// 立即发送stop事件（在工具块start之前）
 				if err := sender.SendEvent(c, stopEvent); err != nil {
+					if isClientDisconnectError(err) || c.Request.Context().Err() != nil {
+						return err
+					}
 					logger.Error("自动关闭内容块失败", logger.Err(err), logger.Int("index", blockIndex))
 				} else {
 					// 标记块已关闭
@@ -414,7 +417,15 @@ func (ssm *SSEStateManager) handleMessageDelta(c *gin.Context, sender StreamEven
 					"type":  "content_block_stop",
 					"index": index,
 				}
-				sender.SendEvent(c, stopEvent)
+				if err := sender.SendEvent(c, stopEvent); err != nil {
+					if isClientDisconnectError(err) || c.Request.Context().Err() != nil {
+						return err
+					}
+					logger.Error("message_delta前自动关闭content_block失败",
+						logger.Int("index", index),
+						logger.Err(err))
+					continue
+				}
 				ssm.activeBlocks[index].Stopped = true
 				logger.Debug("自动关闭未关闭的content_block（message_delta前）", logger.Int("index", index))
 			}

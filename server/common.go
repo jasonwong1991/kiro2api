@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -87,6 +88,37 @@ func handleRequestSendError(c *gin.Context, err error) {
 func handleResponseReadError(c *gin.Context, err error) {
 	logger.Error("读取响应体失败", addReqFields(c, logger.Err(err))...)
 	respondError(c, http.StatusInternalServerError, "读取响应体失败: %v", err)
+}
+
+// isClientDisconnectError 判断错误是否由客户端断开连接导致
+func isClientDisconnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	errStr := strings.ToLower(err.Error())
+	disconnectPatterns := []string{
+		"broken pipe",
+		"connection reset by peer",
+		"use of closed network connection",
+		"client disconnected",
+		"context canceled",
+		"stream closed",
+		"connection closed",
+		"unexpected eof",
+	}
+
+	for _, pattern := range disconnectPatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // 通用请求执行函数
@@ -553,9 +585,16 @@ func (s *AnthropicStreamSender) SendEvent(c *gin.Context, data any) error {
 			logger.String("payload_preview", string(json)),
 		)...)
 
-	fmt.Fprintf(c.Writer, "event: %s\n", eventType)
-	fmt.Fprintf(c.Writer, "data: %s\n\n", string(json))
+	if _, err := fmt.Fprintf(c.Writer, "event: %s\n", eventType); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", string(json)); err != nil {
+		return err
+	}
 	c.Writer.Flush()
+	if err := c.Request.Context().Err(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -587,8 +626,13 @@ func (s *OpenAIStreamSender) SendEvent(c *gin.Context, data any) error {
 			logger.Int("payload_len", len(json)),
 		)...)
 
-	fmt.Fprintf(c.Writer, "data: %s\n\n", string(json))
+	if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", string(json)); err != nil {
+		return err
+	}
 	c.Writer.Flush()
+	if err := c.Request.Context().Err(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -606,8 +650,13 @@ func (s *OpenAIStreamSender) SendError(c *gin.Context, message string, _ error) 
 		return err
 	}
 
-	fmt.Fprintf(c.Writer, "data: %s\n\n", string(json))
+	if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", string(json)); err != nil {
+		return err
+	}
 	c.Writer.Flush()
+	if err := c.Request.Context().Err(); err != nil {
+		return err
+	}
 	return nil
 }
 

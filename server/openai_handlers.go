@@ -184,6 +184,19 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 	c.Writer.Flush()
 
 	sender := &OpenAIStreamSender{}
+	sendEventOrStop := func(event map[string]any) bool {
+		if err := sender.SendEvent(c, event); err != nil {
+			if isClientDisconnectError(err) || c.Request.Context().Err() != nil {
+				logger.Info("OpenAI流式连接已断开，停止继续处理",
+					addReqFields(c, logger.Err(err))...)
+			} else {
+				logger.Warn("发送OpenAI流式事件失败，终止流",
+					addReqFields(c, logger.Err(err))...)
+			}
+			return false
+		}
+		return true
+	}
 
 	// 发送初始OpenAI事件
 	initialEvent := map[string]any{
@@ -201,7 +214,9 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 			},
 		},
 	}
-	sender.SendEvent(c, initialEvent)
+	if !sendEventOrStop(initialEvent) {
+		return
+	}
 
 	// 创建符合AWS规范的流式解析器
 	compliantParser := parser.NewCompliantEventStreamParser()
@@ -231,6 +246,10 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 	// 使用更大的缓冲区避免数据丢失
 	buf := make([]byte, 8192) // 增加到8KB
 	for hasMoreData {
+		if c.Request.Context().Err() != nil {
+			return
+		}
+
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			totalBytesRead += n
@@ -280,7 +299,9 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 																	},
 																},
 															}
-															sender.SendEvent(c, reasoningEvent)
+															if !sendEventOrStop(reasoningEvent) {
+																return
+															}
 														}
 													}
 												}
@@ -306,7 +327,9 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 														},
 													},
 												}
-												sender.SendEvent(c, contentEvent)
+												if !sendEventOrStop(contentEvent) {
+													return
+												}
 											}
 										}
 									case "input_json_delta":
@@ -362,7 +385,9 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 															},
 														},
 													}
-													sender.SendEvent(c, toolDelta)
+													if !sendEventOrStop(toolDelta) {
+														return
+													}
 												}
 											}
 										}
@@ -427,7 +452,9 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 													},
 												},
 											}
-											sender.SendEvent(c, toolStart)
+											if !sendEventOrStop(toolStart) {
+												return
+											}
 										}
 									}
 								}
@@ -450,7 +477,9 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 												},
 											},
 										}
-										sender.SendEvent(c, endEvent)
+										if !sendEventOrStop(endEvent) {
+											return
+										}
 										sentFinal = true
 									}
 								}
@@ -520,7 +549,9 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 							},
 						},
 					}
-					sender.SendEvent(c, reasoningEvent)
+					if !sendEventOrStop(reasoningEvent) {
+						return
+					}
 				}
 			}
 		}
@@ -556,11 +587,20 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 			}
 		}
 
-		sender.SendEvent(c, finalEvent)
+		if !sendEventOrStop(finalEvent) {
+			return
+		}
 		c.Writer.Flush()
 	}
 
 	// 发送结束标记
-	fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+	if _, err := fmt.Fprintf(c.Writer, "data: [DONE]\n\n"); err != nil {
+		if isClientDisconnectError(err) || c.Request.Context().Err() != nil {
+			logger.Info("发送[DONE]时客户端已断开", addReqFields(c, logger.Err(err))...)
+			return
+		}
+		logger.Warn("发送[DONE]失败", addReqFields(c, logger.Err(err))...)
+		return
+	}
 	c.Writer.Flush()
 }

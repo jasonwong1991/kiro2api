@@ -29,14 +29,12 @@ var globalIPv6BlockConfig = &IPv6BlockConfig{
 	enabled: false, // 默认不禁止
 }
 
-
 // IsIPv6BlockEnabled 获取 IPv6 禁止状态
 func IsIPv6BlockEnabled() bool {
 	globalIPv6BlockConfig.mu.RLock()
 	defer globalIPv6BlockConfig.mu.RUnlock()
 	return globalIPv6BlockConfig.enabled
 }
-
 
 // IPv6 配置文件路径
 const IPv6ConfigPath = "ipv6_config.json"
@@ -155,6 +153,103 @@ type IPConcurrencyLimiter struct {
 	maxConcurrent  int
 	acquireTimeout time.Duration
 	semaphores     sync.Map // map[string]*ipSemaphore
+}
+
+// parseIPCandidate 解析 IP 候选值（支持 "ip"、"ip:port"、XFF 条目）
+func parseIPCandidate(candidate string) string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return ""
+	}
+
+	// 直接是纯 IP
+	if ip := net.ParseIP(candidate); ip != nil {
+		return ip.String()
+	}
+
+	// 可能是 host:port（IPv4 或 [IPv6]:port）
+	if host, _, err := net.SplitHostPort(candidate); err == nil {
+		host = strings.TrimSpace(host)
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.String()
+		}
+	}
+
+	// 兼容 IPv4:port 的简写（无方括号）
+	if strings.Count(candidate, ":") == 1 {
+		parts := strings.Split(candidate, ":")
+		if len(parts) == 2 {
+			if ip := net.ParseIP(strings.TrimSpace(parts[0])); ip != nil {
+				return ip.String()
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractIPFromHeader 从转发头提取第一个合法 IP（支持逗号分隔链）
+func extractIPFromHeader(headerValue string) string {
+	if headerValue == "" {
+		return ""
+	}
+
+	parts := strings.Split(headerValue, ",")
+	for _, part := range parts {
+		if ip := parseIPCandidate(part); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+// resolveClientIPForLimit 解析用于限流的客户端 IP
+// 优先顺序：
+// 1) KIRO_CLIENT_IP_HEADER 指定头（可选）
+// 2) Gin ClientIP（在可信代理配置正确时）
+// 3) 常见代理头回退（CF-Connecting-IP / True-Client-IP / X-Forwarded-For / X-Real-IP）
+// 4) RemoteAddr 兜底
+func resolveClientIPForLimit(c *gin.Context) (ip string, source string) {
+	// 1) 显式指定头，便于中转站自定义
+	if headerName := strings.TrimSpace(os.Getenv("KIRO_CLIENT_IP_HEADER")); headerName != "" {
+		if v := c.GetHeader(headerName); v != "" {
+			if resolved := extractIPFromHeader(v); resolved != "" {
+				return resolved, "custom_header:" + headerName
+			}
+		}
+	}
+
+	remoteIP := parseIPCandidate(c.Request.RemoteAddr)
+	clientIP := strings.TrimSpace(c.ClientIP())
+
+	// 2) Gin 已解析出非 remote_addr，直接使用
+	if clientIP != "" && clientIP != remoteIP {
+		return clientIP, "gin_client_ip"
+	}
+
+	// 3) Gin 退化时，尝试常见头
+	fallbackHeaders := []string{
+		"CF-Connecting-IP",
+		"True-Client-IP",
+		"X-Forwarded-For",
+		"X-Real-IP",
+	}
+	for _, h := range fallbackHeaders {
+		if v := c.GetHeader(h); v != "" {
+			if resolved := extractIPFromHeader(v); resolved != "" {
+				return resolved, "header:" + h
+			}
+		}
+	}
+
+	// 4) 兜底（仅在没有可用 client ip 时）
+	if clientIP != "" {
+		return clientIP, "gin_client_ip_fallback"
+	}
+	if remoteIP != "" {
+		return remoteIP, "remote_addr_fallback"
+	}
+	return "unknown", "unknown"
 }
 
 // NewIPConcurrencyLimiter 创建 IP 并发限制器
@@ -332,11 +427,11 @@ func IPv6BlockMiddleware() gin.HandlerFunc {
 		// 检查是否为 IPv6 地址
 		if isIPv6(clientIP) {
 
-		// 豁免管理 API 的 IPv6 禁止控制端点，避免"自锁"
-		if c.Request.URL.Path == "/v1/admin/ip/ipv6-block" {
-			c.Next()
-			return
-		}
+			// 豁免管理 API 的 IPv6 禁止控制端点，避免"自锁"
+			if c.Request.URL.Path == "/v1/admin/ip/ipv6-block" {
+				c.Next()
+				return
+			}
 			logger.Warn("拒绝 IPv6 请求",
 				logger.String("client_ip", clientIP),
 				logger.String("path", c.Request.URL.Path),
@@ -363,13 +458,24 @@ func IPConcurrencyMiddleware() gin.HandlerFunc {
 	limiter := initIPLimiter()
 
 	return func(c *gin.Context) {
-		clientIP := c.ClientIP()
+		path := c.Request.URL.Path
+		// 只限制高成本推理端点，避免静态页/健康检查被并发限流拖垮
+		switch path {
+		case "/v1/messages", "/v1/chat/completions":
+			// continue
+		default:
+			c.Next()
+			return
+		}
+
+		clientIP, ipSource := resolveClientIPForLimit(c)
 
 		// 检查是否在白名单中
 		whitelistManager := GetIPWhitelistManager()
 		if whitelistManager != nil && whitelistManager.IsWhitelisted(clientIP) {
 			logger.Debug("IP 在白名单中，跳过并发限制",
-				logger.String("client_ip", clientIP))
+				logger.String("client_ip", clientIP),
+				logger.String("ip_source", ipSource))
 			c.Next()
 			return
 		}
@@ -377,8 +483,11 @@ func IPConcurrencyMiddleware() gin.HandlerFunc {
 		// 调试日志：记录 IP 识别信息
 		logger.Debug("IP 并发限制检查",
 			logger.String("client_ip", clientIP),
+			logger.String("ip_source", ipSource),
 			logger.String("x_forwarded_for", c.GetHeader("X-Forwarded-For")),
 			logger.String("x_real_ip", c.GetHeader("X-Real-IP")),
+			logger.String("cf_connecting_ip", c.GetHeader("CF-Connecting-IP")),
+			logger.String("true_client_ip", c.GetHeader("True-Client-IP")),
 			logger.String("remote_addr", c.Request.RemoteAddr),
 			logger.Int("current_active", limiter.GetCurrentCount(clientIP)),
 			logger.Int64("current_waiting", limiter.GetWaitingCount(clientIP)))
@@ -386,10 +495,24 @@ func IPConcurrencyMiddleware() gin.HandlerFunc {
 		// 尝试获取并发槽位（支持排队等待）
 		acquired, waitTime := limiter.Acquire(c.Request.Context(), clientIP)
 		if !acquired {
+			// 客户端已取消请求（如连接断开）不应计为排队超时，也不返回429
+			if c.Request.Context().Err() != nil {
+				logger.Debug("IP 并发排队等待被客户端取消",
+					logger.String("client_ip", clientIP),
+					logger.String("path", path),
+					logger.Duration("wait_time", waitTime),
+					logger.Err(c.Request.Context().Err()))
+				c.Abort()
+				return
+			}
+
 			logger.Warn("IP 并发请求排队超时",
 				logger.String("client_ip", clientIP),
+				logger.String("ip_source", ipSource),
 				logger.String("x_forwarded_for", c.GetHeader("X-Forwarded-For")),
 				logger.String("x_real_ip", c.GetHeader("X-Real-IP")),
+				logger.String("cf_connecting_ip", c.GetHeader("CF-Connecting-IP")),
+				logger.String("true_client_ip", c.GetHeader("True-Client-IP")),
 				logger.String("remote_addr", c.Request.RemoteAddr),
 				logger.Int("current_count", limiter.GetCurrentCount(clientIP)),
 				logger.Int64("waiting_count", limiter.GetWaitingCount(clientIP)),

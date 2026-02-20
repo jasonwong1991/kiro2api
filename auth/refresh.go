@@ -315,8 +315,9 @@ func RefreshIdCToken(authConfig AuthConfig) (types.TokenInfo, error) {
 
 // isTokenInvalidError 判断是否是 token 失效错误（非额度耗尽）
 func isTokenInvalidError(statusCode int, body []byte) bool {
-	// 401/403 通常表示认证失败
-	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden {
+	// 401/403 通常表示认证失败；
+	// 400 也可能是 OAuth 标准的 invalid_grant（例如 IdC 刷新 token 失效）。
+	if statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden && statusCode != http.StatusBadRequest {
 		return false
 	}
 

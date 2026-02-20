@@ -242,10 +242,10 @@ func (ctx *StreamProcessorContext) processToolUseStop(dataMap map[string]any) {
 	// *** 修复：在块结束时计算累加的JSON字节数的token ***
 	// 使用进一法（向上取整）确保不低估token消耗
 	if jsonBytes, exists := ctx.jsonBytesByBlockIndex[idx]; exists && jsonBytes > 0 {
-		tokens := (jsonBytes + 3) / 4  // 进一法: ceil(jsonBytes / 4)
+		tokens := (jsonBytes + 3) / 4 // 进一法: ceil(jsonBytes / 4)
 		ctx.totalOutputTokens += tokens
 		delete(ctx.jsonBytesByBlockIndex, idx)
-		
+
 		logger.Debug("content_block_stop计算JSON tokens",
 			logger.Int("block_index", idx),
 			logger.Int("json_bytes", jsonBytes),
@@ -309,11 +309,11 @@ func (ctx *StreamProcessorContext) sendFinalEvents() error {
 	if outputTokens < 1 {
 		// 检查是否有任何内容被发送
 		hasContent := len(ctx.completedToolUseIds) > 0 ||
-		              len(ctx.toolUseIdByBlockIndex) > 0 ||
-		              ctx.totalProcessedEvents > 0
+			len(ctx.toolUseIdByBlockIndex) > 0 ||
+			ctx.totalProcessedEvents > 0
 
 		if hasContent {
-			outputTokens = 1  // 最小保护：至少 1 token
+			outputTokens = 1 // 最小保护：至少 1 token
 			logger.Debug("触发最小token保护",
 				logger.Int("processed_events", ctx.totalProcessedEvents),
 				logger.Int("completed_tools", len(ctx.completedToolUseIds)),
@@ -390,6 +390,12 @@ func (esp *EventStreamProcessor) ProcessEventStream(reader io.Reader) error {
 	buf := make([]byte, 1024)
 
 	for {
+		if ctxErr := esp.ctx.c.Request.Context().Err(); ctxErr != nil {
+			logger.Info("客户端连接已断开，停止读取上游事件流",
+				addReqFields(esp.ctx.c, logger.Err(ctxErr))...)
+			return ctxErr
+		}
+
 		n, err := reader.Read(buf)
 		esp.ctx.totalReadBytes += n
 
@@ -418,6 +424,14 @@ func (esp *EventStreamProcessor) ProcessEventStream(reader io.Reader) error {
 		}
 
 		if err != nil {
+			if isClientDisconnectError(err) || esp.ctx.c.Request.Context().Err() != nil {
+				logger.Info("事件流读取结束：客户端已断开或请求已取消",
+					addReqFields(esp.ctx.c,
+						logger.Err(err),
+						logger.Int("total_read_bytes", esp.ctx.totalReadBytes),
+					)...)
+				break
+			}
 			if err == io.EOF {
 				logger.Debug("响应流结束",
 					addReqFields(esp.ctx.c,
@@ -474,6 +488,9 @@ func (esp *EventStreamProcessor) processEvent(event parser.SSEEvent) error {
 						for _, evt := range thinkingEvents {
 							if evtData, ok := evt.Data.(map[string]any); ok {
 								if err := esp.ctx.sseStateManager.SendEvent(esp.ctx.c, esp.ctx.sender, evtData); err != nil {
+									if isClientDisconnectError(err) || esp.ctx.c.Request.Context().Err() != nil {
+										return err
+									}
 									logger.Error("发送 thinking 事件失败", logger.Err(err))
 								}
 							}
@@ -505,6 +522,9 @@ func (esp *EventStreamProcessor) processEvent(event parser.SSEEvent) error {
 
 	// 使用状态管理器发送事件（直传）
 	if err := esp.ctx.sseStateManager.SendEvent(esp.ctx.c, esp.ctx.sender, dataMap); err != nil {
+		if isClientDisconnectError(err) || esp.ctx.c.Request.Context().Err() != nil {
+			return err
+		}
 		logger.Error("SSE事件发送违规", logger.Err(err))
 		// 非严格模式下，违规事件被跳过但不中断流
 	}
@@ -559,7 +579,12 @@ func (esp *EventStreamProcessor) handleExceptionEvent(dataMap map[string]any) bo
 					"type":  "content_block_stop",
 					"index": index,
 				}
-				_ = esp.ctx.sseStateManager.SendEvent(esp.ctx.c, esp.ctx.sender, stopEvent)
+				if err := esp.ctx.sseStateManager.SendEvent(esp.ctx.c, esp.ctx.sender, stopEvent); err != nil {
+					if isClientDisconnectError(err) || esp.ctx.c.Request.Context().Err() != nil {
+						return true
+					}
+					logger.Error("发送自动content_block_stop失败", logger.Err(err), logger.Int("index", index))
+				}
 			}
 		}
 

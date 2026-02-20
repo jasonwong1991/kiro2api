@@ -111,6 +111,10 @@ func handleGenericStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequ
 	// 处理事件流
 	processor := NewEventStreamProcessor(ctx)
 	if err := processor.ProcessEventStream(resp.Body); err != nil {
+		if isClientDisconnectError(err) || c.Request.Context().Err() != nil {
+			logger.Info("客户端已断开，结束事件流处理", addReqFields(c, logger.Err(err))...)
+			return
+		}
 		logger.Error("事件流处理失败", logger.Err(err))
 		return
 	}
