@@ -176,7 +176,7 @@ func processConfigs(configs []AuthConfig) []AuthConfig {
 
 		// 设置默认认证类型
 		if config.AuthType == "" {
-			config.AuthType = AuthMethodSocial
+			config.AuthType = AuthMethodIdC
 		}
 
 		// 设置默认区域

@@ -40,9 +40,10 @@ type TokenManager struct {
 	configPath   string            // 配置文件路径（用于同步更新）
 
 	// 活跃池相关字段（用于 round_robin 策略 + KIRO_BATCH_SIZE）
-	batchSize      int   // 活跃池大小（0=使用全部账号）
-	activePool     []int // 活跃账号池（存储配置索引）
-	poolRoundRobin int   // 活跃池内轮询索引
+	batchSize         int   // 活跃池大小（0=使用全部账号）
+	activePool        []int // 活跃账号池（存储配置索引）
+	poolRoundRobin    int   // 活跃池内轮询索引
+	poolWarmupRunning bool  // 活跃池后台预热任务是否运行中（仅在 mutex 保护下访问）
 
 	// 自动管理相关字段
 	autoRemoveInvalid bool // 是否自动删除失效的账号
@@ -538,6 +539,170 @@ func (tm *TokenManager) isAccountHealthy(index int) bool {
 	return tm.isAccountHealthyWithRefresh(index, false)
 }
 
+// shouldSkipRefreshDueToQuota 判断是否应跳过刷新
+// 条件：账号额度已耗尽，且下次重置时间尚未到达
+func shouldSkipRefreshDueToQuota(cached *CachedToken, now time.Time) bool {
+	if cached == nil {
+		return false
+	}
+	if cached.Available >= MinAvailableThreshold {
+		return false
+	}
+	if cached.NextResetTime.IsZero() {
+		return false
+	}
+	return now.Before(cached.NextResetTime)
+}
+
+// collectUncachedCandidatesUnlocked 收集可用于后台预热的未缓存账号索引
+// 调用者必须持有 tm.mutex
+func (tm *TokenManager) collectUncachedCandidatesUnlocked() []int {
+	candidates := make([]int, 0, len(tm.configs))
+	for i, cfg := range tm.configs {
+		if cfg.Disabled {
+			continue
+		}
+		if _, isInvalid := tm.invalidated[i]; isInvalid {
+			continue
+		}
+		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
+		if _, exists := tm.cache.tokens[cacheKey]; exists {
+			continue
+		}
+		candidates = append(candidates, i)
+	}
+	return candidates
+}
+
+// startAsyncPoolWarmupUnlocked 启动活跃池后台预热（非阻塞）
+// 调用者必须持有 tm.mutex
+func (tm *TokenManager) startAsyncPoolWarmupUnlocked(reason string) {
+	if tm.batchSize <= 0 {
+		return
+	}
+	if tm.poolWarmupRunning {
+		return
+	}
+
+	candidates := tm.collectUncachedCandidatesUnlocked()
+	if len(candidates) == 0 {
+		return
+	}
+
+	tm.poolWarmupRunning = true
+	logger.Info("启动活跃池后台预热",
+		logger.String("reason", reason),
+		logger.Int("candidate_count", len(candidates)),
+		logger.Int("batch_size", tm.batchSize))
+
+	go tm.asyncWarmupPoolTokens(candidates, reason)
+}
+
+// asyncWarmupPoolTokens 后台预热未缓存账号，避免在请求路径阻塞
+func (tm *TokenManager) asyncWarmupPoolTokens(candidates []int, reason string) {
+	logger.Debug("开始活跃池后台预热",
+		logger.String("reason", reason),
+		logger.Int("candidate_count", len(candidates)))
+
+	healthyAdded := 0
+	invalidDetected := false
+
+	for _, index := range candidates {
+		select {
+		case <-tm.ctx.Done():
+			logger.Debug("TokenManager已关闭，终止活跃池后台预热")
+			tm.mutex.Lock()
+			tm.poolWarmupRunning = false
+			tm.mutex.Unlock()
+			return
+		default:
+		}
+
+		tm.mutex.RLock()
+		if index < 0 || index >= len(tm.configs) {
+			tm.mutex.RUnlock()
+			continue
+		}
+		cfg := tm.configs[index]
+		if cfg.Disabled {
+			tm.mutex.RUnlock()
+			continue
+		}
+		if _, isInvalid := tm.invalidated[index]; isInvalid {
+			tm.mutex.RUnlock()
+			continue
+		}
+		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+		if _, exists := tm.cache.tokens[cacheKey]; exists {
+			tm.mutex.RUnlock()
+			continue
+		}
+		tm.mutex.RUnlock()
+
+		token, err := tm.refreshSingleToken(cfg, index)
+		if err != nil {
+			if types.IsTokenInvalidError(err) {
+				tm.mutex.Lock()
+				tm.markTokenInvalidUnlocked(index, "pool_warmup_refresh", err)
+				tm.mutex.Unlock()
+				invalidDetected = true
+			}
+			continue
+		}
+
+		usage, checkErr := tm.checkUsageLimitsWithRetry(index, token)
+		if checkErr != nil {
+			if types.IsTokenInvalidError(checkErr) {
+				tm.mutex.Lock()
+				tm.markTokenInvalidUnlocked(index, "pool_warmup_usage", checkErr)
+				tm.mutex.Unlock()
+				invalidDetected = true
+			}
+			continue
+		}
+
+		available := CalculateAvailableCount(usage)
+		nextResetTime := GetNextResetTime(usage)
+
+		tm.mutex.Lock()
+		if index >= 0 && index < len(tm.configs) {
+			cacheKey = fmt.Sprintf(config.TokenCacheKeyFormat, index)
+			now := time.Now()
+			tm.cache.tokens[cacheKey] = &CachedToken{
+				Token:         token,
+				Index:         index,
+				UsageInfo:     usage,
+				CachedAt:      now,
+				LastCheckAt:   now,
+				Available:     available,
+				NextResetTime: nextResetTime,
+			}
+			delete(tm.invalidated, index)
+			if available >= MinAvailableThreshold {
+				healthyAdded++
+			}
+		}
+		tm.mutex.Unlock()
+	}
+
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	if invalidDetected {
+		tm.removeInvalidTokensImmediatelyUnlocked("pool_warmup")
+	}
+
+	// 预热完成后重建活跃池（仅基于缓存，不做网络请求）
+	tm.buildActivePool()
+	tm.poolWarmupRunning = false
+
+	logger.Info("活跃池后台预热完成",
+		logger.String("reason", reason),
+		logger.Int("candidate_count", len(candidates)),
+		logger.Int("healthy_added", healthyAdded),
+		logger.Int("active_pool_size", len(tm.activePool)))
+}
+
 // isAccountHealthyWithRefresh 检查账号是否健康，可选择是否强制刷新
 // 健康标准：未禁用 + 未失效 + 有余额
 // forceRefresh: 如果为 true，对于没有缓存的账号会尝试刷新以获取最新状态
@@ -643,51 +808,10 @@ func (tm *TokenManager) buildActivePool() {
 		}
 	}
 
-	// 如果已缓存的健康账号不足 batchSize，尝试刷新未缓存的账号
-	if len(healthyIndices) < tm.batchSize {
-		logger.Debug("已缓存健康账号不足，尝试刷新未缓存账号",
-			logger.Int("cached_healthy", len(healthyIndices)),
-			logger.Int("batch_size", tm.batchSize))
-
-		// 记录已处理的账号，避免重复检查
-		checkedIndices := make(map[int]bool)
-		for _, idx := range healthyIndices {
-			checkedIndices[idx] = true
-		}
-
-		// 第二轮：尝试刷新未缓存的账号
-		for i := range tm.configs {
-			// 跳过已检查的账号
-			if checkedIndices[i] {
-				continue
-			}
-
-			// 跳过禁用的账号
-			if tm.configs[i].Disabled {
-				continue
-			}
-
-			// 跳过已标记为失效的账号
-			if _, isInvalid := tm.invalidated[i]; isInvalid {
-				continue
-			}
-
-			// 检查是否有缓存，如果没有则尝试刷新
-			cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
-			if _, exists := tm.cache.tokens[cacheKey]; !exists {
-				// 尝试刷新获取状态
-				if tm.isAccountHealthyWithRefresh(i, true) {
-					healthyIndices = append(healthyIndices, i)
-					logger.Debug("成功刷新并添加账号到活跃池",
-						logger.Int("index", i))
-
-					// 如果已达到 batchSize，停止搜索
-					if len(healthyIndices) >= tm.batchSize {
-						break
-					}
-				}
-			}
-		}
+	uncachedCandidates := len(tm.collectUncachedCandidatesUnlocked())
+	if len(healthyIndices) < tm.batchSize && uncachedCandidates > 0 {
+		// 关键修复：不要在请求路径下同步刷新未缓存账号，避免持锁网络请求拖死全局并发。
+		tm.startAsyncPoolWarmupUnlocked("build_active_pool")
 	}
 
 	// 如果健康账号数 <= batchSize，使用全部健康账号
@@ -704,7 +828,9 @@ func (tm *TokenManager) buildActivePool() {
 	logger.Debug("构建活跃池",
 		logger.Int("pool_size", len(tm.activePool)),
 		logger.Int("batch_size", tm.batchSize),
-		logger.Int("healthy_total", len(healthyIndices)))
+		logger.Int("healthy_total", len(healthyIndices)),
+		logger.Int("uncached_candidates", uncachedCandidates),
+		logger.Bool("warmup_running", tm.poolWarmupRunning))
 }
 
 // replaceUnhealthyAccount 替换不健康账号
@@ -730,8 +856,8 @@ func (tm *TokenManager) replaceUnhealthyAccount(unhealthyIndex int) bool {
 		if inPool[i] {
 			continue
 		}
-		// 找到第一个健康的账号（强制刷新以获取最新状态）
-		if tm.isAccountHealthyWithRefresh(i, true) {
+		// 关键修复：仅使用已缓存的健康账号，避免在请求路径做阻塞刷新。
+		if tm.isAccountHealthy(i) {
 			replacement = i
 			break
 		}
@@ -751,6 +877,7 @@ func (tm *TokenManager) replaceUnhealthyAccount(unhealthyIndex int) bool {
 
 	// 没有找到替换账号，保留移除后的池
 	tm.activePool = newPool
+	tm.startAsyncPoolWarmupUnlocked("replace_unhealthy_account")
 
 	logger.Warn("无法找到替换账号",
 		logger.Int("removed_index", unhealthyIndex),
@@ -971,10 +1098,12 @@ func (tm *TokenManager) selectRoundRobinAll() *CachedToken {
 			cfg := tm.configs[configIndex]
 			if !cfg.Disabled {
 				if _, isInvalid := tm.invalidated[configIndex]; !isInvalid {
-					// *** 检查是否已确认用完，避免刷新已耗尽的账号 ***
-					if _, alreadyExhausted := tm.lowBalanceVerified[configIndex]; alreadyExhausted {
-						logger.Debug("账号已确认用完，跳过刷新",
-							logger.Int("index", configIndex))
+					// 余额耗尽且尚未到重置时间时，跳过无意义刷新
+					if exists && shouldSkipRefreshDueToQuota(cached, time.Now()) {
+						logger.Debug("账号额度耗尽且未到重置时间，跳过刷新",
+							logger.Int("index", configIndex),
+							logger.Float64("available", cached.Available),
+							logger.String("next_reset", cached.NextResetTime.Format(time.RFC3339)))
 					} else {
 						// 触发异步刷新（不阻塞）
 						logger.Debug("触发异步刷新单个账号",
@@ -1211,31 +1340,86 @@ func CalculateAvailableCount(usage *types.UsageLimits) float64 {
 	return 0.0
 }
 
-// GetNextResetTime 获取下次重置时间
-// Kiro 额度固定在每月1日 08:00 (UTC+8) 重置
-func GetNextResetTime(usage *types.UsageLimits) time.Time {
-	now := time.Now()
-	currentYear := now.Year()
-	currentMonth := now.Month()
-	currentDay := now.Day()
-
-	// 计算下次重置时间（每月1日 08:00）
-	var resetTime time.Time
-	if currentDay == 1 && now.Hour() < 8 {
-		// 如果是1号且还没到8点，重置时间是今天8点
-		resetTime = time.Date(currentYear, currentMonth, 1, 8, 0, 0, 0, time.Local)
-	} else {
-		// 否则重置时间是下个月1日8点
-		nextMonth := currentMonth + 1
-		nextYear := currentYear
-		if nextMonth > 12 {
-			nextMonth = 1
-			nextYear++
-		}
-		resetTime = time.Date(nextYear, nextMonth, 1, 8, 0, 0, 0, time.Local)
+// parseResetTimestamp 解析 API 返回的 nextDateReset 时间戳
+// 支持秒/毫秒/微秒/纳秒（带小数秒）并统一转换为 UTC 时间。
+func parseResetTimestamp(ts float64) (time.Time, bool) {
+	if ts <= 0 {
+		return time.Time{}, false
 	}
 
-	return resetTime
+	seconds := ts
+	switch {
+	case ts > 1e18: // 纳秒
+		seconds = ts / 1e9
+	case ts > 1e15: // 微秒
+		seconds = ts / 1e6
+	case ts > 1e12: // 毫秒
+		seconds = ts / 1e3
+	}
+
+	sec := int64(seconds)
+	nsec := int64((seconds - float64(sec)) * float64(time.Second))
+	parsed := time.Unix(sec, nsec).UTC()
+	if parsed.Year() < 2000 || parsed.Year() > 2200 {
+		return time.Time{}, false
+	}
+	return parsed, true
+}
+
+// getBillingResetLocation 获取账单重置时区
+// 默认使用美国西海岸时区，可通过 KIRO_BILLING_TIMEZONE 覆盖。
+func getBillingResetLocation() *time.Location {
+	tz := os.Getenv("KIRO_BILLING_TIMEZONE")
+	if tz == "" {
+		tz = "America/Los_Angeles"
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}
+
+// GetNextResetTime 获取下次重置时间
+// 优先使用 API 返回的 nextDateReset；若无效则回退到账单时区的「每月1日 00:00」。
+func GetNextResetTime(usage *types.UsageLimits) time.Time {
+	now := time.Now()
+
+	// 1) 优先使用 API 返回的重置时间，避免本地时区推算误差
+	if usage != nil {
+		candidates := make([]time.Time, 0, 4)
+		if t, ok := parseResetTimestamp(usage.NextDateReset); ok {
+			candidates = append(candidates, t)
+		}
+		for _, breakdown := range usage.UsageBreakdownList {
+			if t, ok := parseResetTimestamp(breakdown.NextDateReset); ok {
+				candidates = append(candidates, t)
+			}
+		}
+		var selected time.Time
+		for _, candidate := range candidates {
+			// 允许少量时钟抖动，过滤明显过期的重置时间
+			if candidate.After(now.Add(-2 * time.Hour)) {
+				if selected.IsZero() || candidate.Before(selected) {
+					selected = candidate
+				}
+			}
+		}
+		if !selected.IsZero() {
+			return selected
+		}
+	}
+
+	// 2) 回退：按账单时区计算下个月1日 00:00
+	loc := getBillingResetLocation()
+	nowInLoc := now.In(loc)
+	year := nowInLoc.Year()
+	month := nowInLoc.Month() + 1
+	if month > 12 {
+		month = 1
+		year++
+	}
+	return time.Date(year, month, 1, 0, 0, 0, 0, loc)
 }
 
 // getUsageCheckerForToken 获取指定token索引的usage checker（带代理支持）
@@ -1580,8 +1764,16 @@ func (tm *TokenManager) MarkTokenInvalid(index int) {
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
 
+	before := len(tm.configs)
 	tm.markTokenInvalidUnlocked(index, "request_invalid", nil)
 	tm.removeInvalidTokensImmediatelyUnlocked("request_invalid")
+	after := len(tm.configs)
+
+	logger.Info("请求阶段失效token处理完成",
+		logger.Int("index", index),
+		logger.Int("before_count", before),
+		logger.Int("after_count", after),
+		logger.Int("removed_count", before-after))
 }
 
 // RemoveToken 删除单个 token（仅失效的可删除）
@@ -2117,6 +2309,19 @@ func (tm *TokenManager) verifyLowBalanceToken(index int) {
 // asyncRefreshToken 异步刷新单个token（使用TokenRefreshManager防重复）
 // 此方法不阻塞调用者，适用于在token选择过程中触发刷新
 func (tm *TokenManager) asyncRefreshToken(index int) {
+	// 额度耗尽且未到重置时间时，不做无意义刷新
+	tm.mutex.RLock()
+	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+	if cached, exists := tm.cache.tokens[cacheKey]; exists && shouldSkipRefreshDueToQuota(cached, time.Now()) {
+		tm.mutex.RUnlock()
+		logger.Debug("异步刷新跳过：额度耗尽且未到重置时间",
+			logger.Int("index", index),
+			logger.Float64("available", cached.Available),
+			logger.String("next_reset", cached.NextResetTime.Format(time.RFC3339)))
+		return
+	}
+	tm.mutex.RUnlock()
+
 	// 使用TokenRefreshManager防止重复刷新
 	_, isNew := tm.refreshManager.StartRefresh(index)
 	if !isNew {
@@ -2632,6 +2837,14 @@ func (tm *TokenManager) refreshActivePoolTokens() {
 			continue
 		}
 
+		if shouldSkipRefreshDueToQuota(cached, time.Now()) {
+			logger.Debug("定时刷新跳过：额度耗尽且未到重置时间",
+				logger.Int("config_index", configIndex),
+				logger.Float64("available", cached.Available),
+				logger.String("next_reset", cached.NextResetTime.Format(time.RFC3339)))
+			continue
+		}
+
 		// 检查是否需要刷新（快要过期或已过期）
 		timeUntilExpiry := time.Until(cached.Token.ExpiresAt)
 		if timeUntilExpiry < threshold {
@@ -2828,6 +3041,7 @@ func (tm *TokenManager) AddToken(config AuthConfig) error {
 
 	// 添加到配置列表
 	tm.configs = append(tm.configs, config)
+	newIndex := len(tm.configs) - 1
 
 	// 重新生成配置顺序
 	tm.configOrder = generateConfigOrder(tm.configs)
@@ -2844,6 +3058,13 @@ func (tm *TokenManager) AddToken(config AuthConfig) error {
 	if err := SaveConfigToFile(tm.configs, configPath); err != nil {
 		logger.Warn("同步配置文件失败", logger.Err(err))
 		return fmt.Errorf("%w: %v", ErrConfigPersistence, err)
+	}
+
+	// 异步预热新账号，避免首次请求命中未缓存状态
+	if tm.batchSize > 0 {
+		tm.startAsyncPoolWarmupUnlocked("add_token")
+	} else {
+		go tm.asyncRefreshToken(newIndex)
 	}
 
 	return nil
@@ -2912,6 +3133,12 @@ func (tm *TokenManager) UpdateToken(index int, authType, refreshToken, clientID,
 		tm.configs[index].Disabled = *disabled
 	}
 
+	// 配置变更后清理旧缓存和低余额标记，避免沿用旧状态
+	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
+	delete(tm.cache.tokens, cacheKey)
+	delete(tm.lowBalanceVerified, index)
+	delete(tm.invalidated, index)
+
 	logger.Info("更新 token",
 		logger.Int("index", index),
 		logger.String("auth_type", tm.configs[index].AuthType))
@@ -2924,6 +3151,15 @@ func (tm *TokenManager) UpdateToken(index int, authType, refreshToken, clientID,
 	if err := SaveConfigToFile(tm.configs, configPath); err != nil {
 		logger.Warn("同步配置文件失败", logger.Err(err))
 		return fmt.Errorf("%w: %v", ErrConfigPersistence, err)
+	}
+
+	// 更新后异步预热，避免请求路径同步刷新
+	if !tm.configs[index].Disabled {
+		if tm.batchSize > 0 {
+			tm.startAsyncPoolWarmupUnlocked("update_token")
+		} else {
+			go tm.asyncRefreshToken(index)
+		}
 	}
 
 	return nil
