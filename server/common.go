@@ -497,7 +497,9 @@ func buildCodeWhispererRequestWithContext(ctx context.Context, c *gin.Context, a
 	}
 
 	// 使用带context的请求创建，支持超时控制
-	req, err := http.NewRequestWithContext(ctx, "POST", config.CodeWhispererURL, bytes.NewReader(cwReqBody))
+	// 根据 token 的 region 构建对应区域的 API URL，确保 IdC token 发送到正确的区域端点
+	apiURL := fmt.Sprintf(config.CodeWhispererURLTemplate, config.RegionOrDefault(tokenInfo.Region))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(cwReqBody))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}

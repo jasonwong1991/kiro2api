@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"kiro2api/config"
 	"kiro2api/logger"
 	"kiro2api/types"
 	"kiro2api/utils"
@@ -39,8 +40,8 @@ func NewUsageLimitsChecker(tokenIndex int, client ...*http.Client) *UsageLimitsC
 
 // CheckUsageLimits 检���token的使用限制 (基于token.md API规范)
 func (c *UsageLimitsChecker) CheckUsageLimits(token types.TokenInfo) (*types.UsageLimits, error) {
-	// 构建请求URL (完全遵循token.md中的示例)
-	baseURL := "https://codewhisperer.us-east-1.amazonaws.com/getUsageLimits"
+	// 构建请求URL (getUsageLimits 固定使用 us-east-1，不支持其他区域)
+	baseURL := config.UsageLimitsURL
 	params := url.Values{}
 	params.Add("isEmailRequired", "true")
 	params.Add("origin", "AI_EDITOR")
