@@ -510,7 +510,7 @@ func (h *AdminHandlers) HandleImportTokens(c *gin.Context) {
 
 			// 设置默认认证类型
 			if token.AuthType == "" {
-				token.AuthType = auth.AuthMethodSocial
+				token.AuthType = auth.AuthMethodIdC
 			}
 
 			// 验证 IdC 认证的必要字段
@@ -592,7 +592,7 @@ func (h *AdminHandlers) HandleAddToken(c *gin.Context) {
 
 	// 设置默认认证类型
 	if req.AuthType == "" {
-		req.AuthType = auth.AuthMethodSocial
+		req.AuthType = auth.AuthMethodIdC
 	}
 
 	// 验证 IdC 认证的必要字段
