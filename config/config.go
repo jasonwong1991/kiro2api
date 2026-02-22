@@ -28,23 +28,20 @@ var ModelMap = map[string]string{
 }
 
 // RefreshTokenURL 刷新token的URL (Social方式，固定 us-east-1)
-const RefreshTokenURL = "https://prod.%s.auth.desktop.kiro.dev/refreshToken"
+const RefreshTokenURL = "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
 
 // IdcRefreshTokenURLTemplate IdC认证方式的刷新token URL - 模板格式
 // 格式: https://oidc.{region}.amazonaws.com/token
-// 不同区域的账号需要使用对应区域的 OIDC 端点
+// 不同区域的账号需要使用对应区域的 OIDC 端点（全球所有 AWS 区域均可用）
 const IdcRefreshTokenURLTemplate = "https://oidc.%s.amazonaws.com/token"
 
-// CodeWhispererURLTemplate CodeWhisperer API URL 模板
-// 格式: https://q.{region}.amazonaws.com/generateAssistantResponse
-// 不同区域的 IdC 账号必须使用对应区域的端点，否则 access token 会被拒绝
-const CodeWhispererURLTemplate = "https://q.%s.amazonaws.com/generateAssistantResponse"
+// CodeWhispererURL CodeWhisperer API URL (固定 us-east-1，仅 us-east-1 和 eu-central-1 有部署)
+const CodeWhispererURL = "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
 
-// McpURLTemplate MCP API URL 模板 (用于 WebSearch 等工具调用)
-// 格式: https://q.{region}.amazonaws.com/mcp
-const McpURLTemplate = "https://q.%s.amazonaws.com/mcp"
+// McpURL MCP API URL (固定 us-east-1)
+const McpURL = "https://q.us-east-1.amazonaws.com/mcp"
 
-// UsageLimitsURL 使用限制检查 URL (固定 us-east-1，该端点不支持其他区域)
+// UsageLimitsURL 使用限制检查 URL (固定 us-east-1，全球唯一端点)
 const UsageLimitsURL = "https://q.us-east-1.amazonaws.com/getUsageLimits"
 
 // DefaultRegion 默认 AWS 区域（Social 账号及未指定 region 时的回退值）

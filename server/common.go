@@ -497,9 +497,8 @@ func buildCodeWhispererRequestWithContext(ctx context.Context, c *gin.Context, a
 	}
 
 	// 使用带context的请求创建，支持超时控制
-	// 根据 token 的 region 构建对应区域的 API URL，确保 IdC token 发送到正确的区域端点
-	apiURL := fmt.Sprintf(config.CodeWhispererURLTemplate, config.RegionOrDefault(tokenInfo.Region))
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(cwReqBody))
+	// Q API 固定 us-east-1（仅 us-east-1 和 eu-central-1 有部署，其他区域 DNS 不可达）
+	req, err := http.NewRequestWithContext(ctx, "POST", config.CodeWhispererURL, bytes.NewReader(cwReqBody))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}

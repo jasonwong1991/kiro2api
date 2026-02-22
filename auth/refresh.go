@@ -92,7 +92,7 @@ func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex in
 	return types.TokenInfo{}, lastErr
 }
 
-// refreshSocialToken 刷新Social认证token (固定使用 us-east-1)
+// refreshSocialToken 刷新Social认证token (固定 us-east-1)
 // client 参数可选：如果为 nil，使用 utils.SharedHTTPClient
 func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenInfo, error) {
 	// 为该账号生成固定的设备指纹（Social 刷新专用）
@@ -111,7 +111,8 @@ func refreshSocialToken(refreshToken string, client *http.Client) (types.TokenIn
 	ctx, cancel := context.WithTimeout(context.Background(), refreshRequestTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", config.RefreshTokenURL, bytes.NewBuffer(reqBody))
+	refreshURL := config.RefreshTokenURL
+	req, err := http.NewRequestWithContext(ctx, "POST", refreshURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return types.TokenInfo{}, fmt.Errorf("创建请求失败: %v", err)
 	}

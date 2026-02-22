@@ -156,9 +156,8 @@ func executeMCPRequestWithRetry(c *gin.Context, mcpReq types.McpRequest, authSer
 			continue
 		}
 
-		// 构建 URL (https://q.{region}.amazonaws.com/mcp)
-		// 使用 token 的 region，确保 IdC token 发送到正确的区域端点
-		url := fmt.Sprintf(config.McpURLTemplate, config.RegionOrDefault(tokenInfo.Region))
+		// MCP API 固定 us-east-1
+		url := config.McpURL
 
 		reqBody, _ := utils.SafeMarshal(mcpReq)
 
