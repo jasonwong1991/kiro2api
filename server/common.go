@@ -215,6 +215,15 @@ func isRetryableStatusCode(statusCode int) bool {
 	return false
 }
 
+// isCapacityError 检查是否为上游容量不足的临时错误（可重试）
+func isCapacityError(responseBody []byte) bool {
+	var errorBody CodeWhispererErrorBody
+	if err := json.Unmarshal(responseBody, &errorBody); err != nil {
+		return false
+	}
+	return errorBody.Reason == "INSUFFICIENT_MODEL_CAPACITY"
+}
+
 // isTokenInvalidUpstreamError 判断上游错误是否属于 token 失效场景
 // 支持 401/403 以及包含失效关键词的其它 4xx/5xx 响应。
 func isTokenInvalidUpstreamError(statusCode int, responseBody []byte) bool {
@@ -373,6 +382,18 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 					)...)
 				authService.GetTokenManager().MarkTokenInvalid(tokenInfo.ConfigIndex)
 				time.Sleep(config.RetryDelay)
+				continue
+			}
+
+			// 容量不足错误：不标记token失效，直接延迟重试
+			if isCapacityError(body) {
+				logger.Warn("上游容量不足，延迟重试",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Int("status_code", resp.StatusCode),
+						logger.String("response_body", string(body)),
+					)...)
+				time.Sleep(config.UpstreamRetryDelay)
 				continue
 			}
 

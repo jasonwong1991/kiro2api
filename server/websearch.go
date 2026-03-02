@@ -254,6 +254,14 @@ func executeMCPRequestWithRetry(c *gin.Context, mcpReq types.McpRequest, authSer
 		}
 
 		// 错误处理
+		if isCapacityError(body) {
+			logger.Warn("MCP上游容量不足，延迟重试",
+				logger.Int("attempt", attempt),
+				logger.Int("status_code", resp.StatusCode))
+			time.Sleep(config.UpstreamRetryDelay)
+			continue
+		}
+
 		lastErr = fmt.Errorf("MCP API status: %d", resp.StatusCode)
 		if isRetryableStatusCode(resp.StatusCode) {
 			time.Sleep(config.RetryDelay)
