@@ -36,6 +36,7 @@ type TokenManager struct {
 	currentIndex int               // 当前使用的token索引
 	exhausted    map[string]bool   // 已耗尽的token记录
 	invalidated  map[int]time.Time // 失效的token记录（索引 -> 失效时间）
+	cooldowns    map[int]time.Time // 冷却中的token记录（索引 -> 冷却结束时间）
 	strategy     SelectionStrategy // token选择策略
 	configPath   string            // 配置文件路径（用于同步更新）
 
@@ -145,6 +146,7 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 		currentIndex:       0,
 		exhausted:          make(map[string]bool),
 		invalidated:        make(map[int]time.Time),
+		cooldowns:          make(map[int]time.Time),
 		lowBalanceVerified: make(map[int]time.Time), // 初始化低余额验证记录
 		strategy:           strategy,
 		configPath:         configPath,
@@ -260,9 +262,16 @@ func (tm *TokenManager) IsAllTokensUnavailable() bool {
 
 	// 检查是否有任何可用的token
 	for i, key := range tm.configOrder {
-		// *** 新增：跳过已失效的token ***
+		// 跳过已失效的token
 		if _, isInvalid := tm.invalidated[i]; isInvalid {
 			continue
+		}
+		// 跳过冷却中的token（如果冷却已过期则清除）
+		if cooldownUntil, isCooling := tm.cooldowns[i]; isCooling {
+			if time.Now().Before(cooldownUntil) {
+				continue
+			}
+			delete(tm.cooldowns, i)
 		}
 
 		if cached, exists := tm.cache.tokens[key]; exists {
@@ -418,9 +427,16 @@ func (tm *TokenManager) selectSequentialToken() *CachedToken {
 	// 如果没有配置顺序，降级到按map遍历顺序
 	if len(tm.configOrder) == 0 {
 		for key, cached := range tm.cache.tokens {
-			// *** 新增：跳过已失效的token ***
+			// 跳过已失效的token
 			if _, isInvalid := tm.invalidated[cached.Index]; isInvalid {
 				continue
+			}
+			// 跳过冷却中的token
+			if cooldownUntil, isCooling := tm.cooldowns[cached.Index]; isCooling {
+				if time.Now().Before(cooldownUntil) {
+					continue
+				}
+				delete(tm.cooldowns, cached.Index)
 			}
 
 			if cached.IsUsable() {
@@ -437,13 +453,25 @@ func (tm *TokenManager) selectSequentialToken() *CachedToken {
 	for attempts := 0; attempts < len(tm.configOrder); attempts++ {
 		currentKey := tm.configOrder[tm.currentIndex]
 
-		// *** 新增：跳过已失效的token ***
+		// 跳过已失效的token
 		if _, isInvalid := tm.invalidated[tm.currentIndex]; isInvalid {
 			tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
 			logger.Debug("token已失效，跳过",
 				logger.String("invalid_key", currentKey),
 				logger.Int("next_index", tm.currentIndex))
 			continue
+		}
+		// 跳过冷却中的token
+		if cooldownUntil, isCooling := tm.cooldowns[tm.currentIndex]; isCooling {
+			if time.Now().Before(cooldownUntil) {
+				tm.currentIndex = (tm.currentIndex + 1) % len(tm.configOrder)
+				logger.Debug("token冷却中，跳过",
+					logger.String("cooling_key", currentKey),
+					logger.Int("next_index", tm.currentIndex),
+					logger.String("cooldown_until", cooldownUntil.Format(time.RFC3339)))
+				continue
+			}
+			delete(tm.cooldowns, tm.currentIndex)
 		}
 
 		// 检查这个token是否存在且可用
@@ -498,9 +526,16 @@ func (tm *TokenManager) selectRandomToken() *CachedToken {
 	var availableKeys []string
 
 	for i, key := range tm.configOrder {
-		// *** 新增：跳过已失效的token ***
+		// 跳过已失效的token
 		if _, isInvalid := tm.invalidated[i]; isInvalid {
 			continue
+		}
+		// 跳过冷却中的token
+		if cooldownUntil, isCooling := tm.cooldowns[i]; isCooling {
+			if time.Now().Before(cooldownUntil) {
+				continue
+			}
+			delete(tm.cooldowns, i)
 		}
 
 		if cached, exists := tm.cache.tokens[key]; exists {
@@ -719,6 +754,14 @@ func (tm *TokenManager) isAccountHealthyWithRefresh(index int, forceRefresh bool
 	// 检查是否失效
 	if _, isInvalid := tm.invalidated[index]; isInvalid {
 		return false
+	}
+
+	// 检查是否在冷却中
+	if cooldownUntil, isCooling := tm.cooldowns[index]; isCooling {
+		if time.Now().Before(cooldownUntil) {
+			return false
+		}
+		delete(tm.cooldowns, index)
 	}
 
 	// 检查缓存
@@ -1118,8 +1161,21 @@ func (tm *TokenManager) selectRoundRobinAll() *CachedToken {
 
 		// 再次检查缓存（刷新后的结果）
 		if cached, exists := tm.cache.tokens[currentKey]; exists {
-			// *** 新增：跳过已失效的token ***
-			if _, isInvalid := tm.invalidated[configIndex]; !isInvalid {
+			// 跳过已失效和冷却中的token
+			isInvalid := false
+			if _, inv := tm.invalidated[configIndex]; inv {
+				isInvalid = true
+			}
+			if !isInvalid {
+				if cooldownUntil, isCooling := tm.cooldowns[configIndex]; isCooling {
+					if time.Now().Before(cooldownUntil) {
+						isInvalid = true
+					} else {
+						delete(tm.cooldowns, configIndex)
+					}
+				}
+			}
+			if !isInvalid {
 				if cached.IsUsable() {
 					logger.Debug("全局轮询策略选择token",
 						logger.String("selected_key", currentKey),
@@ -1757,6 +1813,33 @@ func (tm *TokenManager) removeInvalidTokensImmediatelyUnlocked(trigger string) {
 	}
 }
 
+// MarkTokenCooldown 将token置于临时冷却状态（不删除）
+// 用于处理临时性的上游错误（如通用401/403、rate limit等）
+// 冷却期间token不会被选中使用，冷却结束后自动恢复
+func (tm *TokenManager) MarkTokenCooldown(index int, duration time.Duration) {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+
+	if index < 0 || index >= len(tm.configs) {
+		logger.Warn("尝试冷却无效索引的token",
+			logger.Int("index", index),
+			logger.Int("configs_len", len(tm.configs)))
+		return
+	}
+
+	cooldownUntil := time.Now().Add(duration)
+	tm.cooldowns[index] = cooldownUntil
+
+	// 从活跃池移除（但不标记为失效，不删除）
+	tm.removeFromActivePoolUnlocked(index)
+
+	logger.Warn("token进入冷却期",
+		logger.Int("index", index),
+		logger.String("auth_type", tm.configs[index].AuthType),
+		logger.Duration("duration", duration),
+		logger.String("cooldown_until", cooldownUntil.Format(time.RFC3339)))
+}
+
 // MarkTokenInvalid 标记指定索引的token为失效
 // 用于在请求时检测到token失效（如401/403错误）时立即标记
 // 这样可以避免后续请求继续使用已失效的token
@@ -1804,6 +1887,17 @@ func (tm *TokenManager) RemoveToken(index int) error {
 		// i == index 的被删除，不添加
 	}
 	tm.invalidated = newInvalidated
+
+	// 更新冷却记录（索引需要调整）
+	newCooldowns := make(map[int]time.Time)
+	for i, t := range tm.cooldowns {
+		if i < index {
+			newCooldowns[i] = t
+		} else if i > index {
+			newCooldowns[i-1] = t
+		}
+	}
+	tm.cooldowns = newCooldowns
 
 	// 更新低余额验证记录（索引需要调整）
 	newLowBalanceVerified := make(map[int]time.Time)
@@ -1887,8 +1981,9 @@ func (tm *TokenManager) removeInvalidTokensUnlocked() (int, error) {
 		removedCount++
 	}
 
-	// 清空失效记录和低余额验证记录
+	// 清空失效记录、冷却记录和低余额验证记录
 	tm.invalidated = make(map[int]time.Time)
+	tm.cooldowns = make(map[int]time.Time)
 	tm.lowBalanceVerified = make(map[int]time.Time)
 
 	// 重新生成配置顺序

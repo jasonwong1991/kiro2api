@@ -470,6 +470,10 @@ func IPConcurrencyMiddleware() gin.HandlerFunc {
 
 		clientIP, ipSource := resolveClientIPForLimit(c)
 
+		// Store client IP and limiter in context for retry-aware release/reacquire
+		c.Set("ip_limiter_client_ip", clientIP)
+		c.Set("ip_limiter", limiter)
+
 		// 检查是否在白名单中
 		whitelistManager := GetIPWhitelistManager()
 		if whitelistManager != nil && whitelistManager.IsWhitelisted(clientIP) {
@@ -536,8 +540,13 @@ func IPConcurrencyMiddleware() gin.HandlerFunc {
 				logger.Duration("wait_time", waitTime))
 		}
 
-		// 确保请求结束时释放槽位
-		defer limiter.Release(clientIP)
+		// 确保请求结束时释放槽位（仅当槽位仍被持有时）
+		c.Set("ip_slot_held", true)
+		defer func() {
+			if held, exists := c.Get("ip_slot_held"); exists && held.(bool) {
+				limiter.Release(clientIP)
+			}
+		}()
 
 		c.Next()
 	}

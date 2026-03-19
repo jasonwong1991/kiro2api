@@ -29,6 +29,18 @@ const upstreamNonStreamTimeout = 120 * time.Second
 // upstreamStreamTimeout 上游流式请求超时时间（较长，但仍需防止无限等待）
 const upstreamStreamTimeout = 5 * time.Minute
 
+// TokenErrorSeverity token错误严重程度分级
+type TokenErrorSeverity int
+
+const (
+	TokenErrorNone       TokenErrorSeverity = iota // 非token错误
+	TokenErrorTemporary                             // 临时错误，冷却不删除
+	TokenErrorDefinitive                            // 确定性错误，永久删除
+)
+
+// tokenCooldownDuration token冷却持续时间（临时错误后的恢复窗口）
+const tokenCooldownDuration = 5 * time.Minute
+
 // cancelOnCloseReadCloser 确保在响应体关闭时释放 context 相关资源（timer 等）。
 // 适用于：在成功路径必须保留 ctx（用于读取 resp.Body），但又不能泄漏 cancel 的场景。
 type cancelOnCloseReadCloser struct {
@@ -224,18 +236,17 @@ func isCapacityError(responseBody []byte) bool {
 	return errorBody.Reason == "INSUFFICIENT_MODEL_CAPACITY"
 }
 
-// isTokenInvalidUpstreamError 判断上游错误是否属于 token 失效场景
-// 支持 401/403 以及包含失效关键词的其它 4xx/5xx 响应。
-func isTokenInvalidUpstreamError(statusCode int, responseBody []byte) bool {
-	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
-		return true
-	}
+// classifyTokenError 对上游错误进行分级分类
+// 返回 TokenErrorDefinitive（永久失效，应删除）、TokenErrorTemporary（临时错误，应冷却）或 TokenErrorNone
+func classifyTokenError(statusCode int, responseBody []byte) TokenErrorSeverity {
 	if statusCode < http.StatusBadRequest {
-		return false
+		return TokenErrorNone
 	}
 
 	body := strings.ToLower(string(responseBody))
-	patterns := []string{
+
+	// 确定性失效关键词（token本身无效，永久删除）
+	definitivePatterns := []string{
 		"invalid_grant",
 		"invalid_token",
 		"token expired",
@@ -244,28 +255,82 @@ func isTokenInvalidUpstreamError(statusCode int, responseBody []byte) bool {
 		"token is invalid",
 		"expiredtoken",
 		"invalidtoken",
-		"bad credentials",
 		"unrecognizedclient",
 		"unauthorizedclient",
+		"security token included in the request is invalid",
+		"permanently suspended",
+		"permanently_suspended",
+		"permanently is suspended",
+	}
+	for _, pattern := range definitivePatterns {
+		if strings.Contains(body, pattern) {
+			return TokenErrorDefinitive
+		}
+	}
+
+	// 401/403 没有确定性关键词 → 视为临时错误
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return TokenErrorTemporary
+	}
+
+	// 其他状态码的临时错误关键词
+	temporaryPatterns := []string{
 		"unauthorized",
 		"forbidden",
 		"access denied",
 		"permission denied",
-		"temporarily is suspended",
+		"bad credentials",
 		"temporarily suspended",
-		"permanently is suspended",
-		"permanently suspended",
 		"temporarily_suspended",
-		"permanently_suspended",
+		"temporarily is suspended",
 		"suspended",
-		"security token included in the request is invalid",
 	}
-	for _, pattern := range patterns {
+	for _, pattern := range temporaryPatterns {
 		if strings.Contains(body, pattern) {
-			return true
+			return TokenErrorTemporary
 		}
 	}
-	return false
+
+	return TokenErrorNone
+}
+
+// releaseIPSlot temporarily releases the IP concurrency slot (for use during retry delays)
+func releaseIPSlot(c *gin.Context) {
+	ip, exists := c.Get("ip_limiter_client_ip")
+	if !exists {
+		return
+	}
+	limiterVal, exists := c.Get("ip_limiter")
+	if !exists {
+		return
+	}
+	limiterVal.(*IPConcurrencyLimiter).Release(ip.(string))
+	c.Set("ip_slot_held", false)
+}
+
+// reacquireIPSlot re-acquires the IP concurrency slot after a retry delay.
+// Returns false if the slot could not be acquired (timeout or client disconnect).
+func reacquireIPSlot(c *gin.Context) bool {
+	ip, exists := c.Get("ip_limiter_client_ip")
+	if !exists {
+		return true // no limiter configured, proceed
+	}
+	limiterVal, exists := c.Get("ip_limiter")
+	if !exists {
+		return true
+	}
+	limiter := limiterVal.(*IPConcurrencyLimiter)
+	clientIP := ip.(string)
+
+	acquired, waitTime := limiter.Acquire(c.Request.Context(), clientIP)
+	if !acquired {
+		logger.Warn("重试时重新获取IP槽位失败",
+			logger.String("client_ip", clientIP),
+			logger.Duration("wait_time", waitTime))
+		return false
+	}
+	c.Set("ip_slot_held", true)
+	return true
 }
 
 // executeCodeWhispererRequestWithRetry 带重试的请求执行（换 token 重试）
@@ -297,7 +362,12 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 			}
 
 			if attempt < config.RetryMaxAttempts {
+				releaseIPSlot(c)
 				time.Sleep(config.UpstreamRetryDelay)
+				if !reacquireIPSlot(c) {
+					respondError(c, http.StatusTooManyRequests, "Too many concurrent requests from your IP during retry")
+					return nil, tokenInfo, fmt.Errorf("IP concurrency slot reacquire failed")
+				}
 				continue
 			}
 			respondError(c, http.StatusInternalServerError, "获取token失败: %v", err)
@@ -359,7 +429,12 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 			}
 			lastErr = err
 			if attempt < config.RetryMaxAttempts {
+				releaseIPSlot(c)
 				time.Sleep(config.UpstreamRetryDelay)
+				if !reacquireIPSlot(c) {
+					respondError(c, http.StatusTooManyRequests, "Too many concurrent requests from your IP during retry")
+					return nil, tokenInfo, fmt.Errorf("IP concurrency slot reacquire failed")
+				}
 				continue
 			}
 			handleRequestSendError(c, err)
@@ -372,20 +447,7 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 
-			if isTokenInvalidUpstreamError(resp.StatusCode, body) {
-				logger.Warn("检测到token失效错误，标记token为失效并换token重试",
-					addReqFields(c,
-						logger.Int("attempt", attempt),
-						logger.Int("status_code", resp.StatusCode),
-						logger.Int("token_index", tokenInfo.ConfigIndex),
-						logger.String("response_body", string(body)),
-					)...)
-				authService.GetTokenManager().MarkTokenInvalid(tokenInfo.ConfigIndex)
-				time.Sleep(config.RetryDelay)
-				continue
-			}
-
-			// 容量不足错误：不标记token失效，直接延迟重试
+			// 优先检查容量错误（避免403容量错误被误分类为token错误）
 			if isCapacityError(body) {
 				logger.Warn("上游容量不足，延迟重试",
 					addReqFields(c,
@@ -393,7 +455,47 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 						logger.Int("status_code", resp.StatusCode),
 						logger.String("response_body", string(body)),
 					)...)
+				releaseIPSlot(c)
 				time.Sleep(config.UpstreamRetryDelay)
+				if !reacquireIPSlot(c) {
+					respondError(c, http.StatusTooManyRequests, "Too many concurrent requests from your IP during retry")
+					return nil, tokenInfo, fmt.Errorf("IP concurrency slot reacquire failed")
+				}
+				continue
+			}
+
+			severity := classifyTokenError(resp.StatusCode, body)
+			if severity == TokenErrorDefinitive {
+				logger.Warn("检测到token确定性失效，标记token为失效并换token重试",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Int("status_code", resp.StatusCode),
+						logger.Int("token_index", tokenInfo.ConfigIndex),
+						logger.String("response_body", string(body)),
+					)...)
+				authService.GetTokenManager().MarkTokenInvalid(tokenInfo.ConfigIndex)
+				releaseIPSlot(c)
+				time.Sleep(config.RetryDelay)
+				if !reacquireIPSlot(c) {
+					respondError(c, http.StatusTooManyRequests, "Too many concurrent requests from your IP during retry")
+					return nil, tokenInfo, fmt.Errorf("IP concurrency slot reacquire failed")
+				}
+				continue
+			} else if severity == TokenErrorTemporary {
+				logger.Warn("检测到token临时错误，冷却token并换token重试",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Int("status_code", resp.StatusCode),
+						logger.Int("token_index", tokenInfo.ConfigIndex),
+						logger.String("response_body", string(body)),
+					)...)
+				authService.GetTokenManager().MarkTokenCooldown(tokenInfo.ConfigIndex, tokenCooldownDuration)
+				releaseIPSlot(c)
+				time.Sleep(config.RetryDelay)
+				if !reacquireIPSlot(c) {
+					respondError(c, http.StatusTooManyRequests, "Too many concurrent requests from your IP during retry")
+					return nil, tokenInfo, fmt.Errorf("IP concurrency slot reacquire failed")
+				}
 				continue
 			}
 
@@ -404,7 +506,12 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 						logger.Int("status_code", resp.StatusCode),
 						logger.String("response_body", string(body)),
 					)...)
+				releaseIPSlot(c)
 				time.Sleep(config.RetryDelay)
+				if !reacquireIPSlot(c) {
+					respondError(c, http.StatusTooManyRequests, "Too many concurrent requests from your IP during retry")
+					return nil, tokenInfo, fmt.Errorf("IP concurrency slot reacquire failed")
+				}
 				continue
 			}
 
@@ -413,11 +520,11 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 		}
 
 		// 不可重试或已达最大重试次数，检查错误
-		isTokenInvalidFinal := false
+		var finalSeverity TokenErrorSeverity
 		if resp.StatusCode != http.StatusOK && attempt == config.RetryMaxAttempts {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			isTokenInvalidFinal = isTokenInvalidUpstreamError(resp.StatusCode, body)
+			finalSeverity = classifyTokenError(resp.StatusCode, body)
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 		}
 
@@ -425,14 +532,21 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 			cancel() // 显式释放 context
 			resp.Body.Close()
 
-			// 终态如果确认是 token 失效，也标记失效（便于管理页可见）
-			if isTokenInvalidFinal || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-				logger.Warn("最终错误为token失效，标记token为失效",
+			// 终态根据错误严重程度决定处理方式
+			if finalSeverity == TokenErrorDefinitive {
+				logger.Warn("最终错误为token确定性失效，标记token为失效",
 					addReqFields(c,
 						logger.Int("attempt", attempt),
 						logger.Int("token_index", tokenInfo.ConfigIndex),
 					)...)
 				authService.GetTokenManager().MarkTokenInvalid(tokenInfo.ConfigIndex)
+			} else if finalSeverity == TokenErrorTemporary {
+				logger.Warn("最终错误为token临时错误，冷却token",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Int("token_index", tokenInfo.ConfigIndex),
+					)...)
+				authService.GetTokenManager().MarkTokenCooldown(tokenInfo.ConfigIndex, tokenCooldownDuration)
 			}
 
 			return nil, tokenInfo, fmt.Errorf("CodeWhisperer API error")
