@@ -549,6 +549,26 @@ func (h *AdminHandlers) HandleImportTokens(c *gin.Context) {
 			})
 			return
 		}
+
+		// 触发新导入账号的后台刷新
+		go func() {
+			logger.Info("开始后台刷新新导入的账号",
+				logger.Int("count", result.Success))
+			refreshResults, err := tm.RefreshTokens([]int{})
+			if err != nil {
+				logger.Warn("后台刷新导入账号失败", logger.Err(err))
+				return
+			}
+			successCount := 0
+			for _, r := range refreshResults {
+				if r.Success {
+					successCount++
+				}
+			}
+			logger.Info("后台刷新导入账号完成",
+				logger.Int("total", len(refreshResults)),
+				logger.Int("success", successCount))
+		}()
 	}
 
 	// 限制错误信息数量，避免响应过大

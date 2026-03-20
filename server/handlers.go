@@ -575,6 +575,19 @@ func handleTokenPoolAPI(c *gin.Context) {
 			} else {
 				tokenData["error"] = "Token已失效"
 			}
+		} else if status.IsCooldown {
+			tokenData["status"] = "cooldown"
+			if status.CooldownUntil != nil {
+				tokenData["cooldown_until"] = status.CooldownUntil.Format(time.RFC3339)
+				remaining := time.Until(*status.CooldownUntil)
+				if remaining > 0 {
+					tokenData["error"] = fmt.Sprintf("冷却中 (剩余 %s)", remaining.Round(time.Second).String())
+				} else {
+					tokenData["error"] = "冷却即将结束"
+				}
+			} else {
+				tokenData["error"] = "冷却中"
+			}
 		} else if status.Available < exhaustedThreshold {
 			tokenData["status"] = "exhausted"
 		} else {

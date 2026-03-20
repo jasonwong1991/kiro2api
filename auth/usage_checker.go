@@ -115,6 +115,13 @@ func (c *UsageLimitsChecker) CheckUsageLimits(token types.TokenInfo) (*types.Usa
 				Message:    string(body),
 			}
 		}
+		// 429 Too Many Requests → 返回可重试错误（不标记为token失效）
+		if resp.StatusCode == http.StatusTooManyRequests {
+			logger.Warn("使用限制检查遭遇429限流",
+				logger.Int("token_index", c.tokenIndex),
+				logger.Int("status_code", resp.StatusCode))
+			return nil, fmt.Errorf("使用限制检查被限流(429): %s", string(body))
+		}
 		return nil, fmt.Errorf("使用限制检查失败: 状态码 %d, 响应: %s", resp.StatusCode, string(body))
 	}
 

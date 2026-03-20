@@ -949,6 +949,8 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 	unhealthyAccounts := make(map[int]bool)
 	// 记录本轮是否已经尝试过替换，避免频繁替换
 	hasTriedReplacement := false
+	maxReplacements := 3 // 防止无限替换循环
+	totalReplacements := 0
 
 	for attempt := 0; attempt < poolSize; attempt++ {
 		relativeIndex := (startIndex + attempt) % poolSize
@@ -988,6 +990,7 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 						logger.Int("config_index", configIndex))
 
 					replaced := tm.replaceUnhealthyAccount(configIndex)
+					totalReplacements++
 					if replaced {
 						// 替换成功，重新计算池大小并从头开始轮询
 						poolSize = len(tm.activePool)
@@ -1001,7 +1004,9 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 						attempt = -1 // 下次循环会+1变成0
 						startIndex = 0
 						unhealthyAccounts = make(map[int]bool)
-						hasTriedReplacement = false // 重置标志，允许在新一轮中再次替换
+						if totalReplacements < maxReplacements {
+							hasTriedReplacement = false // 允许在新一轮中再次替换
+						}
 						continue
 					} else {
 						// 替换失败（可能已移除不健康账号），更新池大小
@@ -1015,7 +1020,9 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 						// 池已改变，从头重新开始轮询
 						attempt = -1
 						startIndex = 0
-						hasTriedReplacement = false // 重置标志，允许在新一轮中再次替换
+						if totalReplacements < maxReplacements {
+							hasTriedReplacement = false // 允许在新一轮中再次替换
+						}
 						continue
 					}
 				}
@@ -1097,8 +1104,9 @@ func (tm *TokenManager) selectRoundRobinWithPool() *CachedToken {
 		}
 	}
 
-	logger.Warn("活跃池轮询失败，无可用token")
-	return nil
+	// 兜底：活跃池完全不可用时，尝试从全局池中选择（包含未在活跃池中的账号）
+	logger.Info("活跃池不可用，尝试全局轮询兜底")
+	return tm.selectRoundRobinAll()
 }
 
 // selectRoundRobinAll 全部账号轮询（原逻辑，batchSize=0 时使用）
@@ -1565,6 +1573,8 @@ type TokenStatus struct {
 	Disabled       bool               `json:"disabled"`
 	IsInvalid      bool               `json:"is_invalid"`
 	InvalidatedAt  *time.Time         `json:"invalidated_at,omitempty"`
+	IsCooldown     bool               `json:"is_cooldown"`
+	CooldownUntil  *time.Time         `json:"cooldown_until,omitempty"`
 	RefreshStatus  string             `json:"refresh_status"` // not_refreshed: 未刷新, active: 正常, invalid: 失效
 	Available      float64            `json:"available"`
 	UsageInfo      *types.UsageLimits `json:"usage_info,omitempty"`
@@ -1594,12 +1604,22 @@ func (tm *TokenManager) GetAllTokensStatus() []TokenStatus {
 			status.InvalidatedAt = &invalidTime
 		}
 
+		// 检查是否在冷却中
+		if cooldownUntil, isCooling := tm.cooldowns[i]; isCooling {
+			if time.Now().Before(cooldownUntil) {
+				status.IsCooldown = true
+				status.CooldownUntil = &cooldownUntil
+			}
+		}
+
 		// 获取缓存信息
 		cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, i)
 		if cached, exists := tm.cache.tokens[cacheKey]; exists {
 			// 已刷新过的账号
 			if status.IsInvalid {
 				status.RefreshStatus = "invalid"
+			} else if status.IsCooldown {
+				status.RefreshStatus = "cooldown"
 			} else {
 				status.RefreshStatus = "active"
 			}
@@ -1873,6 +1893,12 @@ func (tm *TokenManager) RemoveToken(index int) error {
 		return fmt.Errorf("只能删除失效的 token，索引 %d 的 token 未失效", index)
 	}
 
+	// 清理代理映射（在删除配置前）
+	if tm.proxyPool != nil {
+		tokenIndexStr := fmt.Sprintf("%d", index)
+		tm.proxyPool.ResetTokenProxy(tokenIndexStr)
+	}
+
 	// 从配置中移除
 	tm.configs = append(tm.configs[:index], tm.configs[index+1:]...)
 
@@ -1940,6 +1966,18 @@ func (tm *TokenManager) RemoveToken(index int) error {
 	return nil
 }
 
+// cleanupProxyMappingsForIndices 清理指定索引的代理映射
+// 调用者必须持有 tm.mutex
+func (tm *TokenManager) cleanupProxyMappingsForIndices(indices []int) {
+	if tm.proxyPool == nil {
+		return
+	}
+	for _, index := range indices {
+		tokenIndexStr := fmt.Sprintf("%d", index)
+		tm.proxyPool.ResetTokenProxy(tokenIndexStr)
+	}
+}
+
 // removeInvalidTokensUnlocked 批量删除所有失效的 token（内部方法，调用者必须持有锁）
 func (tm *TokenManager) removeInvalidTokensUnlocked() (int, error) {
 	if len(tm.invalidated) == 0 {
@@ -1974,6 +2012,9 @@ func (tm *TokenManager) removeInvalidTokensUnlocked() (int, error) {
 		}
 	}
 
+	// 清理代理映射（在删除配置前）
+	tm.cleanupProxyMappingsForIndices(indices)
+
 	// 从后往前删除
 	removedCount := 0
 	for _, index := range indices {
@@ -1981,16 +2022,58 @@ func (tm *TokenManager) removeInvalidTokensUnlocked() (int, error) {
 		removedCount++
 	}
 
-	// 清空失效记录、冷却记录和低余额验证记录
+	// 清空失效记录
 	tm.invalidated = make(map[int]time.Time)
-	tm.cooldowns = make(map[int]time.Time)
-	tm.lowBalanceVerified = make(map[int]time.Time)
+
+	// 选择性重建冷却记录（只保留未删除的索引，并重新映射索引）
+	newCooldowns := make(map[int]time.Time)
+	for oldIdx, t := range tm.cooldowns {
+		// 计算删除后的新索引
+		newIdx := oldIdx
+		for _, deletedIdx := range indices {
+			if oldIdx == deletedIdx {
+				newIdx = -1 // 标记为已删除
+				break
+			}
+			if deletedIdx < oldIdx {
+				newIdx--
+			}
+		}
+		if newIdx >= 0 {
+			newCooldowns[newIdx] = t
+		}
+	}
+	tm.cooldowns = newCooldowns
+
+	// 选择性重建低余额验证记录
+	newLowBalance := make(map[int]time.Time)
+	for oldIdx, t := range tm.lowBalanceVerified {
+		newIdx := oldIdx
+		for _, deletedIdx := range indices {
+			if oldIdx == deletedIdx {
+				newIdx = -1
+				break
+			}
+			if deletedIdx < oldIdx {
+				newIdx--
+			}
+		}
+		if newIdx >= 0 {
+			newLowBalance[newIdx] = t
+		}
+	}
+	tm.lowBalanceVerified = newLowBalance
 
 	// 重新生成配置顺序
 	tm.configOrder = generateConfigOrder(tm.configs)
 
 	// 重建整个缓存（因为所有索引都变了）
 	tm.rebuildCacheAfterDeletion()
+
+	// 重建代理映射索引（删除后索引前移，代理映射的字符串key需要同步更新）
+	if tm.proxyPool != nil {
+		tm.proxyPool.CleanupAndReindexTokenMappings(indices)
+	}
 
 	// 清空并重建活跃池（如果使用活跃池策略）
 	if tm.batchSize > 0 {
@@ -2860,12 +2943,22 @@ func (tm *TokenManager) getTokenStatusUnlocked(index int) (*TokenStatus, error) 
 		status.InvalidatedAt = &invalidTime
 	}
 
+	// 检查是否在冷却中
+	if cooldownUntil, isCooling := tm.cooldowns[index]; isCooling {
+		if time.Now().Before(cooldownUntil) {
+			status.IsCooldown = true
+			status.CooldownUntil = &cooldownUntil
+		}
+	}
+
 	// 获取缓存信息
 	cacheKey := fmt.Sprintf(config.TokenCacheKeyFormat, index)
 	if cached, exists := tm.cache.tokens[cacheKey]; exists {
 		// 已刷新过的账号
 		if status.IsInvalid {
 			status.RefreshStatus = "invalid"
+		} else if status.IsCooldown {
+			status.RefreshStatus = "cooldown"
 		} else {
 			status.RefreshStatus = "active"
 		}

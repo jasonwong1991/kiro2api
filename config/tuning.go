@@ -32,6 +32,7 @@ const (
 	UpstreamRetryDelay = 500 * time.Millisecond
 
 	// RetryableStatusCodes 可重试的 HTTP 状态码
+	// 429: Too Many Requests
 	// 500: Internal Server Error
 	// 502: Bad Gateway
 	// 503: Service Unavailable
@@ -39,4 +40,4 @@ const (
 )
 
 // RetryableStatusCodes 可重试的状态码列表
-var RetryableStatusCodes = []int{500, 502, 503, 504}
+var RetryableStatusCodes = []int{429, 500, 502, 503, 504}

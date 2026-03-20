@@ -281,7 +281,7 @@ class TokenDashboard {
 
     updateStatusBar(tokens) {
         const total = tokens.length;
-        const active = tokens.filter(t => !t.is_invalid && !t.disabled && t.available >= 1).length;
+        const active = tokens.filter(t => !t.is_invalid && !t.disabled && !t.is_cooldown && t.available >= 1).length;
 
         document.getElementById('totalTokens').textContent = total;
         document.getElementById('activeTokens').textContent = active;
@@ -295,6 +295,7 @@ class TokenDashboard {
     getStatusClass(token) {
         if (token.refresh_status === 'not_refreshed') return 'status-not-refreshed';
         if (token.refresh_status === 'invalid' || token.is_invalid) return 'status-invalid';
+        if (token.refresh_status === 'cooldown' || token.is_cooldown) return 'status-cooldown';
         if (token.disabled) return 'status-exhausted';
 
         const available = token.available || 0;
@@ -306,6 +307,7 @@ class TokenDashboard {
     getStatusText(token) {
         if (token.refresh_status === 'not_refreshed') return '未刷新';
         if (token.refresh_status === 'invalid' || token.is_invalid) return '失效';
+        if (token.refresh_status === 'cooldown' || token.is_cooldown) return '冷却中';
         if (token.disabled) return '已禁用';
 
         const available = token.available || 0;

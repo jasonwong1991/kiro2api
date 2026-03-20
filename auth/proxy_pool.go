@@ -572,6 +572,60 @@ func (pm *ProxyPoolManager) ResetTokenProxy(tokenIndex string) {
 	}
 }
 
+// CleanupAndReindexTokenMappings 清理已删除token的代理映射并重建索引
+// deletedIndices: 已删除的token索引列表（降序排列）
+// 在批量删除token后调用，确保代理映射与新的token索引一致
+func (pm *ProxyPoolManager) CleanupAndReindexTokenMappings(deletedIndices []int) {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	if len(deletedIndices) == 0 {
+		return
+	}
+
+	// 构建删除集合
+	deletedSet := make(map[int]bool, len(deletedIndices))
+	for _, idx := range deletedIndices {
+		deletedSet[idx] = true
+	}
+
+	// 重建 tokenProxyMap：删除已删除索引的映射，重新计算剩余索引
+	newTokenProxyMap := make(map[string]string)
+	for tokenIndexStr, proxyURL := range pm.tokenProxyMap {
+		var oldIndex int
+		if _, err := fmt.Sscanf(tokenIndexStr, "%d", &oldIndex); err != nil {
+			continue // 跳过非数字索引
+		}
+
+		if deletedSet[oldIndex] {
+			// 已删除的token，减少代理的分配计数
+			for _, proxy := range pm.proxies {
+				if proxy.URL == proxyURL && proxy.AssignedCount > 0 {
+					proxy.AssignedCount--
+					break
+				}
+			}
+			continue
+		}
+
+		// 计算新索引（减去在它之前被删除的数量）
+		newIndex := oldIndex
+		for _, deletedIdx := range deletedIndices {
+			if deletedIdx < oldIndex {
+				newIndex--
+			}
+		}
+
+		newTokenProxyMap[fmt.Sprintf("%d", newIndex)] = proxyURL
+	}
+
+	pm.tokenProxyMap = newTokenProxyMap
+
+	logger.Debug("清理并重建token代理映射",
+		logger.Int("deleted_count", len(deletedIndices)),
+		logger.Int("remaining_mappings", len(newTokenProxyMap)))
+}
+
 // GetProxyList 获取代理列表（用于 API 展示）
 func (pm *ProxyPoolManager) GetProxyList() []map[string]interface{} {
 	pm.mutex.RLock()

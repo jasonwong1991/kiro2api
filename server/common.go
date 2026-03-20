@@ -273,6 +273,11 @@ func classifyTokenError(statusCode int, responseBody []byte) TokenErrorSeverity 
 		return TokenErrorTemporary
 	}
 
+	// 429 Too Many Requests → 临时错误，需要冷却
+	if statusCode == http.StatusTooManyRequests {
+		return TokenErrorTemporary
+	}
+
 	// 其他状态码的临时错误关键词
 	temporaryPatterns := []string{
 		"unauthorized",
