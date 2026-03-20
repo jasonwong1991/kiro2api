@@ -67,6 +67,12 @@ func (tm *TokenManager) refreshSingleToken(authConfig AuthConfig, configIndex in
 
 		if err == nil {
 			token.Region = region
+
+			// profileArn：仅当配置中有时使用，不伪造生成
+			if authConfig.ProfileArn != "" {
+				token.ProfileArn = authConfig.ProfileArn
+			}
+
 			return token, nil
 		}
 

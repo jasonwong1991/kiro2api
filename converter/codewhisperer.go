@@ -488,7 +488,7 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 	// 设置代理相关字段 (基于参考文档的标准配置)
 	// 使用稳定的代理延续ID生成器，保持会话连续性 (KISS + DRY原则)
 	cwReq.ConversationState.AgentContinuationId = utils.GenerateStableAgentContinuationID(ctx)
-	cwReq.ConversationState.AgentTaskType = "vibe" // 固定设置为"vibe"，符合参考文档
+	cwReq.ConversationState.AgentTaskType = "vibe" // body 中保持 "vibe"，header x-amzn-kiro-agent-mode 单独控制为 "spec"
 
 	// 智能设置ChatTriggerType (KISS: 简化逻辑但保持准确性)
 	cwReq.ConversationState.ChatTriggerType = determineChatTriggerType(anthropicReq)

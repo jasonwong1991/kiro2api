@@ -54,8 +54,8 @@ func TestGenerateFingerprint_Format(t *testing.T) {
 	assert.Regexp(t, `^\d+\.\d+\.\d+$`, fp.NodeVersion, "NodeVersion 格式应该是 x.y.z")
 	assert.Regexp(t, `^1\.\d+\.\d+$`, fp.SDKVersion, "SDKVersion 格式应该是 1.x.y")
 
-	// 验证 KiroAgentMode (对齐 kiro.rs 固定为 vibe)
-	assert.Equal(t, KiroAgentModeFixed, fp.KiroAgentMode, "KiroAgentMode 应该固定为 vibe")
+	// 验证 KiroAgentMode (对齐 kiro.rs 固定为 spec)
+	assert.Equal(t, KiroAgentModeFixed, fp.KiroAgentMode, "KiroAgentMode 应该固定为 spec")
 }
 
 func TestGenerateFingerprint_VersionRanges(t *testing.T) {
@@ -63,9 +63,9 @@ func TestGenerateFingerprint_VersionRanges(t *testing.T) {
 	refreshToken := "test-token"
 	fp := GenerateFingerprint(refreshToken)
 
-	// 检查 OS 版本（应该是 darwin 24.x）
-	assert.True(t, strings.HasPrefix(fp.OSVersion, "24."),
-		"OS 版本应该是 24.x")
+	// 检查 OS 版本（应该是 darwin 25.x）
+	assert.True(t, strings.HasPrefix(fp.OSVersion, "25."),
+		"OS 版本应该是 25.x")
 
 	// 检查 Node 版本（对齐 kiro.rs 默认值 22.21.1）
 	assert.True(t, strings.HasPrefix(fp.NodeVersion, "22."),

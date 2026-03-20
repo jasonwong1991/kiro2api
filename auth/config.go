@@ -18,6 +18,7 @@ type AuthConfig struct {
 	ClientSecret string `json:"clientSecret,omitempty"`
 	Region       string `json:"region,omitempty"`
 	Disabled     bool   `json:"disabled,omitempty"`
+	ProfileArn   string `json:"profileArn,omitempty"` // 持久化的 profileArn，避免重启后变化
 }
 
 // DefaultRegion 默认 AWS 区域

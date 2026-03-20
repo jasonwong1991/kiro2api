@@ -7,13 +7,13 @@ import (
 
 // 固定版本号常量
 const (
-	SDKVersionFixed     = "1.0.27"  // aws-sdk-js 固定版本 (所有请求统一使用)
-	KiroIDEVersion      = "0.8.140" // KiroIDE 固定版本
-	NodeVersionFixed    = "22.21.1" // Node.js 固定版本
-	DarwinVersion       = "24.6.0"  // macOS Darwin 固定版本
+	SDKVersionFixed     = "1.0.34"  // aws-sdk-js 固定版本 (所有请求统一使用)
+	KiroIDEVersion      = "0.11.63" // KiroIDE 固定版本
+	NodeVersionFixed    = "22.22.0" // Node.js 固定版本
+	DarwinVersion       = "25.3.0"  // macOS Darwin 固定版本
 	LinuxKernel         = "6.8.0"   // Linux 内核版本
 	WindowsVersion      = "10.0"    // Windows 版本
-	KiroAgentModeFixed  = "vibe"    // Kiro Agent Mode 固定值 (对齐 kiro.rs)
+	KiroAgentModeFixed  = "spec"    // Kiro Agent Mode 固定值 (对齐 kiro.rs)
 	IDCAmzUserAgent     = "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE" // IdC 刷新固定 User-Agent
 )
 
