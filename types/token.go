@@ -41,6 +41,7 @@ type Token struct {
 	// 运行时字段（不序列化）
 	ConfigIndex int          `json:"-"` // 配置索引
 	HTTPClient  *http.Client `json:"-"` // 代理客户端
+	ProxyURL    string       `json:"-"` // 代理URL（运行时）
 }
 
 // FromRefreshResponse 从RefreshResponse创建Token

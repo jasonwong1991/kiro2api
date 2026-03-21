@@ -262,10 +262,10 @@ func TestProxyPoolManager_Fallback(t *testing.T) {
 	}
 	defer pm.Stop()
 
-	// 手动标记所有代理为不健康
+	// 手动标记所有代理为不健康（拉黑1小时）
 	pm.mutex.Lock()
 	for _, proxy := range pm.proxies {
-		proxy.Healthy = false
+		proxy.BlacklistedUntil = time.Now().Add(1 * time.Hour)
 	}
 	pm.mutex.Unlock()
 

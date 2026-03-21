@@ -175,42 +175,66 @@ func TestRequestContext_GetBody(t *testing.T) {
 	assert.Equal(t, `{"hello":"world"}`, string(body))
 }
 
-func TestIsTokenInvalidUpstreamError(t *testing.T) {
+func TestClassifyTokenError(t *testing.T) {
 	tests := []struct {
 		name       string
 		statusCode int
 		body       string
-		expected   bool
+		expected   TokenErrorSeverity
 	}{
 		{
-			name:       "400 + temporarily is suspended 文本",
+			name:       "400 + temporarily is suspended → 确定性失效",
 			statusCode: http.StatusBadRequest,
 			body:       `{"message":"Your User ID temporarily is suspended."}`,
-			expected:   true,
+			expected:   TokenErrorDefinitive,
 		},
 		{
-			name:       "400 + TEMPORARILY_SUSPENDED 代码",
+			name:       "400 + TEMPORARILY_SUSPENDED → 确定性失效",
 			statusCode: http.StatusBadRequest,
 			body:       `{"reason":"TEMPORARILY_SUSPENDED"}`,
-			expected:   true,
+			expected:   TokenErrorDefinitive,
 		},
 		{
-			name:       "400 普通错误不应判定为token失效",
+			name:       "400 普通错误 → 无token错误",
 			statusCode: http.StatusBadRequest,
 			body:       `{"message":"invalid request body"}`,
-			expected:   false,
+			expected:   TokenErrorNone,
 		},
 		{
-			name:       "200 即使包含关键词也不是token失效",
+			name:       "200 即使包含关键词也非错误",
 			statusCode: http.StatusOK,
 			body:       `{"message":"temporarily is suspended"}`,
-			expected:   false,
+			expected:   TokenErrorNone,
+		},
+		{
+			name:       "429 → 账号级别临时错误",
+			statusCode: http.StatusTooManyRequests,
+			body:       `{"message":"too many requests"}`,
+			expected:   TokenErrorTemporary,
+		},
+		{
+			name:       "429 + IP关键词 → IP级别限流",
+			statusCode: http.StatusTooManyRequests,
+			body:       `{"message":"too many requests from this IP"}`,
+			expected:   TokenErrorIPRateLimit,
+		},
+		{
+			name:       "403 + too many + address → IP级别限流",
+			statusCode: http.StatusForbidden,
+			body:       `{"message":"too many requests from this address"}`,
+			expected:   TokenErrorIPRateLimit,
+		},
+		{
+			name:       "403 无已知模式 → 不标记",
+			statusCode: http.StatusForbidden,
+			body:       `{"message":"unknown error"}`,
+			expected:   TokenErrorNone,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			actual := isTokenInvalidUpstreamError(tt.statusCode, []byte(tt.body))
+			actual := classifyTokenError(tt.statusCode, []byte(tt.body))
 			assert.Equal(t, tt.expected, actual)
 		})
 	}

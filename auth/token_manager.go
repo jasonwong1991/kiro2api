@@ -328,8 +328,9 @@ func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 	// 注入代理客户端（如果启用）
 	if tm.proxyPool != nil && bestToken.Index >= 0 {
 		tokenIndexStr := fmt.Sprintf("%d", bestToken.Index)
-		if _, client, err := tm.proxyPool.GetProxyForToken(tokenIndexStr); err == nil && client != nil {
+		if proxyURL, client, err := tm.proxyPool.GetProxyForToken(tokenIndexStr); err == nil && client != nil {
 			token.HTTPClient = client
+			token.ProxyURL = proxyURL
 		}
 	}
 
@@ -380,8 +381,9 @@ func (tm *TokenManager) GetBestTokenWithUsage() (*types.TokenWithUsage, error) {
 	// 注入代理客户端（如果启用）
 	if tm.proxyPool != nil && bestToken.Index >= 0 {
 		tokenIndexStr := fmt.Sprintf("%d", bestToken.Index)
-		if _, client, err := tm.proxyPool.GetProxyForToken(tokenIndexStr); err == nil && client != nil {
+		if proxyURL, client, err := tm.proxyPool.GetProxyForToken(tokenIndexStr); err == nil && client != nil {
 			token.HTTPClient = client
+			token.ProxyURL = proxyURL
 		}
 	}
 
@@ -3213,6 +3215,11 @@ func (tm *TokenManager) Close() {
 // GetRefreshStats 获取刷新管理器统计信息
 func (tm *TokenManager) GetRefreshStats() map[string]any {
 	return tm.refreshManager.GetStats()
+}
+
+// GetProxyPool 获取代理池管理器（用于请求层报告代理失败）
+func (tm *TokenManager) GetProxyPool() *ProxyPoolManager {
+	return tm.proxyPool
 }
 
 // AddToken 添加新 token（自动保存）

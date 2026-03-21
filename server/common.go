@@ -34,7 +34,8 @@ type TokenErrorSeverity int
 
 const (
 	TokenErrorNone       TokenErrorSeverity = iota // 非token错误
-	TokenErrorTemporary                             // 临时错误，冷却不删除
+	TokenErrorTemporary                             // 临时错误（账号级别），冷却不删除
+	TokenErrorIPRateLimit                           // IP级别限流，拉黑代理不冷却账号
 	TokenErrorDefinitive                            // 确定性错误，永久删除
 )
 
@@ -237,7 +238,7 @@ func isCapacityError(responseBody []byte) bool {
 }
 
 // classifyTokenError 对上游错误进行分级分类
-// 返回 TokenErrorDefinitive（永久失效，应删除）、TokenErrorTemporary（临时错误，应冷却）或 TokenErrorNone
+// 返回 TokenErrorDefinitive（永久失效）、TokenErrorTemporary（账号级冷却）、TokenErrorIPRateLimit（IP级限流）或 TokenErrorNone
 func classifyTokenError(statusCode int, responseBody []byte) TokenErrorSeverity {
 	if statusCode < http.StatusBadRequest {
 		return TokenErrorNone
@@ -245,7 +246,7 @@ func classifyTokenError(statusCode int, responseBody []byte) TokenErrorSeverity 
 
 	body := strings.ToLower(string(responseBody))
 
-	// 确定性失效关键词（token本身无效，永久删除）
+	// 确定性失效关键词（token本身无效或账号被封禁，永久删除）
 	definitivePatterns := []string{
 		"invalid_grant",
 		"invalid_token",
@@ -258,9 +259,14 @@ func classifyTokenError(statusCode int, responseBody []byte) TokenErrorSeverity 
 		"unrecognizedclient",
 		"unauthorizedclient",
 		"security token included in the request is invalid",
+		// 封禁类（无论临时还是永久，都应删除）
 		"permanently suspended",
 		"permanently_suspended",
 		"permanently is suspended",
+		"temporarily suspended",
+		"temporarily_suspended",
+		"temporarily is suspended",
+		"suspended",
 	}
 	for _, pattern := range definitivePatterns {
 		if strings.Contains(body, pattern) {
@@ -268,34 +274,23 @@ func classifyTokenError(statusCode int, responseBody []byte) TokenErrorSeverity 
 		}
 	}
 
-	// 401/403 没有确定性关键词 → 视为临时错误
-	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
-		return TokenErrorTemporary
-	}
+	// 429 或 "too many" 类错误需要区分 IP 级别和账号级别
+	isTooMany := statusCode == http.StatusTooManyRequests ||
+		strings.Contains(body, "too many") ||
+		strings.Contains(body, "rate limit") ||
+		strings.Contains(body, "throttl")
 
-	// 429 Too Many Requests → 临时错误，需要冷却
-	if statusCode == http.StatusTooManyRequests {
-		return TokenErrorTemporary
-	}
-
-	// 其他状态码的临时错误关键词
-	temporaryPatterns := []string{
-		"unauthorized",
-		"forbidden",
-		"access denied",
-		"permission denied",
-		"bad credentials",
-		"temporarily suspended",
-		"temporarily_suspended",
-		"temporarily is suspended",
-		"suspended",
-	}
-	for _, pattern := range temporaryPatterns {
-		if strings.Contains(body, pattern) {
-			return TokenErrorTemporary
+	if isTooMany {
+		// IP级别限流关键词
+		if strings.Contains(body, "ip") || strings.Contains(body, "address") {
+			return TokenErrorIPRateLimit
 		}
+		// 默认视为账号级别限流
+		return TokenErrorTemporary
 	}
 
+	// 其他 401/403 不含已知模式 → 不标记，仅重试
+	// 避免误将未知错误冷却或删除
 	return TokenErrorNone
 }
 
@@ -433,6 +428,19 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 					)...)
 			}
 			lastErr = err
+			// 报告代理失败（如果使用了代理）
+			if tokenInfo.ProxyURL != "" {
+				tm := authService.GetTokenManager()
+				if pp := tm.GetProxyPool(); pp != nil {
+					pp.ReportProxyFailure(tokenInfo.ProxyURL)
+					pp.ResetTokenProxy(fmt.Sprintf("%d", tokenInfo.ConfigIndex))
+				}
+				logger.Warn("代理连接失败，拉黑代理",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.String("proxy_url", tokenInfo.ProxyURL),
+					)...)
+			}
 			if attempt < config.RetryMaxAttempts {
 				releaseIPSlot(c)
 				time.Sleep(config.UpstreamRetryDelay)
@@ -479,6 +487,29 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 						logger.String("response_body", string(body)),
 					)...)
 				authService.GetTokenManager().MarkTokenInvalid(tokenInfo.ConfigIndex)
+				releaseIPSlot(c)
+				time.Sleep(config.RetryDelay)
+				if !reacquireIPSlot(c) {
+					respondError(c, http.StatusTooManyRequests, "Too many concurrent requests from your IP during retry")
+					return nil, tokenInfo, fmt.Errorf("IP concurrency slot reacquire failed")
+				}
+				continue
+			} else if severity == TokenErrorIPRateLimit {
+				logger.Warn("检测到IP级别限流，拉黑代理并换代理重试",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Int("status_code", resp.StatusCode),
+						logger.Int("token_index", tokenInfo.ConfigIndex),
+						logger.String("response_body", string(body)),
+					)...)
+				// 拉黑当前代理，不冷却token
+				if tokenInfo.ProxyURL != "" {
+					tm := authService.GetTokenManager()
+					if pp := tm.GetProxyPool(); pp != nil {
+						pp.ReportProxyFailure(tokenInfo.ProxyURL)
+						pp.ResetTokenProxy(fmt.Sprintf("%d", tokenInfo.ConfigIndex))
+					}
+				}
 				releaseIPSlot(c)
 				time.Sleep(config.RetryDelay)
 				if !reacquireIPSlot(c) {
@@ -545,6 +576,19 @@ func executeCodeWhispererRequestWithRetry(c *gin.Context, anthropicReq types.Ant
 						logger.Int("token_index", tokenInfo.ConfigIndex),
 					)...)
 				authService.GetTokenManager().MarkTokenInvalid(tokenInfo.ConfigIndex)
+			} else if finalSeverity == TokenErrorIPRateLimit {
+				logger.Warn("最终错误为IP级别限流，拉黑代理",
+					addReqFields(c,
+						logger.Int("attempt", attempt),
+						logger.Int("token_index", tokenInfo.ConfigIndex),
+					)...)
+				if tokenInfo.ProxyURL != "" {
+					tm := authService.GetTokenManager()
+					if pp := tm.GetProxyPool(); pp != nil {
+						pp.ReportProxyFailure(tokenInfo.ProxyURL)
+						pp.ResetTokenProxy(fmt.Sprintf("%d", tokenInfo.ConfigIndex))
+					}
+				}
 			} else if finalSeverity == TokenErrorTemporary {
 				logger.Warn("最终错误为token临时错误，冷却token",
 					addReqFields(c,
