@@ -2145,9 +2145,15 @@ func (tm *TokenManager) InitializeBatchTokens() error {
 	var concurrency int
 	if tm.batchSize > 0 {
 		initCount = tm.batchSize
-		concurrency = tm.batchSize
 		if initCount > len(tm.configs) {
 			initCount = len(tm.configs)
+		}
+		// 并发度：有代理时 = 可用代理数量，无代理时逐个刷新
+		concurrency = 1
+		if tm.proxyPool != nil {
+			if healthyCount := tm.proxyPool.GetHealthyProxyCount(); healthyCount > 0 {
+				concurrency = healthyCount
+			}
 		}
 		logger.Info("使用活跃池模式（并发初始化）",
 			logger.Int("batch_size", tm.batchSize),
