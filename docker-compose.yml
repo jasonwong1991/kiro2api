@@ -1,4 +1,35 @@
 services:
+  # ============================================================================
+  # Cloudflare WARP SOCKS5 代理（默认出口，避免账号封禁）
+  # ============================================================================
+  warp:
+    image: caomingjun/warp
+    container_name: warp
+    restart: always
+    device_cgroup_rules:
+      - 'c 10:200 rwm'
+    environment:
+      - WARP_SLEEP=2
+      # - WARP_LICENSE_KEY= # 可选：填入 WARP+ 许可证密钥
+    cap_add:
+      - MKNOD
+      - AUDIT_WRITE
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - warp_data:/var/lib/cloudflare-warp
+    healthcheck:
+      test: ["CMD", "curl", "-x", "socks5h://127.0.0.1:1080", "-sf", "http://cp.cloudflare.com/generate_204"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ============================================================================
+  # kiro2api 主服务
+  # ============================================================================
   kiro2api:
     # 使用 GitHub Container Registry 预构建镜像
     # 支持 linux/amd64 和 linux/arm64 架构
@@ -11,6 +42,9 @@ services:
 
     container_name: kiro2api
     restart: unless-stopped
+    depends_on:
+      warp:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "/docker-entrypoint.sh"]
     ports:
       - "5656:8080"
@@ -66,9 +100,11 @@ services:
       # 代理池配置
       # ============================================================================
       # 代理池配置（支持文件路径或逗号分隔的代理列表）
-      # 文件路径示例: /app/proxies.txt
-      # 直接配置示例: http://user:pass@proxy1:8080,http://user:pass@proxy2:8080
-      - KIRO_PROXY_POOL=${KIRO_PROXY_POOL:-}
+      # 默认使用 WARP SOCKS5 代理作为出口，避免账号封禁
+      # 如需自定义代理，可设置为文件路径或逗号分隔的代理列表：
+      #   文件路径示例: /app/proxies.txt
+      #   直接配置示例: http://user:pass@proxy1:8080,http://user:pass@proxy2:8080
+      - KIRO_PROXY_POOL=${KIRO_PROXY_POOL:-socks5://warp:1080}
 
       # 健康检查URL（可选，默认 http://cp.cloudflare.com/generate_204）
       - KIRO_PROXY_HEALTH_CHECK_URL=${KIRO_PROXY_HEALTH_CHECK_URL:-}
@@ -148,4 +184,6 @@ services:
 
 volumes:
   aws_sso_cache:
+    driver: local
+  warp_data:
     driver: local
