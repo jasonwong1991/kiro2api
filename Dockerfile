@@ -6,7 +6,7 @@
 # syntax=docker/dockerfile:1.4
 
 # 构建阶段 - 使用 BUILDPLATFORM 在原生架构执行
-# 固定 Go 1.24，避免 sonic 在更新 Go 版本下的兼容性编译错误
+# 使用 Go 1.24，避免 sonic 在更新 Go 版本下的兼容性编译错误
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 # 安装交叉编译工具链
@@ -44,8 +44,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # 运行阶段
 FROM alpine:3.19
 
-# 安装运行时依赖（添加 su-exec 用于权限切换）
-RUN apk --no-cache add ca-certificates tzdata su-exec
+# 安装运行时依赖（添加 su-exec 用于权限切换，添加 Python 支持注册模块）
+RUN apk --no-cache add ca-certificates tzdata su-exec python3 py3-pip py3-cryptography py3-requests py3-urllib3
 
 # 创建非 root 用户
 RUN addgroup -g 1001 -S appgroup && \
@@ -59,6 +59,7 @@ COPY --from=builder /app/kiro2api .
 COPY --from=builder /app/static ./static
 COPY --from=builder /app/docker-entrypoint.sh /docker-entrypoint.sh
 COPY --from=builder /app/docker-init.sh /docker-init.sh
+COPY --from=builder /app/register ./register
 
 # 创建必要的目录并设置权限
 RUN mkdir -p /home/appuser/.aws/sso/cache && \
