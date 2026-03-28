@@ -1,33 +1,5 @@
 services:
   # ============================================================================
-  # Cloudflare WARP SOCKS5 代理（默认出口，避免账号封禁）
-  # ============================================================================
-  warp:
-    image: caomingjun/warp
-    container_name: warp
-    restart: always
-    device_cgroup_rules:
-      - 'c 10:200 rwm'
-    environment:
-      - WARP_SLEEP=2
-      # - WARP_LICENSE_KEY= # 可选：填入 WARP+ 许可证密钥
-    cap_add:
-      - MKNOD
-      - AUDIT_WRITE
-      - NET_ADMIN
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-      - net.ipv4.conf.all.src_valid_mark=1
-    volumes:
-      - warp_data:/var/lib/cloudflare-warp
-    healthcheck:
-      test: ["CMD", "curl", "-x", "socks5h://127.0.0.1:1080", "-sf", "http://cp.cloudflare.com/generate_204"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  # ============================================================================
   # kiro2api 主服务
   # ============================================================================
   kiro2api:
@@ -39,12 +11,9 @@ services:
     # build:
     #   context: .
     #   dockerfile: Dockerfile
-
+    build: '.'
     container_name: kiro2api
     restart: unless-stopped
-    depends_on:
-      warp:
-        condition: service_healthy
     entrypoint: ["/bin/sh", "/docker-entrypoint.sh"]
     ports:
       - "5656:8080"
@@ -59,12 +28,6 @@ services:
       # Token选择策略: sequential(顺序), random(随机), round_robin(轮询)
       # 推荐使用 round_robin 实现负载均衡
       - TOKEN_SELECTION_STRATEGY=${TOKEN_SELECTION_STRATEGY:-round_robin}
-
-      # RoundRobin 活跃池配置（用于 round_robin 策略）
-      # 维护固定数量的健康账号活跃池，账号出问题时立即替换
-      # 0 = 使用全部账号轮询（默认），N > 0 = 维护 N 个账号的活跃池
-      # 建议值：总账号数的 1/3 到 1/2，例如：15个账号设置为5，30个账号设置为10
-      - KIRO_BATCH_SIZE=${KIRO_BATCH_SIZE:-0}
 
       # ============================================================================
       # 认证配置
@@ -100,11 +63,10 @@ services:
       # 代理池配置
       # ============================================================================
       # 代理池配置（支持文件路径或逗号分隔的代理列表）
-      # 默认使用 WARP SOCKS5 代理作为出口，避免账号封禁
-      # 如需自定义代理，可设置为文件路径或逗号分隔的代理列表：
-      #   文件路径示例: /app/proxies.txt
-      #   直接配置示例: http://user:pass@proxy1:8080,http://user:pass@proxy2:8080
-      - KIRO_PROXY_POOL=${KIRO_PROXY_POOL:-socks5://warp:1080}
+      # 示例：
+      #   文件路径: /app/proxies.txt
+      #   直接配置: http://user:pass@proxy1:8080,http://user:pass@proxy2:8080
+      - KIRO_PROXY_POOL=${KIRO_PROXY_POOL:-}
 
       # 健康检查URL（可选，默认 http://cp.cloudflare.com/generate_204）
       - KIRO_PROXY_HEALTH_CHECK_URL=${KIRO_PROXY_HEALTH_CHECK_URL:-}
@@ -116,30 +78,25 @@ services:
       - KIRO_PROXY_MAX_FAILURES=${KIRO_PROXY_MAX_FAILURES:-}
 
       # ============================================================================
-      # IP 并发限制配置
+      # 自动注册配置 (Auto Registration)
       # ============================================================================
-      # 每个 IP 最大并发请求数（默认 5）
-      - KIRO_MAX_CONCURRENT_PER_IP=${KIRO_MAX_CONCURRENT_PER_IP:-5}
+      # 目标账号数量（默认 5000，设置为 0 禁用自动注册）
+      - KIRO_TARGET_ACCOUNTS=${KIRO_TARGET_ACCOUNTS:-10}
 
-      # IP 并发排队等待超时时间（默认 60s，超时返回 429）
-      - KIRO_IP_ACQUIRE_TIMEOUT=${KIRO_IP_ACQUIRE_TIMEOUT:-60s}
+      # 最大并发注册线程数（默认 50）
+      - KIRO_MAX_REGISTER_WORKERS=${KIRO_MAX_REGISTER_WORKERS:-50}
 
-      # IPv6 禁止开关（默认 false，不禁止）
-      # 优先级：ipv6_config.json > 环境变量 > 默认值
-      # 通过 Dashboard 或 API 修改后会自动保存到 ipv6_config.json
-      # 设置为 true 或 1 时，将拒绝所有 IPv6 请求
-      # 注意：管理 API 的 IPv6 控制端点不受此限制，避免"自锁"
-      - KIRO_IPV6_BLOCK_ENABLED=${KIRO_IPV6_BLOCK_ENABLED:-false}
+      # 账号检查间隔（默认 30s）
+      - KIRO_REGISTER_CHECK_INTERVAL=${KIRO_REGISTER_CHECK_INTERVAL:-30s}
 
-      # ============================================================================
-      # 真实客户端 IP 获取（反向代理/负载均衡场景）
-      # ============================================================================
-      # 配置可信代理（逗号分隔 IP/CIDR）。不配置则沿用 Gin 默认（信任所有代理）。
-      # 示例（常见内网/本机代理）：127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
-      - KIRO_TRUSTED_PROXIES=${KIRO_TRUSTED_PROXIES:-}
+      # 注册使用的代理（可选）
+      - KIRO_REGISTER_PROXY=${KIRO_REGISTER_PROXY:-http://wangzhenwang:Wang1234@146.56.142.77:2323}
 
-      # 如需完全禁用代理信任（强制只用 RemoteAddr；反向代理后会看到代理 IP）
-      - KIRO_DISABLE_PROXY_TRUST=${KIRO_DISABLE_PROXY_TRUST:-}
+      # 注册脚本目录
+      - KIRO_REGISTER_SCRIPT_DIR=${KIRO_REGISTER_SCRIPT_DIR:-/app/register}
+
+      # 邮箱提供商（可选）
+      - KIRO_REGISTER_EMAIL_PROVIDER=${KIRO_REGISTER_EMAIL_PROVIDER:-}
 
     volumes:
       # 启动自愈脚本（处理 tokens.json 目录挂载问题和权限修复）
@@ -153,13 +110,8 @@ services:
       # 本项目会自动将真实配置写入到 ./tokens.json/tokens.json（仍可持久化，但位置会变化）。
       # 可选：首次启动前执行 `echo '[]' > tokens.json`，避免目录/文件混淆。
 
-      # IPv6 配置文件（可写，支持 WebUI 管理持久化）
-      - ./ipv6_config.json:/app/ipv6_config.json
       # 权限修复：容器启动时会自动修复文件权限（chown 1001:1001），无需手动干预。
       - ./tokens.json:/app/tokens.json
-
-      # IP 白名单配置文件（可写，支持 WebUI 管理持久化）
-      - ./ip_whitelist.json:/app/ip_whitelist.json
 
       # 代理池配置文件（可选，只读挂载）
       # 如果使用文件配置代理池，取消注释以下行
@@ -184,6 +136,4 @@ services:
 
 volumes:
   aws_sso_cache:
-    driver: local
-  warp_data:
     driver: local
